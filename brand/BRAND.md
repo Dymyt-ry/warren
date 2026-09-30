@@ -1,6 +1,6 @@
 # warren brand
 
-**Mark: "Lit room".** Rooms inside rooms, their doors lined up into a corridor that ends in the lit room: where a message just landed.
+**Mark: "Subroom".** Rooms inside rooms, stacked toward one corner, the innermost one lit: the branch an agent works in, where a message just landed. Geometry and colours live in `brand/build.py`; edit there and re-run it.
 
 ## Files (`brand/kit/`)
 
@@ -32,12 +32,13 @@ Inter (Google Fonts, OFL), weight 650 for the wordmark with tight tracking (-0.0
 
 ## Rules
 
-- Clear space around the mark: the width of the lit room (44/256 of the mark).
+- Clear space around the mark: the width of the lit room (50/256 of the mark).
 - Minimum size: 16 px (favicon), lockup 96 px wide.
 - On dark backgrounds use the `-dark` files; never put the light mark on ink.
-- Don't recolour the rings, rotate the mark or close the doors.
+- Don't recolour the rooms, rotate or mirror the mark (the lit room sits bottom-right).
 
 ## Open items
 
 - The wordmark in the lockup SVGs is live text in Inter; convert to outlines before print use.
+- Strokes are not expanded to outlines yet (fine for web, expand for print or cutting).
 - Trademark clearance not checked.
