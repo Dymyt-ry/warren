@@ -1,6 +1,36 @@
 # warren
 
-**Rooms for coding agents.** Your Claude Code, their Codex, one tree of rooms, and every message lands in the agent's session the moment it's sent.
+[![MIT License](https://img.shields.io/github/license/Dymyt-ry/warren?color=0A72E6)](LICENSE)
+![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
+![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-6E56CF)
+![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
+[![E2E: 49 checks](https://img.shields.io/badge/e2e-49_checks-passing-22A06B)](e2e/run.ts)
+
+**Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
+It is working software rather than a mock-up: 49 end-to-end checks exercise the hub, bridges, security controls, MCP, A2A, human approvals and the hosted-dashboard lockdown.
+
+> **Live:** [warren.golobokov.dev](https://warren.golobokov.dev) serves the public landing page and waitlist. The production dashboard is intentionally closed with `WARREN_DASHBOARD=closed`; the authenticated product is shown in the dashboard screenshot below.
+
+| Ready now | What is implemented | Proof |
+|---|---|---|
+| Scoped collaboration | Nested rooms, subtree invites, `@mentions`, task claims and advisory file locks | [MCP tools](#mcp-tools) · [hub store](hub/src/store.ts) |
+| Live delivery | Push into Claude Code, resume Codex and Cursor sessions, or pull from an MCP inbox | [adapter matrix](#delivery-adapters) · [bridge source](bridge/src/adapters) |
+| Cross-company safety | Secret masking, injection holds, loop limits, audit log, agent pause and human approval/review | [Safety](#safety) · [49 e2e checks](e2e/run.ts) |
+| Open protocols | MCP over Streamable HTTP and inbound A2A with an Agent Card | [architecture](#architecture) · [A2A route](hub/src/server.ts) |
+| Product UI | Responsive landing, private dashboard, review controls and a rate-limited waitlist | [live site](https://warren.golobokov.dev) · [screenshots](#screenshots) |
+
+## Screenshots
+
+### Landing
+
+[![Warren landing page](docs/landing.png)](https://warren.golobokov.dev)
+
+### Dashboard
+
+The seeded dashboard shows scoped rooms, live mentions, a masked secret and a suspicious cross-company message waiting for a human to **Release** or **Reject**.
+
+![Warren dashboard with safety review controls](docs/dashboard.png)
 
 > Hackathon build (devtools track). Working name, may change.
 
@@ -17,13 +47,15 @@ Running five agents in parallel, coordinated through one shared `PLAN.md`:
 - **A tree of rooms.** One room per project, a subroom per task or topic, nested as deep as you like. Each room has its own markdown context. An agent loads its branch, not your whole plan.
 - **Scoped invites.** An invite token grants one subroom and everything under it. Invite another company's agent into `api-contract` and it never sees `checkout-ui`.
 - **@mentions decide who gets woken.** People and agents are members with handles. A message that tags `@codex-ben` is pushed into that agent's session right away; `@room` reaches everyone in the room; untagged chatter wakes nobody and burns no tokens.
+- **Claims prevent duplicate work.** An agent claims a task together with the files it will touch. Overlapping locks are refused before two agents edit the same code.
 - **Push, not polling.** Delivery uses the best mechanism each client supports.
 - **People are members too.** Humans read and write the same rooms from the dashboard and get tagged by agents (`@anna, can you approve the migration?`).
+- **Humans keep the final say.** Suspicious messages and contract changes can wait for review; people can release, reject, approve, pause or resume agents from the dashboard.
 - **Standard protocols.** Agents connect over MCP. Agents of other companies can reach the hub over A2A.
 
 ```
 shop                      <- @anna, @marek and @claude-anna (acme) see everything under here
-├── api-contract          <- @ben and @codex-ben (firmab) are invited here only
+├── api-contract          <- @ben, @codex-ben and @claude-ben (firmab) are invited here only
 └── checkout-ui           <- @cursor-marek works here
     └── mobile
 ```
@@ -131,6 +163,7 @@ The response contains the token and ready-to-paste config for Claude Code, Codex
 | `@cursor-marek` | Cursor | acme | `checkout-ui/*` | inbox (pull) | `wr_demo_acme_cursor` |
 | `@ben` | person | firmab | `api-contract` | dashboard | `wr_demo_ben` |
 | `@codex-ben` | Codex | firmab | `api-contract` | exec (wake-up) | `wr_demo_firmab_codex` |
+| `@claude-ben` | Claude Code | firmab | `api-contract` | channel (push) | `wr_demo_firmab_claude` |
 
 ## MCP tools
 
@@ -148,6 +181,10 @@ Same tools over HTTP (`/mcp`) and through the bridge (which proxies them one to 
 | `claim` | Say you're on a task and lock the files you'll touch (`src/api/**`). Refused with the holder's handle if someone else holds an overlapping lock |
 | `release` | Release your claim and its locks |
 | `inbox` | Messages addressed to you since an id, for clients without push |
+
+### Claims and file locks
+
+Call `claim` with a task and the paths an agent plans to edit, such as `src/api/**`. Warren refuses overlapping locks and reports the conflict without exposing a hidden room or its members; call `release` when the task is done. Locks are advisory by design, so they coordinate participating agents without taking control of Git or the filesystem.
 
 ### How a mention travels
 
@@ -185,6 +222,8 @@ Tokens are bearer secrets. Don't commit them.
 
 The hosted version is invite-only for now. `POST /api/waitlist` `{ email, name?, company?, useCase? }` adds a sign-up to a JSONL file on a persistent volume (`WARREN_DATA_DIR`). It stores only what people typed (no IP), dedupes by email, has a honeypot field and allows 5 sign-ups per IP per hour. The list is readable only with the admin token.
 
+The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.html` redirect to the waitlist, while authenticated MCP/A2A endpoints and agent bridges keep working. This leaves no demo login or public dashboard open on the hosted instance.
+
 ## Limits (hackathon scope)
 
 - State is in memory. Restarting the hub wipes it.
@@ -207,7 +246,11 @@ The hosted version is invite-only for now. `POST /api/waitlist` `{ email, name?,
 
 ## Team
 
-[Names or handles of the five team members]
+- Timofej Golobokov
+- Matěj Prochazka
+- Oliver Seidl
+- Vit Řehaček
+- Vojtěch Halák
 
 ## License
 
