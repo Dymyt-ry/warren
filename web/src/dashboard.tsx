@@ -94,8 +94,8 @@ function Dashboard() {
 
   return (
     <TooltipProvider delayDuration={600}>
-      <div className="grid h-dvh grid-cols-1 md:grid-cols-[264px_minmax(0,1fr)]">
-        <aside className="flex min-h-0 flex-col gap-6 border-border bg-card px-3 py-5 md:border-r">
+      <div className="grid h-dvh grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[264px_minmax(0,1fr)] md:grid-rows-1">
+        <aside className="flex max-h-[42dvh] min-h-0 flex-col gap-3 overflow-y-auto border-b border-border bg-card px-3 py-3 md:max-h-none md:gap-6 md:overflow-visible md:border-r md:border-b-0 md:py-5">
           <a href="/" className="px-2 no-underline">
             <Logo />
           </a>
@@ -122,12 +122,12 @@ function Dashboard() {
             </Select>
           </div>
 
-          <nav aria-label="Rooms" className="min-h-0 flex-1 overflow-y-auto">
+          <nav aria-label="Rooms" className="min-h-0 md:flex-1 md:overflow-y-auto">
             <p className="mb-1 px-3 text-xs font-medium text-muted-foreground">Rooms</p>
             <RoomTree rooms={rooms} selected={selected} onSelect={setSelected} me={me?.handle} />
           </nav>
 
-          <p role="status" className={cn("px-3 text-xs text-muted-foreground", status === "offline" && "text-coral")}>
+          <p role="status" className={cn("hidden px-3 text-xs text-muted-foreground md:block", status === "offline" && "text-coral")}>
             {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
           </p>
         </aside>
@@ -274,8 +274,8 @@ function RoomView({
   return (
     <div className="grid h-full grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px]">
       <section className="flex min-h-0 min-w-0 flex-col">
-        <header className="flex items-center justify-between gap-4 px-8 pt-6 pb-3">
-          <h1 className="flex min-w-0 flex-wrap items-baseline gap-x-2 font-heading text-2xl">
+        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-2 md:px-8 md:pt-6 md:pb-3">
+          <h1 className="flex min-w-0 basis-full flex-wrap items-baseline gap-x-2 font-heading text-xl sm:basis-auto md:text-2xl">
             {path.map((r, i) => (
               <span key={r.id} className={i === path.length - 1 ? "text-foreground" : "text-muted-foreground"}>
                 {r.name}
@@ -283,7 +283,7 @@ function RoomView({
               </span>
             ))}
           </h1>
-          <div className="flex shrink-0 items-center gap-1">
+          <div className="-ml-2 flex min-w-0 flex-wrap items-center gap-x-1 md:ml-0 md:shrink-0">
             <PolicyToggle room={room} me={me} token={token} />
             {me && (
               <Button variant="ghost" size="sm" onClick={addSubroom}>
@@ -307,7 +307,8 @@ function RoomView({
 }
 
 function RoomContext({ room, token, onSaved }: { room: Room; token: string | null; onSaved: (r: Room) => void }) {
-  const [open, setOpen] = useState(true);
+  // On a phone the context starts folded so the thread gets the screen.
+  const [open, setOpen] = useState(() => window.matchMedia("(min-width: 768px)").matches);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(room.context);
   const [error, setError] = useState<string | null>(null);
@@ -323,7 +324,7 @@ function RoomContext({ room, token, onSaved }: { room: Room; token: string | nul
   };
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="px-8 pb-2">
+    <Collapsible open={open} onOpenChange={setOpen} className="px-4 pb-2 md:px-8">
       <div className="flex items-center gap-3">
         <CollapsibleTrigger asChild>
           <button className="text-sm font-medium text-muted-foreground hover:text-foreground">
@@ -396,7 +397,7 @@ function Thread({
     <MessageScrollerProvider autoScroll>
       <MessageScroller className="min-h-0 flex-1">
         <MessageScrollerViewport>
-          <MessageScrollerContent className="flex flex-col gap-1 px-5 py-4">
+          <MessageScrollerContent className="flex flex-col gap-1 px-2 py-4 md:px-5">
             <MessageScrollerItem messageId="day">
               <Marker variant="separator" className="py-2">
                 <MarkerContent>Today</MarkerContent>
@@ -670,13 +671,13 @@ function Composer({
 
   if (!me)
     return (
-      <p className="m-0 px-8 pt-3 pb-6 text-sm text-muted-foreground">
+      <p className="m-0 px-4 pt-3 pb-4 md:px-8 md:pb-6 text-sm text-muted-foreground">
         Pick yourself under <span className="font-medium text-foreground">You are</span> to write in {room.name}.
       </p>
     );
 
   return (
-    <form className="px-8 pt-2 pb-6" onSubmit={(e) => (e.preventDefault(), send())}>
+    <form className="px-4 pt-2 pb-4 md:px-8 md:pb-6" onSubmit={(e) => (e.preventDefault(), send())}>
       <Popover open={open}>
         <PopoverAnchor asChild>
           <Textarea

@@ -180,43 +180,121 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 
 /* Sections below the fold: type and space, no boxes */
 .problem { padding: 120px 0 0; max-width: 720px; }
-.problem h2, .clients h2, .scope h2, .run h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
-.problem p, .scope p { font-size: 18px; color: var(--text-2); margin: 18px 0 0; max-width: 58ch; }
+.problem h2, .delivery h2, .scope h2, .safety h2, .closing h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
+.problem p, .scope p, .safety-copy p, .closing-panel > div > p { font-size: 18px; color: var(--text-2); margin: 18px 0 0; max-width: 58ch; }
+.landing h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
 
-.clients { padding: 112px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; }
-.clients dl { margin: 6px 0 0; display: grid; gap: 22px; }
-.clients dl > div { display: grid; grid-template-columns: minmax(0, 190px) minmax(0, 1fr); gap: 20px; }
-.clients dt { font-weight: 600; }
-.clients dd { margin: 0; color: var(--text-2); }
+/* Terminal: the one dark surface on the page, because that's where coding agents live */
+.term { background: #0E1116; color: #E6E8EC; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 8%, transparent), 0 14px 32px color-mix(in srgb, var(--text) 10%, transparent); }
+.term-bar { display: flex; gap: 6px; padding: 10px 12px 0; }
+.term-bar span { width: 9px; height: 9px; border-radius: 50%; background: #2A2F38; }
+.term pre { margin: 0; padding: 12px 14px 16px; font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.term .t-dim { color: #8B93A1; }
+.term .t-prompt { color: #3D9BFF; }
 
-.scope { padding: 112px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: center; }
-.scope-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
-.scope-pane { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 12px; box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 4%, transparent); }
-.scope-who { margin: 0 0 8px 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+/* Delivery: one mention fans out to four clients */
+.delivery { padding: 128px 0 0; }
+.delivery h2 { max-width: 16ch; }
+.delivery-source {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: fit-content; margin: 48px auto 0; padding: 8px 14px 8px 8px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px; font-size: 14px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 8%, transparent);
+}
+.delivery-msg { padding-left: 10px; border-left: 1px solid var(--border); }
+.delivery-fan { display: block; width: 100%; height: 72px; color: var(--text-2); }
+.delivery-clients { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
+.delivery-clients .term { min-height: 138px; }
+.delivery-clients h3 { margin-top: 18px; }
+.delivery-clients p { margin: 6px 0 0; color: var(--text-2); font-size: 15px; }
 
-.run { padding: 112px 0 0; max-width: 720px; }
-.run pre { margin: 24px 0 16px; font-size: 14.5px; line-height: 1.8; padding: 16px 0; border-block: 1px solid var(--border); overflow-x: auto; }
-.run p { color: var(--text-2); max-width: 58ch; }
+/* Scope: two views of the same project on the showcase's blue stage */
+.scope { padding: 144px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
+.scope-stage, .safety-stage { position: relative; margin: 0; padding: 40px 32px; }
+.scope-stage { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 16px; align-items: center; }
+.scope-backdrop {
+  position: absolute; inset: 0; border-radius: 28px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--blue) 7%, var(--bg)), color-mix(in srgb, var(--blue) 15%, var(--bg)));
+}
+.scope-pane { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 14px 10px 12px; box-shadow: 0 2px 4px color-mix(in srgb, var(--text) 4%, transparent), 0 16px 36px color-mix(in srgb, var(--blue) 12%, transparent); }
+.scope-who { display: flex; align-items: center; gap: 8px; margin: 0 0 8px 10px !important; font-size: 13px !important; font-weight: 600; color: var(--text) !important; }
+.invite-chip {
+  position: relative; display: flex; align-items: center; gap: 10px; max-width: 150px; padding: 10px 12px;
+  background: var(--surface); border: 1px dashed var(--text-2); border-radius: 12px; font-size: 13px; line-height: 1.35;
+}
+.invite-chip svg { flex: none; width: 18px; height: 18px; color: var(--blue); }
 
-/* Ft2 inline single line */
+/* Safety: a held message as a person sees it, then the rest of the controls */
+.safety { padding: 144px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
+.safety-stage { padding: 44px 36px 172px; }
+.safety-frame { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: 16px; padding: 8px; box-shadow: 0 2px 4px color-mix(in srgb, var(--text) 4%, transparent), 0 24px 60px color-mix(in srgb, var(--blue) 14%, transparent); }
+.held-box { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 8px; padding: 10px 12px; font-size: 13px; border: 1px dashed color-mix(in srgb, var(--text-2) 60%, transparent); border-radius: 10px; }
+.safety-log {
+  position: absolute; right: -12px; bottom: 28px; width: 300px; z-index: 2; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 2px 4px color-mix(in srgb, var(--text) 5%, transparent), 0 18px 44px color-mix(in srgb, var(--text) 12%, transparent);
+}
+.safety-log p { margin: 0 0 8px; }
+.safety-log svg { width: 14px; height: 14px; }
+.safety-log ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 12.5px; line-height: 1.35; }
+.safety-log li span { display: block; color: var(--text-2); }
+.controls { grid-column: 1 / -1; list-style: none; margin: 24px 0 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 28px; }
+.controls-icon { display: inline-grid; place-items: center; width: 32px; height: 32px; margin-bottom: 14px; border-radius: 30%; border: 1.5px solid var(--text); }
+.controls-icon svg { width: 16px; height: 16px; }
+.controls p { margin: 6px 0 0; color: var(--text-2); font-size: 15px; }
+
+/* Closing: the waitlist is the call; running it yourself sits beside it */
+.closing { padding: 152px 0 0; }
+.closing-panel {
+  display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 56px; align-items: center; padding: 56px;
+  border-radius: 32px; background: linear-gradient(160deg, color-mix(in srgb, var(--blue) 8%, var(--bg)), color-mix(in srgb, var(--blue) 18%, var(--bg)));
+}
+.waitlist-form { position: relative; display: flex; flex-direction: column; gap: 10px; margin-top: 28px; max-width: 520px; }
+.waitlist-row { display: flex; gap: 10px; }
+.waitlist-row > input { flex: 1; min-width: 0; }
+.waitlist-note { margin: 2px 0 0 !important; font-size: 13px !important; color: var(--text-2); }
+.waitlist-done { display: flex; align-items: center; gap: 10px; margin-top: 28px !important; font-size: 16px !important; font-weight: 500; color: var(--text) !important; }
+.waitlist-done svg { width: 22px; height: 22px; color: var(--blue); flex: none; }
+.closing-run > p:first-child { margin: 0 0 12px; font-weight: 600; }
+.closing-run > p:last-child { margin: 12px 0 0; color: var(--text-2); }
+
 .line-footer { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-top: 144px; padding: 24px 0 40px; border-top: 1px solid var(--border); font-size: 14px; color: var(--text-2); }
 .line-footer > span:nth-child(2) { flex: 1; min-width: 220px; }
 
 @media (max-width: 1000px) {
+  .cursor-float { display: none; }
   .showcase-frame { margin-right: 0; }
   .agent-card { position: relative; top: auto; right: auto; width: auto; max-width: 420px; margin: -64px 16px 0 auto; }
   .showcase-link, .action-chip { display: none; }
-  .clients, .scope { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .scope, .safety, .closing-panel { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .delivery-clients { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .delivery-fan { display: none; }
+  .delivery-source { margin: 32px 0 24px; }
+  .controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .closing-panel { padding: 36px; }
   .c-anna, .c-codex { display: none; }
 }
 @media (max-width: 640px) {
+  .float-nav { height: 52px; padding: 0 8px 0 14px; gap: 12px; }
+  .float-nav .nav-link { display: none; }
+  .float-nav-wrap { top: 8px; padding-top: 8px; }
+  .hero h1 { font-size: clamp(2.1rem, 9vw, 2.6rem); }
+  .delivery, .scope, .safety, .closing { padding-top: 88px; }
+  .delivery h2 { max-width: none; }
+  .scope-stage, .safety-stage { padding-inline: 14px; }
+  .line-footer { margin-top: 96px; gap: 12px; }
   .landing { padding: 0 16px; }
   .hero { padding: 48px 0 40px; min-height: 0; }
   .lede { font-size: 17px; }
   .cursor-float { display: none; }
   .app-still { grid-template-columns: minmax(0, 1fr); min-height: 440px; } /* sidebar hides via sm:flex in the markup */
   .agent-card { margin: -48px 0 0; max-width: none; }
-  .clients dl > div, .scope-panes { grid-template-columns: minmax(0, 1fr); }
+  .delivery-clients, .controls { grid-template-columns: minmax(0, 1fr); }
+  .scope-stage { grid-template-columns: minmax(0, 1fr); padding: 24px 16px; }
+  .invite-chip { max-width: none; }
+  .safety-stage { padding: 20px 12px 24px; }
+  .safety-log { position: relative; right: auto; bottom: auto; width: auto; margin-top: 12px; }
+  .closing-panel { padding: 24px; border-radius: 24px; }
+  .waitlist-row { flex-direction: column; }
   .problem { padding-top: 88px; }
 }
 
