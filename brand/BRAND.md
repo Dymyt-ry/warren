@@ -1,5 +1,7 @@
 # warren brand
 
+> **Locked 2026-09-30.** Mark, colours and type are final for the hackathon. Don't change them without asking Tim.
+
 **Mark: "Subroom".** Rooms inside rooms, stacked toward one corner, the innermost one lit: the branch an agent works in, where a message just landed. Geometry and colours live in `brand/build.py`; edit there and re-run it.
 
 ## Files (`brand/kit/`)
