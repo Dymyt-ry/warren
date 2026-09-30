@@ -28,13 +28,13 @@ const recent = new Map<string, number[]>(); // ip -> timestamps of sign-ups in t
 
 const field = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
 
-/** Adds a sign-up. Returns the person's position, and whether they were already on the list. */
-export function joinWaitlist(input: Record<string, unknown>, ip: string): { position: number; already: boolean } {
+/** Adds a sign-up. Returns the stored entry so the caller can send a confirmation. */
+export function joinWaitlist(input: Record<string, unknown>, ip: string): { position: number; already: boolean; entry: WaitlistEntry } {
   const email = field(input.email, 254).toLowerCase();
   if (!EMAIL.test(email)) throw new Error("a valid email is required");
 
   const existing = entries.findIndex((e) => e.email === email);
-  if (existing !== -1) return { position: existing + 1, already: true };
+  if (existing !== -1) return { position: existing + 1, already: true, entry: entries[existing] };
 
   const now = Date.now();
   const hits = (recent.get(ip) ?? []).filter((t) => now - t < 3_600_000);
@@ -51,7 +51,7 @@ export function joinWaitlist(input: Record<string, unknown>, ip: string): { posi
   mkdirSync(DIR, { recursive: true });
   appendFileSync(FILE, JSON.stringify(entry) + "\n");
   entries.push(entry);
-  return { position: entries.length, already: false };
+  return { position: entries.length, already: false, entry };
 }
 
 export class RateLimited extends Error {

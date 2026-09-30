@@ -8,6 +8,7 @@ import * as store from "./store.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
 import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
+import { sendWaitlistConfirmation } from "./email.js";
 
 const PORT = Number(process.env.PORT ?? 8790);
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
@@ -266,14 +267,15 @@ app.get("/api/audit", (req, res) => {
 
 // --- Waitlist ----------------------------------------------------------------
 
-app.post("/api/waitlist", (req, res) => {
+app.post("/api/waitlist", async (req, res) => {
   const b = req.body ?? {};
   // Honeypot: a field people never see. Bots fill it; pretend it worked.
   if (b.website) return void res.status(201).json({ ok: true, position: waitlistCount() + 1 });
   const ip = String(req.headers["cf-connecting-ip"] ?? req.ip ?? "unknown");
   try {
-    const { position, already } = joinWaitlist(b, ip);
-    res.status(already ? 200 : 201).json({ ok: true, position, already });
+    const { position, already, entry } = joinWaitlist(b, ip);
+    const confirmationSent = await sendWaitlistConfirmation(entry, position);
+    res.status(already ? 200 : 201).json({ ok: true, position, already, confirmationSent });
   } catch (e) {
     httpError(res, e instanceof RateLimited ? 429 : 400, e);
   }

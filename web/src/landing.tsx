@@ -483,14 +483,14 @@ function WaitlistForm({ autoFocus = false }: { autoFocus?: boolean }) {
   const [email, setEmail] = useState("");
   const [useCase, setUseCase] = useState("");
   const [trap, setTrap] = useState(""); // honeypot, hidden from people
-  const [state, setState] = useState<{ sending?: boolean; done?: number; again?: boolean; error?: string }>({});
+  const [state, setState] = useState<{ sending?: boolean; done?: number; again?: boolean; confirmationSent?: boolean; error?: string }>({});
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setState({ sending: true });
     try {
       const r = await api.joinWaitlist({ email, useCase, website: trap });
-      setState({ done: r.position, again: r.already });
+      setState({ done: r.position, again: r.already, confirmationSent: r.confirmationSent });
     } catch (err) {
       setState({ error: (err as Error).message });
     }
@@ -500,7 +500,10 @@ function WaitlistForm({ autoFocus = false }: { autoFocus?: boolean }) {
     return (
       <p className="waitlist-done" role="status">
         <CheckCircleIcon weight="fill" aria-hidden />
-        {state.again ? "You were already on the list" : "You're on the list"}, number {state.done}. We'll write to {email || "you"}.
+        <span>
+          <strong>{state.again ? "You're already on the list." : `You're in — spot #${state.done}.`}</strong>
+          <span>{state.confirmationSent ? `Confirmation sent to ${email}.` : `We'll email ${email} when your invite is ready.`}</span>
+        </span>
       </p>
     );
 
@@ -539,7 +542,7 @@ function WaitlistForm({ autoFocus = false }: { autoFocus?: boolean }) {
         className="absolute -left-[9999px] h-0 w-0 opacity-0"
       />
       {state.error && <p className="error m-0">{state.error}</p>}
-      <p className="waitlist-note">We keep what you type here and nothing else. No newsletter.</p>
+      <p className="waitlist-note">We'll send one confirmation and your invite. No newsletter.</p>
     </form>
   );
 }

@@ -221,7 +221,9 @@ Tokens are bearer secrets. Don't commit them.
 
 ## Waitlist
 
-The hosted version is invite-only for now. `POST /api/waitlist` `{ email, name?, company?, useCase? }` adds a sign-up to a JSONL file on a persistent volume (`WARREN_DATA_DIR`). It stores only what people typed (no IP), dedupes by email, has a honeypot field and allows 5 sign-ups per IP per hour. The list is readable only with the admin token.
+The hosted version is invite-only for now. `POST /api/waitlist` `{ email, name?, company?, useCase? }` adds a sign-up to a JSONL file on a persistent volume (`WARREN_DATA_DIR`) and sends a confirmation email when SMTP is configured. It stores only what people typed (no IP), dedupes by email, has a honeypot field and allows 5 sign-ups per IP per hour. The list is readable only with the admin token.
+
+Confirmation mail uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and optional `SMTP_FROM`. Delivery is best effort: an SMTP outage never removes or rejects a valid waitlist sign-up.
 
 The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.html` redirect to the waitlist, while authenticated MCP/A2A endpoints and agent bridges keep working. This leaves no demo login or public dashboard open on the hosted instance.
 

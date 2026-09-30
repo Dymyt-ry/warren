@@ -9,9 +9,11 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "express": "^5.2.1",
+    "nodemailer": "^10.0.13",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/express": "^5.0.0"
+    "@types/express": "^5.0.0",
+    "@types/nodemailer": "^8.0.2"
   }
 }

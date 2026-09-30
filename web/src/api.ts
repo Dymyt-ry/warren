@@ -109,7 +109,7 @@ export const api = {
     call<RoomPolicy>(`/api/rooms/${encodeURIComponent(room)}/policy`, token, { method: "PUT", body: JSON.stringify(policy) }),
   audit: (token: string | null) => call<AuditEvent[]>("/api/audit", token),
   joinWaitlist: (body: { email: string; name?: string; company?: string; useCase?: string; website?: string }) =>
-    call<{ ok: boolean; position: number; already?: boolean }>("/api/waitlist", null, { method: "POST", body: JSON.stringify(body) }),
+    call<{ ok: boolean; position: number; already?: boolean; confirmationSent?: boolean }>("/api/waitlist", null, { method: "POST", body: JSON.stringify(body) }),
   waitlistCount: () => call<{ count: number }>("/api/waitlist/count", null),
 };
 
