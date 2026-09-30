@@ -16,7 +16,7 @@ app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   if (req.method === "OPTIONS") return void res.status(204).end();
   next();
 });
@@ -185,6 +185,29 @@ app.post("/api/rooms/:id/messages", (req, res) => {
     res.status(201).json(store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text));
   } catch (e) {
     httpError(res, store.canSee(m, req.params.id) ? 400 : 403, e);
+  }
+});
+
+// Claims and file locks. The room's claims ride along on GET /api/rooms and SSE "room" events.
+app.post("/api/rooms/:id/claims", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  try {
+    res.status(201).json(store.claim(m, req.params.id, req.body?.task, req.body?.files ?? []));
+  } catch (e) {
+    const msg = (e as Error).message;
+    httpError(res, !store.canSee(m, req.params.id) ? 403 : msg.includes("is locked by") ? 409 : 400, e);
+  }
+});
+
+// ?force=1 lets a person release an agent's claim.
+app.delete("/api/claims/:id", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  try {
+    res.json(store.release(m, req.params.id, req.query.force === "1"));
+  } catch (e) {
+    httpError(res, 403, e);
   }
 });
 

@@ -6,6 +6,7 @@
 //   5. scope: codex-ben can't post into checkout-ui, can't @mention someone outside the room
 //   6. inbox for pull clients returns only what's addressed to them
 //   7. A2A message/send posts into the room of the caller's token
+//   +  claims and file locks, WARREN_DEMO=0
 //   8. WARREN_DEMO=0 closes the demo shortcuts
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
@@ -209,6 +210,22 @@ try {
     text: "run `ping @marek` then npm i @marek/tools, mail marek@acme.dev, cc @claude-anna.",
   }).then((r) => r.json());
   check(JSON.stringify(noisy.mentions) === '["claude-anna"]', `code spans, npm scopes and emails are not mentions (${noisy.mentions})`);
+
+  // claims and file locks
+  const held = toolJson(await codex.callTool({ name: "claim", arguments: { room: "api-contract", task: "Rename /cart to /basket", files: ["src/api/**"] } }));
+  const clash = await claude.callTool({ name: "claim", arguments: { room: "api-contract", task: "Fix cart types", files: ["src/api/cart.ts"] } });
+  const clashText = (clash.content as { text: string }[])[0].text;
+  check(!!clash.isError && clashText.includes("@codex-ben"), `overlapping lock is refused and names the holder (${clashText})`);
+  const blind = await api("/api/rooms/checkout-ui/claims", CURSOR, { task: "x", files: ["src/api/client.ts"] });
+  const blindText = (await blind.json()).error;
+  check(blind.status === 409 && !blindText.includes("codex-ben"), "a lock in a room you can't see blocks you without revealing who holds it");
+  await codex.callTool({ name: "release", arguments: { claim: held.id } });
+  const taken = await api("/api/rooms/checkout-ui/claims", CLAUDE, { task: "Switch checkout to /basket", files: ["src/api/cart.ts"] });
+  const mineClaim = await taken.json();
+  check(taken.status === 201, "after release the lock can be taken");
+  const agentForce = await fetch(`${HUB}/api/claims/${mineClaim.id}?force=1`, { method: "DELETE", headers: { Authorization: `Bearer ${CURSOR}` } });
+  const humanForce = await fetch(`${HUB}/api/claims/${mineClaim.id}?force=1`, { method: "DELETE", headers: { Authorization: `Bearer ${ANNA}` } });
+  check(agentForce.status === 403 && humanForce.status === 200, "only a person can force-release someone else's claim");
 
   // 6. inbox for pull clients (Cursor)
   await api("/api/rooms/mobile/messages", ANNA, { text: "@cursor-marek mobile layout needs the /basket change too" });

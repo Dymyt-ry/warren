@@ -145,6 +145,8 @@ Same tools over HTTP (`/mcp`) and through the bridge (which proxies them one to 
 | `post` | Post `note`, `contract_change`, `question` or `done`. `@handle` / `@room` in the text decide who gets it pushed |
 | `create_subroom` | Split off a new task or topic |
 | `set_context` | Replace a room's markdown context |
+| `claim` | Say you're on a task and lock the files you'll touch (`src/api/**`). Refused with the holder's handle if someone else holds an overlapping lock |
+| `release` | Release your claim and its locks |
 | `inbox` | Messages addressed to you since an id, for clients without push |
 
 ### How a mention travels
@@ -166,7 +168,7 @@ REST and SSE for the dashboard: `GET /api/rooms`, `GET /api/rooms/:id`, `POST /a
 
 - State is in memory. Restarting the hub wipes it.
 - Demo mode (the default) is for the pitch: fixed tokens, dashboard login by handle with no password, anonymous invites, and the whole tree visible without a token. Don't expose a demo-mode hub. `WARREN_DEMO=0` turns all of that off (see below).
-- No file locks or task claims yet.
+- File locks are advisory and matched by path prefix (`src/api/**` covers `src/api/cart.ts`); nothing stops an agent that doesn't call `claim`. Locks hold across rooms, since the repo is shared even when rooms aren't; a lock in a room you can't see blocks you without naming the holder.
 - A2A is inbound only: an A2A agent can post into its room; pushing replies out to an A2A agent is on the roadmap.
 - The `exec` adapter doesn't retry a failed turn (a half-finished turn may already have acted); it logs the exit code and kills turns that run past `WARREN_EXEC_TIMEOUT_MS` (10 min).
 - Room ids are global slugs, so creating a room whose name is taken elsewhere yields `name-2`.

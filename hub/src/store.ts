@@ -23,12 +23,23 @@ export interface Message {
   at: string;
 }
 
+/** "I'm on this": a task, optionally with the files the holder is about to change. */
+export interface Claim {
+  id: string;
+  roomId: string;
+  by: string; // handle
+  task: string;
+  files: string[]; // paths or globs; "src/api/*" and "src/api/**" lock everything under src/api/
+  at: string;
+}
+
 export interface Room {
   id: string;
   parentId: string | null;
   name: string;
   context: string; // markdown, replaces the shared AGENTS.md / PLAN.md file
   messages: Message[];
+  claims: Claim[];
 }
 
 export interface Member {
@@ -60,7 +71,7 @@ export const publicMember = ({ token: _t, ...m }: Member): PublicMember => ({ ..
 export function createRoom(name: string, parentId: string | null, context = ""): Room {
   if (!name?.trim()) throw new Error("room name is required");
   if (parentId && !rooms.has(parentId)) throw new Error(`unknown parent room ${parentId}`);
-  const room: Room = { id: uniqueSlug(name, rooms), parentId, name: name.trim(), context, messages: [] };
+  const room: Room = { id: uniqueSlug(name, rooms), parentId, name: name.trim(), context, messages: [], claims: [] };
   rooms.set(room.id, room);
   events.emit("room", room);
   return room;
@@ -229,6 +240,68 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Messag
   return all
     .slice(idx + 1)
     .filter((x) => x.from !== m.handle && (!mentionsOnly || isFor(m, x)));
+}
+
+// --- claims and file locks ---------------------------------------------------
+
+/** Directory prefix a path or glob covers: "src/api/**" -> "src/api/", "src/a.ts" -> "src/a.ts". */
+function lockPrefix(pattern: string): string {
+  const p = pattern.trim().replace(/^\.\//, "");
+  const star = p.search(/[*?[{]/);
+  return star === -1 ? p : p.slice(0, star);
+}
+
+function overlaps(a: string, b: string): boolean {
+  const pa = lockPrefix(a);
+  const pb = lockPrefix(b);
+  return pa.startsWith(pb) || pb.startsWith(pa);
+}
+
+/** Locks held by others that overlap `files`, across every room: the repo is shared even when rooms aren't. */
+export function lockConflicts(m: Member, files: string[]): { claim: Claim; file: string; held: string }[] {
+  const out: { claim: Claim; file: string; held: string }[] = [];
+  for (const r of rooms.values())
+    for (const c of r.claims)
+      if (c.by !== m.handle)
+        for (const file of files) for (const held of c.files) if (overlaps(file, held)) out.push({ claim: c, file, held });
+  return out;
+}
+
+/**
+ * Claim a task in a room, optionally locking files. Refuses when another member
+ * holds an overlapping lock. The holder is named only if the caller can see
+ * that room; otherwise the conflict is reported without details.
+ */
+export function claim(m: Member, roomId: string, task: string, files: string[] = []): Claim {
+  if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
+  if (typeof task !== "string" || !task.trim()) throw new Error("task is required");
+  if (!Array.isArray(files) || files.some((f) => typeof f !== "string" || !f.trim())) throw new Error("files must be paths");
+  const conflicts = lockConflicts(m, files);
+  if (conflicts.length) {
+    const c = conflicts[0];
+    const who = canSee(m, c.claim.roomId) ? `@${c.claim.by} (room ${c.claim.roomId}: "${c.claim.task}")` : "a member of another room";
+    throw new Error(`${c.file} is locked by ${who} via ${c.held}`);
+  }
+  const room = rooms.get(roomId)!;
+  const created: Claim = { id: randomUUID(), roomId, by: m.handle, task: task.trim(), files, at: new Date().toISOString() };
+  room.claims.push(created);
+  events.emit("room", room);
+  return created;
+}
+
+/** Release your own claim (or any claim in a room you see, when `force`: a person unblocking a stuck agent). */
+export function release(m: Member, claimId: string, force = false): Claim {
+  for (const room of rooms.values()) {
+    const i = room.claims.findIndex((c) => c.id === claimId);
+    if (i === -1) continue;
+    const c = room.claims[i];
+    if (!canSee(m, room.id)) break;
+    if (c.by !== m.handle && !(force && m.kind === "human")) throw new Error(`claim is held by @${c.by}; only a person can force-release it`);
+    room.claims.splice(i, 1);
+    events.emit("room", room);
+    return c;
+  }
+  throw new Error(`no such claim ${claimId}`);
 }
 
 // --- helpers ---------------------------------------------------------------
