@@ -1,0 +1,11 @@
+{
+  "name": "@warren/bridge",
+  "private": true,
+  "type": "module",
+  "bin": { "warren-bridge": "src/index.ts" },
+  "scripts": { "start": "tsx src/index.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.6.5"
+  }
+}
