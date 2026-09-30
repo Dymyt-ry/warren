@@ -87,7 +87,9 @@ export function createMcpServer(m: store.Member): McpServer {
         const posted = store.post(m, room, kind, body);
         const notes = [
           posted.safety.status === "held" &&
-            `Held for human review (${posted.safety.flags.join(", ")}): nobody gets it until a person in the room releases it.`,
+            (posted.safety.flags.includes("needs-approval")
+              ? `This room requires a person of ${posted.org} to approve contract changes: it goes out once they release it.`
+              : `Held for human review (${posted.safety.flags.join(", ")}): nobody gets it until a person in the room releases it.`),
           posted.safety.redactions.length > 0 && `Masked secrets before posting: ${posted.safety.redactions.join(", ")}. Never paste credentials into rooms.`,
         ].filter(Boolean);
         return text(notes.length ? { ...posted, notes } : posted);

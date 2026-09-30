@@ -22,6 +22,7 @@ const CLAUDE = "wr_demo_acme_claude";
 const CODEX = "wr_demo_firmab_codex";
 const CURSOR = "wr_demo_acme_cursor";
 const ANNA = "wr_demo_anna";
+const BEN = "wr_demo_ben";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failed = false;
 const check = (ok: boolean, name: string) => {
@@ -53,7 +54,7 @@ async function startHub(port: number, env: Record<string, string> = {}) {
   const up = () => fetch(`${url}/.well-known/agent-card.json`).then((r) => r.ok, () => false);
   if (await up()) throw new Error(`port ${port} is taken: a hub from an earlier run is still up`);
   const child = spawn("npx", ["tsx", "hub/src/server.ts"], {
-    env: { ...process.env, PORT: String(port), ...env },
+    env: { ...process.env, PORT: String(port), WARREN_DATA_DIR: mkdtempSync(join(tmpdir(), "warren-data-")), ...env },
     stdio: ["ignore", "ignore", "inherit"],
     detached: true,
   });
@@ -286,6 +287,51 @@ try {
     last = toolJson(await agent.callTool({ name: "post", arguments: { room: loopRoom.id, text: `ping ${i}` } }));
   }
   check(last?.safety.status === "held" && last.safety.flags.includes("agent-loop"), "agents talking to each other are paused after 8 messages without a person");
+
+  // 10. human in the loop: pause an agent, approve contract changes, audit trail
+  const agentPause = await api("/api/members/claude-anna/pause", CODEX, { paused: true });
+  const otherOrg = await api("/api/members/claude-anna/pause", BEN, { paused: true });
+  const paused = await api("/api/members/claude-anna/pause", ANNA, { paused: true }).then((r) => r.json());
+  check(agentPause.status === 403 && otherOrg.status === 403 && paused.paused === true, "only a person of the agent's own org can pause it");
+  const pausedPost = await claude.callTool({ name: "post", arguments: { room: "api-contract", text: "still here?" } });
+  const beforePause = pushed.length;
+  await api("/api/rooms/api-contract/messages", BEN, { text: "@claude-anna are you there?" });
+  await sleep(500);
+  check(!!pausedPost.isError && pushed.length === beforePause, "a paused agent can't post and gets no pushes");
+  await api("/api/members/claude-anna/pause", ANNA, { paused: false });
+
+  const policy = await fetch(`${HUB}/api/rooms/api-contract/policy`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${BEN}` },
+    body: JSON.stringify({ approveContractChanges: true }),
+  }).then((r) => r.json());
+  const proposal = toolJson(
+    await codex.callTool({ name: "post", arguments: { room: "api-contract", kind: "contract_change", text: "@claude-anna POST /basket now needs a currency field" } }),
+  );
+  check(
+    policy.approveContractChanges && proposal.safety.status === "held" && proposal.safety.flags.includes("needs-approval"),
+    "with the room policy on, an agent's contract_change waits for approval",
+  );
+  const wrongOrg = await api(`/api/messages/${proposal.id}/review`, ANNA, { decision: "release" });
+  const approved = await api(`/api/messages/${proposal.id}/review`, BEN, { decision: "release" }).then((r) => r.json());
+  check(wrongOrg.status === 403 && approved.safety.reviewedBy === "ben", "only a person of the proposing org (ben) approves it");
+  check(!!(await waitFor(() => pushed.find((p) => p.meta.msg_id === proposal.id))), "the approved contract change is pushed to claude-anna");
+  const trail = await api("/api/audit", ANNA).then((r) => r.json());
+  const types = new Set(trail.map((e: { type: string }) => e.type));
+  check(["held", "rejected", "released", "redacted", "paused", "resumed", "policy"].every((t) => types.has(t)), `audit trail records every safety action (${[...types]})`);
+
+  // 11. waitlist
+  const signUp = (body: Record<string, string>) => api("/api/waitlist", undefined, body);
+  const first = await signUp({ email: "Jane@Example.com", name: "Jane X", useCase: "agents across two agencies" });
+  const again = await signUp({ email: "jane@example.com" }).then((r) => r.json());
+  const invalid = await signUp({ email: "not-an-email" });
+  const bot = await signUp({ email: "bot@example.com", website: "http://spam.example" });
+  const count = await api("/api/waitlist/count").then((r) => r.json());
+  check(first.status === 201 && again.already && invalid.status === 400 && bot.status === 201 && count.count === 1, "waitlist: sign-up, dedupe, validation, honeypot");
+  for (let i = 0; i < 4; i++) await signUp({ email: `p${i}@example.com` });
+  const limited = await signUp({ email: "p9@example.com" });
+  const listAnon = await api("/api/waitlist");
+  check(limited.status === 429 && listAnon.status === 401, "waitlist: 5 sign-ups per IP per hour, list needs the admin token");
 
   // 8. WARREN_DEMO=0: no demo team, no login by handle, no anonymous reads, invites need the admin token
   const PRIVATE = `http://localhost:${PORT - 1}`;

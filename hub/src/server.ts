@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
+import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
 
 const PORT = Number(process.env.PORT ?? 8790);
 const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
 
 const app = express();
+app.set("trust proxy", true); // behind Cloudflare + Traefik
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -227,6 +229,59 @@ app.post("/api/messages/:id/review", (req, res) => {
   }
 });
 
+// --- Human in the loop -------------------------------------------------------
+
+// A person stops or resumes an agent of their own org.
+app.post("/api/members/:handle/pause", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  try {
+    res.json(store.publicMember(store.setPaused(m, req.params.handle, req.body?.paused !== false)));
+  } catch (e) {
+    httpError(res, (e as Error).message.startsWith("no such") ? 404 : 403, e);
+  }
+});
+
+// { approveContractChanges: true }: agents' contract changes wait for a person of their org.
+app.put("/api/rooms/:id/policy", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  try {
+    res.json(store.setPolicy(m, req.params.id, req.body ?? {}).policy);
+  } catch (e) {
+    httpError(res, 403, e);
+  }
+});
+
+app.get("/api/audit", (req, res) => {
+  const m = reader(req, res);
+  if (m === false) return;
+  res.json(store.auditFor(m));
+});
+
+// --- Waitlist ----------------------------------------------------------------
+
+app.post("/api/waitlist", (req, res) => {
+  const b = req.body ?? {};
+  // Honeypot: a field people never see. Bots fill it; pretend it worked.
+  if (b.website) return void res.status(201).json({ ok: true, position: waitlistCount() + 1 });
+  const ip = String(req.headers["cf-connecting-ip"] ?? req.ip ?? "unknown");
+  try {
+    const { position, already } = joinWaitlist(b, ip);
+    res.status(already ? 200 : 201).json({ ok: true, position, already });
+  } catch (e) {
+    httpError(res, e instanceof RateLimited ? 429 : 400, e);
+  }
+});
+
+app.get("/api/waitlist/count", (_req, res) => void res.json({ count: waitlistCount() }));
+
+// The list itself: admin token only, never in demo mode without one.
+app.get("/api/waitlist", (req, res) => {
+  if (!isAdmin(req)) return void res.status(401).json({ error: "admin token required" });
+  res.json(waitlistEntries());
+});
+
 // Messages addressed to the caller since ?since=<id>; ?all=1 for everything visible.
 app.get("/api/inbox", (req, res) => {
   const m = requireCaller(req, res);
@@ -272,12 +327,17 @@ app.get("/api/events", (req: Request, res: Response) => {
   const onPresence = (p: { handle: string; online: boolean }) => {
     if (!mentionsOnly && knows(p.handle)) send("presence", p);
   };
+  // People (and the demo overview) see the audit trail of rooms they can see.
+  const onAudit = (a: store.AuditEvent) => {
+    if (!mentionsOnly && (!m || (m.kind === "human" && store.canSee(m, a.roomId)))) send("audit", a);
+  };
   const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
   store.events.on("message", onMessage);
   store.events.on("message_update", onMessageUpdate);
   store.events.on("room", onRoom);
   store.events.on("member", onMember);
   store.events.on("presence", onPresence);
+  store.events.on("audit", onAudit);
   if (m) store.trackConnection(m, 1);
   req.on("close", () => {
     clearInterval(ping);
@@ -286,6 +346,7 @@ app.get("/api/events", (req: Request, res: Response) => {
     store.events.off("room", onRoom);
     store.events.off("member", onMember);
     store.events.off("presence", onPresence);
+    store.events.off("audit", onAudit);
     if (m) store.trackConnection(m, -1);
   });
 });

@@ -42,6 +42,23 @@ export interface Room {
   context: string; // markdown, replaces the shared AGENTS.md / PLAN.md file
   messages: Message[];
   claims: Claim[];
+  policy: RoomPolicy;
+}
+
+/** Per-room human-in-the-loop rules, set by a person in the room. */
+export interface RoomPolicy {
+  approveContractChanges: boolean; // an agent's contract_change waits for a person of its own org
+}
+
+/** Everything a person may want to trace later: holds, reviews, masked secrets, pauses, policy changes. */
+export interface AuditEvent {
+  id: string;
+  at: string;
+  type: "held" | "released" | "rejected" | "redacted" | "paused" | "resumed" | "policy";
+  roomId: string;
+  actor: string; // handle, or "hub" for automatic actions
+  target?: string; // message id or member handle
+  detail: string;
 }
 
 export interface Member {
@@ -52,6 +69,7 @@ export interface Member {
   scopeRoomId: string; // sees this room and its descendants
   adapter: Adapter; // how the member gets pushed messages
   token: string;
+  paused: boolean; // stopped by a person: can't post, gets no pushes
 }
 
 /** A member as other members see it: without the token, with presence. */
@@ -73,7 +91,7 @@ export const publicMember = ({ token: _t, ...m }: Member): PublicMember => ({ ..
 export function createRoom(name: string, parentId: string | null, context = ""): Room {
   if (!name?.trim()) throw new Error("room name is required");
   if (parentId && !rooms.has(parentId)) throw new Error(`unknown parent room ${parentId}`);
-  const room: Room = { id: uniqueSlug(name, rooms), parentId, name: name.trim(), context, messages: [], claims: [] };
+  const room: Room = { id: uniqueSlug(name, rooms), parentId, name: name.trim(), context, messages: [], claims: [], policy: { approveContractChanges: false } };
   rooms.set(room.id, room);
   events.emit("room", room);
   return room;
@@ -133,6 +151,7 @@ export function addMember(input: {
     scopeRoomId: input.scopeRoomId,
     adapter: input.adapter ?? (kind === "human" ? "dashboard" : "inbox"),
     token: input.token ?? `wr_${randomBytes(12).toString("hex")}`,
+    paused: false,
   };
   members.set(member.handle, member);
   byToken.set(member.token, member);
@@ -216,6 +235,7 @@ function agentStreak(room: Room): number {
 
 export function post(m: Member, roomId: string, kind: MessageKind, text: string): Message {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
+  if (m.paused) throw new Error(`@${m.handle} is paused by a person of ${m.org}; ask them to resume you`);
   if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of ${MESSAGE_KINDS.join(", ")}`);
   const room = rooms.get(roomId)!;
@@ -226,7 +246,9 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
   const crossOrg = roomMembers(roomId).some((x) => x.org !== m.org);
   const loop = m.kind === "agent" && agentStreak(room) >= LOOP_LIMIT;
   if (loop) flags.push("agent-loop");
-  const held = loop || (flags.length > 0 && crossOrg);
+  const needsApproval = room.policy.approveContractChanges && kind === "contract_change" && m.kind === "agent";
+  if (needsApproval) flags.push("needs-approval");
+  const held = loop || needsApproval || (flags.length > 0 && crossOrg);
 
   const msg: Message = {
     id: randomUUID(),
@@ -242,6 +264,9 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
   };
   room.messages.push(msg);
   events.emit("message", msg);
+  if (clean.redactions.length)
+    audit({ type: "redacted", roomId, actor: "hub", target: msg.id, detail: `masked ${clean.redactions.join(", ")} in a message from @${m.handle}` });
+  if (held) audit({ type: "held", roomId, actor: "hub", target: msg.id, detail: `held a message from @${m.handle}: ${flags.join(", ")}` });
   return msg;
 }
 
@@ -262,8 +287,18 @@ export function review(m: Member, messageId: string, decision: "release" | "reje
   if (m.kind !== "human") throw new Error("only a person can review held messages");
   if (msg.from === m.handle) throw new Error("you can't review your own message");
   if (msg.safety.status !== "held") throw new Error(`message is ${msg.safety.status}, not held`);
+  // A contract change is approved by the people who own the agent that proposed it.
+  if (msg.safety.flags.includes("needs-approval") && m.org !== msg.org)
+    throw new Error(`only a person of ${msg.org} can approve @${msg.from}'s contract change`);
   msg.safety = { ...msg.safety, status: decision === "release" ? "released" : "rejected", reviewedBy: m.handle };
   events.emit("message_update", msg);
+  audit({
+    type: decision === "release" ? "released" : "rejected",
+    roomId: msg.roomId,
+    actor: m.handle,
+    target: msg.id,
+    detail: `${decision === "release" ? "released" : "rejected"} @${msg.from}'s held message (${msg.safety.flags.join(", ")})`,
+  });
   if (decision === "release") events.emit("message", msg); // now reaches the agents' streams
   return msg;
 }
@@ -282,7 +317,7 @@ export function roomView(viewer: Member | undefined, room: Room): Room {
 
 /** True when the message should be pushed to `m`: mentioned by handle or via @room, not their own, not held. */
 export function isFor(m: Member, msg: Message): boolean {
-  if (msg.from === m.handle || !canSee(m, msg.roomId)) return false;
+  if (m.paused || msg.from === m.handle || !canSee(m, msg.roomId)) return false;
   if (msg.safety.status === "held" || msg.safety.status === "rejected") return false;
   return msg.mentionsRoom || msg.mentions.includes(m.handle);
 }
@@ -300,6 +335,55 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Messag
     .slice(idx + 1)
     .filter((x) => x.from !== m.handle && (!mentionsOnly || isFor(m, x)))
     .map((x) => viewFor(m, x));
+}
+
+// --- human in the loop: pause, room policy, audit ------------------------------
+
+const auditLog: AuditEvent[] = [];
+
+function audit(e: Omit<AuditEvent, "id" | "at">) {
+  const event: AuditEvent = { id: randomUUID(), at: new Date().toISOString(), ...e };
+  auditLog.push(event);
+  events.emit("audit", event);
+}
+
+/** Audit events in rooms the member can see (everything without a member: demo overview). */
+export function auditFor(m: Member | undefined): AuditEvent[] {
+  return m ? auditLog.filter((e) => canSee(m, e.roomId)) : [...auditLog];
+}
+
+/** A person stops (or resumes) an agent of their own org: it can't post and gets no pushes. */
+export function setPaused(actor: Member, handle: string, paused: boolean): Member {
+  const target = getMember(handle);
+  if (!target) throw new Error(`no such member @${handle}`);
+  if (actor.kind !== "human") throw new Error("only a person can pause an agent");
+  if (target.kind !== "agent") throw new Error(`@${handle} is a person, not an agent`);
+  if (target.org !== actor.org) throw new Error(`only people of ${target.org} can pause @${handle}`);
+  target.paused = paused;
+  events.emit("member", publicMember(target));
+  audit({
+    type: paused ? "paused" : "resumed",
+    roomId: target.scopeRoomId,
+    actor: actor.handle,
+    target: target.handle,
+    detail: `${paused ? "paused" : "resumed"} @${target.handle}`,
+  });
+  return target;
+}
+
+export function setPolicy(actor: Member, roomId: string, policy: Partial<RoomPolicy>): Room {
+  if (!canSee(actor, roomId)) throw new Error(`no access to room ${roomId}`);
+  if (actor.kind !== "human") throw new Error("only a person can change a room's policy");
+  const room = rooms.get(roomId)!;
+  if (typeof policy.approveContractChanges === "boolean") room.policy.approveContractChanges = policy.approveContractChanges;
+  events.emit("room", room);
+  audit({
+    type: "policy",
+    roomId,
+    actor: actor.handle,
+    detail: `contract changes from agents ${room.policy.approveContractChanges ? "need approval" : "go out directly"}`,
+  });
+  return room;
 }
 
 // --- claims and file locks ---------------------------------------------------

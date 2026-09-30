@@ -10,3 +10,4 @@ PROJECT.md
 *.log
 .env
 .env.*
+data

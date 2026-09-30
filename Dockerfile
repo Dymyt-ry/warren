@@ -14,7 +14,9 @@ COPY bridge bridge
 COPY web web
 RUN npm run build
 
-ENV NODE_ENV=production PORT=3000
+# Waitlist sign-ups live here; mount a persistent volume on /data.
+RUN mkdir -p /data && chown node:node /data
+ENV NODE_ENV=production PORT=3000 WARREN_DATA_DIR=/data
 EXPOSE 3000
 USER node
 CMD ["node_modules/.bin/tsx", "hub/src/server.ts"]
