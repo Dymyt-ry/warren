@@ -28,6 +28,11 @@ app.use((req, res, next) => {
 // token. WARREN_DEMO=0 turns all three off: reads need a token, and invites
 // and root rooms need WARREN_ADMIN_TOKEN or a member token that sees the room.
 const DEMO = process.env.WARREN_DEMO !== "0";
+// WARREN_DASHBOARD=closed (the hosted demo): the dashboard isn't served, and the
+// demo's open doors close with it: no anonymous reads, no login by handle, no
+// anonymous invites. The seeded team and its fixed tokens still work for invited agents.
+const DASHBOARD_OPEN = process.env.WARREN_DASHBOARD !== "closed";
+const OPEN_DOORS = DEMO && DASHBOARD_OPEN;
 const ADMIN_TOKEN = process.env.WARREN_ADMIN_TOKEN;
 
 /** `Authorization: Bearer <token>`, or `?token=` (EventSource can't set headers). */
@@ -55,7 +60,7 @@ function requireCaller(req: Request, res: Response): store.Member | undefined {
 function reader(req: Request, res: Response): store.Member | undefined | false {
   const m = caller(req);
   if (m) return m;
-  if (isAdmin(req) || (DEMO && !presentedToken(req))) return undefined;
+  if (isAdmin(req) || (OPEN_DOORS && !presentedToken(req))) return undefined;
   res.status(401).json({ error: presentedToken(req) ? "unknown token" : "token required" });
   return false;
 }
@@ -82,7 +87,7 @@ app.get("/mcp", (_req, res) => void res.status(405).end());
 // Demo login for the dashboard: pick a human by handle, get their token.
 // No passwords: hackathon scope, see README limits.
 app.post("/api/login", (req, res) => {
-  if (!DEMO) return void res.status(404).json({ error: "login by handle is only available in demo mode" });
+  if (!OPEN_DOORS) return void res.status(404).json({ error: "login by handle is only available in demo mode" });
   const m = store.getMember(String(req.body?.handle ?? ""));
   if (!m || m.kind !== "human") return void res.status(404).json({ error: "no such person" });
   res.json(m);
@@ -111,7 +116,7 @@ app.post("/api/invites", (req, res) => {
   const b = req.body ?? {};
   const m = caller(req);
   if (presentedToken(req) && !m && !isAdmin(req)) return void res.status(401).json({ error: "unknown token" });
-  const allowed = isAdmin(req) || (m ? store.canSee(m, b.room) : DEMO);
+  const allowed = isAdmin(req) || (m ? store.canSee(m, b.room) : OPEN_DOORS);
   if (!allowed) return void res.status(m ? 403 : 401).json({ error: `no access to room ${b.room}` });
   try {
     const invited = store.addMember({
@@ -423,7 +428,11 @@ function deliveredTo(msg: store.Message): string {
 
 // --- Web (landing + dashboard), built by `npm run build` ---------------------
 const WEB = fileURLToPath(new URL("../../web/dist", import.meta.url));
-app.get(["/app", "/app/"], (_req, res) => res.sendFile("app.html", { root: WEB }));
+// Closed dashboard: "See it live" leads to the waitlist instead.
+app.get(["/app", "/app/", "/app.html"], (_req, res) =>
+  DASHBOARD_OPEN ? res.sendFile("app.html", { root: WEB }) : res.redirect(302, "/?waitlist=1#waitlist"),
+);
+app.get("/api/config", (_req, res) => void res.json({ dashboard: DASHBOARD_OPEN }));
 app.use(express.static(WEB));
 
 function setupSnippets(m: store.Member) {

@@ -358,6 +358,20 @@ try {
   const invited = await priv("/api/invites", "wr_admin_e2e", { name: "Claude", org: "acme", room: "acme" }).then((r) => r.json());
   const mine = await priv("/api/rooms", invited.token).then((r) => r.json());
   check(root.status === 201 && mine.length === 1, "admin creates a root room and invites; the invitee sees it");
+
+  // 12. WARREN_DASHBOARD=closed (the hosted demo): no dashboard, no open doors, demo tokens still work
+  const CLOSED = `http://localhost:${PORT - 2}`;
+  await startHub(PORT - 2, { WARREN_DASHBOARD: "closed" });
+  const [dash, anonClosed, loginClosed, tokenClosed] = await Promise.all([
+    fetch(`${CLOSED}/app`, { redirect: "manual" }),
+    fetch(`${CLOSED}/api/rooms`),
+    fetch(`${CLOSED}/api/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: '{"handle":"anna"}' }),
+    fetch(`${CLOSED}/api/rooms`, { headers: { Authorization: `Bearer ${CODEX}` } }),
+  ]);
+  check(
+    dash.status === 302 && dash.headers.get("location")?.includes("waitlist") && anonClosed.status === 401 && loginClosed.status === 404 && tokenClosed.status === 200,
+    "closed dashboard: /app goes to the waitlist, no anonymous reads or login, invited agents still work",
+  );
 } catch (e) {
   console.error(e);
   failed = true;
