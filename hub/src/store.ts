@@ -290,6 +290,12 @@ export function review(m: Member, messageId: string, decision: "release" | "reje
   // A contract change is approved by the people who own the agent that proposed it.
   if (msg.safety.flags.includes("needs-approval") && m.org !== msg.org)
     throw new Error(`only a person of ${msg.org} can approve @${msg.from}'s contract change`);
+  // A suspected injection is released by the people it targets, not by the company that sent it
+  // (unless no person of another company can see the room).
+  const suspicious = msg.safety.flags.some((f) => f !== "needs-approval" && f !== "agent-loop");
+  const otherOrgPerson = roomMembers(msg.roomId).some((x) => x.kind === "human" && x.org !== msg.org);
+  if (suspicious && m.org === msg.org && otherOrgPerson)
+    throw new Error(`a person outside ${msg.org} reviews this: it was flagged as a possible attack from ${msg.org}`);
   msg.safety = { ...msg.safety, status: decision === "release" ? "released" : "rejected", reviewedBy: m.handle };
   events.emit("message_update", msg);
   audit({

@@ -12,6 +12,27 @@ export interface Member {
   org: string;
   scopeRoomId: string;
   adapter: Adapter;
+  online?: boolean;
+  paused?: boolean;
+}
+export type SafetyStatus = "delivered" | "held" | "released" | "rejected";
+export interface Safety {
+  status: SafetyStatus;
+  flags: string[];
+  redactions: string[];
+  reviewedBy?: string;
+}
+export interface RoomPolicy {
+  approveContractChanges: boolean;
+}
+export interface AuditEvent {
+  id: string;
+  at: string;
+  type: "held" | "released" | "rejected" | "redacted" | "paused" | "resumed" | "policy";
+  roomId: string;
+  actor: string;
+  target?: string;
+  detail: string;
 }
 export interface Message {
   id: string;
@@ -23,6 +44,7 @@ export interface Message {
   text: string;
   mentions: string[];
   mentionsRoom: boolean;
+  safety?: Safety;
   at: string;
   forYou?: boolean;
 }
@@ -32,6 +54,7 @@ export interface Room {
   name: string;
   context: string;
   messages: Message[];
+  policy?: RoomPolicy;
 }
 
 const TOKEN_KEY = "warren.token";
@@ -78,6 +101,16 @@ export const api = {
     call<Room>(`/api/rooms/${encodeURIComponent(room)}/context`, token, { method: "PUT", body: JSON.stringify({ context }) }),
   createRoom: (token: string, parentId: string, name: string) =>
     call<Room>("/api/rooms", token, { method: "POST", body: JSON.stringify({ parentId, name }) }),
+  review: (token: string, messageId: string, decision: "release" | "reject") =>
+    call<Message>(`/api/messages/${encodeURIComponent(messageId)}/review`, token, { method: "POST", body: JSON.stringify({ decision }) }),
+  pause: (token: string, handle: string, paused: boolean) =>
+    call<Member>(`/api/members/${encodeURIComponent(handle)}/pause`, token, { method: "POST", body: JSON.stringify({ paused }) }),
+  setPolicy: (token: string, room: string, policy: RoomPolicy) =>
+    call<RoomPolicy>(`/api/rooms/${encodeURIComponent(room)}/policy`, token, { method: "PUT", body: JSON.stringify(policy) }),
+  audit: (token: string | null) => call<AuditEvent[]>("/api/audit", token),
+  joinWaitlist: (body: { email: string; name?: string; company?: string; useCase?: string; website?: string }) =>
+    call<{ ok: boolean; position: number; already?: boolean }>("/api/waitlist", null, { method: "POST", body: JSON.stringify(body) }),
+  waitlistCount: () => call<{ count: number }>("/api/waitlist/count", null),
 };
 
 export type HubStatus = "loading" | "live" | "offline";
@@ -89,6 +122,7 @@ export type HubStatus = "loading" | "live" | "offline";
 export function useHub(token: string | null) {
   const [rooms, setRooms] = useState<Record<string, Room>>({});
   const [members, setMembers] = useState<Record<string, Member>>({});
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [status, setStatus] = useState<HubStatus>("loading");
   const [error, setError] = useState<string | null>(null);
   const tokenRef = useRef(token);
@@ -101,9 +135,23 @@ export function useHub(token: string | null) {
       return { ...prev, [m.roomId]: { ...room, messages: [...room.messages, m] } };
     });
 
+  /** Replace a message in place (safety status changed: released, rejected). */
+  const updateMessage = (m: Message) =>
+    setRooms((prev) => {
+      const room = prev[m.roomId];
+      if (!room) return prev;
+      const exists = room.messages.some((x) => x.id === m.id);
+      const messages = exists ? room.messages.map((x) => (x.id === m.id ? { ...x, ...m } : x)) : [...room.messages, m];
+      return { ...prev, [m.roomId]: { ...room, messages } };
+    });
+
   useEffect(() => {
     let closed = false;
     setStatus("loading");
+    api
+      .audit(token)
+      .then((a) => !closed && setAudit(a))
+      .catch(() => {});
     Promise.all([api.rooms(token), api.members()])
       .then(([rs, ms]) => {
         if (closed) return;
@@ -123,7 +171,16 @@ export function useHub(token: string | null) {
     });
     es.addEventListener("member", (e) => {
       const m: Member = JSON.parse((e as MessageEvent).data);
-      setMembers((prev) => ({ ...prev, [m.handle]: m }));
+      setMembers((prev) => ({ ...prev, [m.handle]: { ...prev[m.handle], ...m } }));
+    });
+    es.addEventListener("message_update", (e) => updateMessage(JSON.parse((e as MessageEvent).data)));
+    es.addEventListener("presence", (e) => {
+      const p: { handle: string; online: boolean } = JSON.parse((e as MessageEvent).data);
+      setMembers((prev) => (prev[p.handle] ? { ...prev, [p.handle]: { ...prev[p.handle], online: p.online } } : prev));
+    });
+    es.addEventListener("audit", (e) => {
+      const a: AuditEvent = JSON.parse((e as MessageEvent).data);
+      setAudit((prev) => (prev.some((x) => x.id === a.id) ? prev : [...prev, a]));
     });
     return () => {
       closed = true;
@@ -131,7 +188,7 @@ export function useHub(token: string | null) {
     };
   }, [token]);
 
-  return { rooms, members, status, error, addMessage, setRooms };
+  return { rooms, members, audit, status, error, addMessage, updateMessage, setMembers, setRooms };
 }
 
 /** The human who runs an agent, by handle suffix: claude-anna belongs to anna. */

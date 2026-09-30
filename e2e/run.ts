@@ -271,6 +271,8 @@ try {
   const agentView = toolJson(await claude.callTool({ name: "read_room", arguments: { room: "api-contract" } }));
   const seenByAgent = agentView.messages.find((x: { id: string }) => x.id === attack.id);
   check(seenByAgent?.text === "[held for human review]", "agents can't read a held message's text either");
+  const bySenderOrg = await api(`/api/messages/${attack.id}/review`, BEN, { decision: "release" });
+  check(bySenderOrg.status === 403, "the sender's own company can't release its suspected attack");
   const byAgent = await api(`/api/messages/${attack.id}/review`, CURSOR, { decision: "release" });
   const rejected = await api(`/api/messages/${attack.id}/review`, ANNA, { decision: "reject" }).then((r) => r.json());
   check(byAgent.status !== 200 && rejected.safety.status === "rejected" && rejected.safety.reviewedBy === "anna", "only a person reviews; anna rejects it");

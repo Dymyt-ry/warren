@@ -3,7 +3,17 @@
 // who they are (demo login, see README limits). Design rules: web/DESIGN.md.
 import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { PaperPlaneRightIcon, PencilSimpleIcon, PlusIcon } from "@phosphor-icons/react";
+import {
+  LockSimpleIcon,
+  PaperPlaneRightIcon,
+  PauseIcon,
+  PencilSimpleIcon,
+  PlayIcon,
+  PlusIcon,
+  ProhibitIcon,
+  ShieldCheckIcon,
+  ShieldWarningIcon,
+} from "@phosphor-icons/react";
 import "@fontsource-variable/outfit";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
@@ -31,7 +41,18 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Logo } from "./Logo";
-import { api, ownerOf, storedToken, storeToken, useHub, type Member, type Message as Msg, type MessageKind, type Room } from "./api";
+import {
+  api,
+  ownerOf,
+  storedToken,
+  storeToken,
+  useHub,
+  type AuditEvent,
+  type Member,
+  type Message as Msg,
+  type MessageKind,
+  type Room,
+} from "./api";
 import { Avatar, KindTag, MentionText } from "./ui";
 
 const OVERVIEW = "__overview";
@@ -41,7 +62,7 @@ const isForMe = (m: Msg, handle: string) => m.from !== handle && (m.forYou || m.
 function Dashboard() {
   const [token, setToken] = useState<string | null>(() => new URLSearchParams(location.search).get("token") ?? storedToken());
   const [me, setMe] = useState<Member | null>(null);
-  const { rooms, members, status, error, addMessage, setRooms } = useHub(token);
+  const { rooms, members, audit, status, error, addMessage, updateMessage, setRooms } = useHub(token);
   const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
@@ -129,7 +150,9 @@ function Dashboard() {
               members={members}
               me={me}
               token={token}
+              audit={audit}
               onPosted={addMessage}
+              onUpdated={updateMessage}
               onContext={(r) => setRooms((prev) => ({ ...prev, [r.id]: { ...prev[r.id], context: r.context } }))}
               onNewRoom={(r) => {
                 setRooms((prev) => ({ ...prev, [r.id]: r }));
@@ -212,7 +235,9 @@ function RoomView({
   members,
   me,
   token,
+  audit,
   onPosted,
+  onUpdated,
   onContext,
   onNewRoom,
 }: {
@@ -221,16 +246,22 @@ function RoomView({
   members: Record<string, Member>;
   me: Member | null;
   token: string | null;
+  audit: AuditEvent[];
   onPosted: (m: Msg) => void;
+  onUpdated: (m: Msg) => void;
   onContext: (r: Room) => void;
   onNewRoom: (r: Room) => void;
 }) {
   const [inRoom, setInRoom] = useState<Member[]>([]);
   const memberCount = Object.keys(members).length;
 
+  // Refetch when someone joins, pauses or comes online, so the panel stays current.
+  const memberState = Object.values(members)
+    .map((m) => `${m.handle}:${m.paused ? 1 : 0}${m.online ? 1 : 0}`)
+    .join(",");
   useEffect(() => {
     api.roomMembers(room.id).then(setInRoom, () => setInRoom([]));
-  }, [room.id, memberCount]);
+  }, [room.id, memberCount, memberState]);
 
   const path: Room[] = [];
   for (let r: Room | undefined = room; r; r = r.parentId ? rooms[r.parentId] : undefined) path.unshift(r);
@@ -252,22 +283,25 @@ function RoomView({
               </span>
             ))}
           </h1>
-          {me && (
-            <Button variant="ghost" size="sm" onClick={addSubroom}>
-              <PlusIcon data-icon="inline-start" weight="bold" />
-              New room inside
-            </Button>
-          )}
+          <div className="flex shrink-0 items-center gap-1">
+            <PolicyToggle room={room} me={me} token={token} />
+            {me && (
+              <Button variant="ghost" size="sm" onClick={addSubroom}>
+                <PlusIcon data-icon="inline-start" weight="bold" />
+                New room inside
+              </Button>
+            )}
+          </div>
         </header>
 
         <RoomContext room={room} token={me ? token : null} onSaved={onContext} />
 
-        <Thread room={room} members={members} me={me} />
+        <Thread room={room} members={members} me={me} token={token} onUpdated={onUpdated} />
 
         <Composer room={room} me={me} token={token} inRoom={inRoom} onPosted={onPosted} />
       </section>
 
-      <MembersPanel inRoom={inRoom} members={members} me={me} />
+      <MembersPanel inRoom={inRoom} members={members} me={me} token={token} audit={audit.filter((a) => a.roomId === room.id)} />
     </div>
   );
 }
@@ -333,7 +367,19 @@ function RoomContext({ room, token, onSaved }: { room: Room; token: string | nul
   );
 }
 
-function Thread({ room, members, me }: { room: Room; members: Record<string, Member>; me: Member | null }) {
+function Thread({
+  room,
+  members,
+  me,
+  token,
+  onUpdated,
+}: {
+  room: Room;
+  members: Record<string, Member>;
+  me: Member | null;
+  token: string | null;
+  onUpdated: (m: Msg) => void;
+}) {
   // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
   const [mountedAt] = useState(() => Date.now());
   if (room.messages.length === 0)
@@ -381,9 +427,15 @@ function Thread({ room, members, me }: { room: Room; members: Record<string, Mem
                           {time}
                         </time>
                       </MessageHeader>
-                      <p className="m-0 text-[15px] leading-normal whitespace-pre-wrap text-foreground">
+                      <p
+                        className={cn(
+                          "m-0 text-[15px] leading-normal whitespace-pre-wrap text-foreground",
+                          m.safety?.status === "rejected" && "text-muted-foreground line-through",
+                        )}
+                      >
                         <MentionText text={m.text} me={me?.handle} />
                       </p>
+                      <SafetyLine m={m} me={me} token={token} onUpdated={onUpdated} />
                     </MessageContent>
                   </Message>
                 </MessageScrollerItem>
@@ -394,6 +446,140 @@ function Thread({ room, members, me }: { room: Room; members: Record<string, Mem
         <MessageScrollerButton />
       </MessageScroller>
     </MessageScrollerProvider>
+  );
+}
+
+const FLAG_LABEL: Record<string, string> = {
+  "override-instructions": "tries to override the agent's instructions",
+  "role-hijack": "tries to change the agent's role",
+  "shell-payload": "contains a shell payload",
+  exfiltration: "asks for secrets",
+  destructive: "asks for a destructive command",
+  "hidden-text": "contains hidden characters",
+  "agent-loop": "agents have been talking without a person",
+};
+
+/** What the hub did to keep this message safe, and the review buttons when a person has to decide. */
+function SafetyLine({
+  m,
+  me,
+  token,
+  onUpdated,
+}: {
+  m: Msg;
+  me: Member | null;
+  token: string | null;
+  onUpdated: (m: Msg) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const s = m.safety;
+  if (!s) return null;
+  const approval = s.flags.includes("needs-approval");
+  const reasons = s.flags.filter((f) => f !== "needs-approval").map((f) => FLAG_LABEL[f] ?? f);
+  const suspicious = reasons.length > 0 && !s.flags.includes("agent-loop");
+  // Approvals belong to the sender's company; suspected attacks to the people they target.
+  const canReview =
+    s.status === "held" &&
+    !!me &&
+    !!token &&
+    me.kind === "human" &&
+    me.handle !== m.from &&
+    (approval ? me.org === m.org : !suspicious || me.org !== m.org);
+
+  const decide = async (decision: "release" | "reject") => {
+    setBusy(true);
+    try {
+      onUpdated(await api.review(token!, m.id, decision));
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-col gap-1.5 text-[13px]">
+      {s.redactions.length > 0 && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <LockSimpleIcon aria-hidden />
+          Secrets masked before anyone saw them ({s.redactions.join(", ")})
+        </span>
+      )}
+      {s.status === "held" && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[10px] border border-dashed border-muted-foreground/50 px-3 py-2">
+          <span className="flex items-center gap-1.5 font-semibold text-foreground">
+            <ShieldWarningIcon aria-hidden weight="fill" />
+            {approval ? "Waiting for approval" : "Held for review"}
+          </span>
+          <span className="text-muted-foreground">
+            {approval
+              ? `Agents get this contract change once a person of ${m.org} approves it.`
+              : `No agent gets this until ${suspicious ? "a person outside " + m.org : "a person"} decides: ${reasons.join(", ")}.`}
+          </span>
+          {canReview && (
+            <span className="ml-auto flex gap-2">
+              <Button size="sm" disabled={busy} onClick={() => decide("release")}>
+                <ShieldCheckIcon data-icon="inline-start" />
+                {approval ? "Approve" : "Release"}
+              </Button>
+              <Button size="sm" variant="ghost" disabled={busy} onClick={() => decide("reject")}>
+                <ProhibitIcon data-icon="inline-start" />
+                Reject
+              </Button>
+            </span>
+          )}
+          {error && <p className="error w-full">{error}</p>}
+        </div>
+      )}
+      {s.status === "released" && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <ShieldCheckIcon aria-hidden />
+          {approval ? "Approved" : "Released"} by @{s.reviewedBy}
+        </span>
+      )}
+      {s.status === "rejected" && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <ProhibitIcon aria-hidden />
+          Rejected by @{s.reviewedBy}. No agent ever saw it.
+        </span>
+      )}
+      {s.status === "delivered" && reasons.length > 0 && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <ShieldWarningIcon aria-hidden />
+          Flagged ({reasons.join(", ")}), delivered because everyone here is from {m.org}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/** Per-room rule: agents' contract changes wait for a person of their own company. */
+function PolicyToggle({ room, me, token }: { room: Room; me: Member | null; token: string | null }) {
+  const on = !!room.policy?.approveContractChanges;
+  const canSet = !!me && me.kind === "human" && !!token;
+  const label = on ? "Contract changes need approval" : "Contract changes go out directly";
+  const glyph = <span aria-hidden className={cn("size-2.5 rounded-[30%] border-[1.5px] border-foreground", on && "bg-foreground")} />;
+  if (!canSet)
+    return <span className="flex items-center gap-2 px-2 text-xs text-muted-foreground">{glyph}{label}</span>;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-pressed={on}
+          onClick={() => api.setPolicy(token!, room.id, { approveContractChanges: !on }).catch(() => {})}
+        >
+          {glyph}
+          {label}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">
+        {on ? "Click to let agents' contract changes go out directly" : "Click to make agents' contract changes wait for a person of their company"}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -564,7 +750,19 @@ const DELIVERY: Record<Member["adapter"], string> = {
   dashboard: "Reads this dashboard",
 };
 
-function MembersPanel({ inRoom, members, me }: { inRoom: Member[]; members: Record<string, Member>; me: Member | null }) {
+function MembersPanel({
+  inRoom,
+  members,
+  me,
+  token,
+  audit,
+}: {
+  inRoom: Member[];
+  members: Record<string, Member>;
+  me: Member | null;
+  token: string | null;
+  audit: AuditEvent[];
+}) {
   // People first, each with their agents under them; agents whose person isn't in the room at the end.
   const humans = inRoom.filter((m) => m.kind === "human");
   const agentsOf = (h: Member) => inRoom.filter((a) => a.kind === "agent" && ownerOf(a, members)?.handle === h.handle);
@@ -586,10 +784,10 @@ function MembersPanel({ inRoom, members, me }: { inRoom: Member[]; members: Reco
                 .filter((h) => h.org === org)
                 .map((h) => (
                   <li key={h.handle} className="flex flex-col gap-2">
-                    <MemberRow m={h} me={me} />
+                    <MemberRow m={h} me={me} token={token} />
                     {agentsOf(h).map((a) => (
                       <div key={a.handle} className="ml-3 border-l border-border pl-4">
-                        <MemberRow m={a} me={me} />
+                        <MemberRow m={a} me={me} token={token} />
                       </div>
                     ))}
                   </li>
@@ -601,38 +799,84 @@ function MembersPanel({ inRoom, members, me }: { inRoom: Member[]; members: Reco
           <section className="flex flex-col gap-3">
             <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">Other agents</h3>
             {orphans.map((a) => (
-              <MemberRow key={a.handle} m={a} me={me} />
+              <MemberRow key={a.handle} m={a} me={me} token={token} />
             ))}
           </section>
         )}
+        <SafetyLog audit={audit} />
       </div>
     </aside>
   );
 }
 
-function MemberRow({ m, me }: { m: Member; me: Member | null }) {
+/** The room's audit trail: what the hub held, masked or paused, and who decided. */
+function SafetyLog({ audit }: { audit: AuditEvent[] }) {
+  if (audit.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-3">
+      <h3 className="flex items-center gap-1.5 font-sans text-xs font-medium tracking-normal text-muted-foreground">
+        <ShieldCheckIcon aria-hidden />
+        Safety log
+      </h3>
+      <ol className="flex flex-col gap-2.5">
+        {[...audit]
+          .reverse()
+          .slice(0, 8)
+          .map((a) => (
+            <li key={a.id} className="text-xs leading-snug">
+              <span className="text-foreground">{a.detail}</span>
+              <span className="block text-muted-foreground">
+                {a.actor === "hub" ? "automatic" : `@${a.actor}`} ·{" "}
+                {new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+              </span>
+            </li>
+          ))}
+      </ol>
+    </section>
+  );
+}
+
+function MemberRow({ m, me, token }: { m: Member; me: Member | null; token: string | null }) {
+  // Stop button: a person can pause an agent of their own company.
+  const canPause = m.kind === "agent" && !!me && !!token && me.kind === "human" && me.org === m.org;
   const row = (
-    <div className="flex items-center gap-3">
+    <div className={cn("flex items-center gap-3", m.paused && "opacity-60")}>
       <Avatar kind={m.kind} name={m.name} size={28} />
-      <div className="min-w-0">
+      <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">
           {m.name}
           {me?.handle === m.handle && <span className="ml-1.5 text-xs font-medium text-primary">you</span>}
         </div>
-        <div className="truncate text-xs text-muted-foreground">@{m.handle}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          @{m.handle}
+          {m.paused ? " · paused" : m.online ? " · online" : ""}
+        </div>
       </div>
     </div>
   );
   if (m.kind !== "agent") return row;
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <div tabIndex={0} className="rounded-md">
-          {row}
-        </div>
-      </TooltipTrigger>
-      <TooltipContent side="left">{DELIVERY[m.adapter]}</TooltipContent>
-    </Tooltip>
+    <div className="flex items-center gap-1">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div tabIndex={0} className="min-w-0 flex-1 rounded-md">
+            {row}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent side="left">{m.paused ? "Paused by a person: it can't post and gets no messages" : DELIVERY[m.adapter]}</TooltipContent>
+      </Tooltip>
+      {canPause && (
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={m.paused ? `Resume ${m.name}` : `Pause ${m.name}`}
+          title={m.paused ? "Resume" : "Pause"}
+          onClick={() => api.pause(token!, m.handle, !m.paused).catch(() => {})}
+        >
+          {m.paused ? <PlayIcon weight="fill" /> : <PauseIcon weight="fill" />}
+        </Button>
+      )}
+    </div>
   );
 }
 

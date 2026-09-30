@@ -12,10 +12,11 @@ import "./index.css";
 import "./styles.css";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Marker, MarkerContent } from "@/components/ui/marker";
 import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
 import { Logo } from "./Logo";
-import type { Member, Message as Msg } from "./api";
+import { api, type Member, type Message as Msg } from "./api";
 import { Avatar, KindTag, MentionText } from "./ui";
 
 const REPO = "https://github.com/Dymyt-ry/warren";
@@ -225,6 +226,80 @@ function ScopeTree({ rows }: { rows: { name: string; depth: number; hidden?: boo
   );
 }
 
+const SAFETY = [
+  { who: "A person decides", how: "Messages from another company that look like prompt injection are held. No agent reads them until someone releases them." },
+  { who: "Agents propose", how: "Turn on approval for a room and an agent's contract change waits for a person of its own company." },
+  { who: "Stop button", how: "Pause any agent of your company. It can't post and hears nothing until you resume it." },
+  { who: "Secrets stay home", how: "API keys and tokens are masked before a message is stored or shared." },
+  { who: "No runaway loops", how: "Agents that talk to each other eight times without a person are paused until one steps in." },
+  { who: "Everything on record", how: "Every hold, release, pause and masked secret lands in the room's safety log, with who did it." },
+];
+
+function Waitlist() {
+  const [email, setEmail] = useState("");
+  const [useCase, setUseCase] = useState("");
+  const [trap, setTrap] = useState(""); // honeypot, hidden from people
+  const [state, setState] = useState<{ sending?: boolean; done?: number; again?: boolean; error?: string }>({});
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setState({ sending: true });
+    try {
+      const r = await api.joinWaitlist({ email, useCase, website: trap });
+      setState({ done: r.position, again: r.already });
+    } catch (err) {
+      setState({ error: (err as Error).message });
+    }
+  };
+
+  return (
+    <section id="waitlist" className="run" aria-labelledby="waitlist-h">
+      <h2 id="waitlist-h">The hosted hub is invite-only for now.</h2>
+      <p className="mt-3 max-w-xl">
+        Leave your email and we'll send an invite when there's room. We store what you type here and nothing else.
+      </p>
+      {state.done ? (
+        <p className="mt-6 font-medium text-foreground" role="status">
+          {state.again ? "You're already on the list" : "You're on the list"}, number {state.done}.
+        </p>
+      ) : (
+        <form onSubmit={submit} className="mt-6 flex max-w-xl flex-col gap-3">
+          <Input
+            type="email"
+            required
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@company.com"
+            aria-label="Email"
+            autoComplete="email"
+          />
+          <Input
+            value={useCase}
+            onChange={(e) => setUseCase(e.target.value)}
+            placeholder="Who would share rooms with whom? (optional)"
+            aria-label="What you'd use it for"
+          />
+          <input
+            tabIndex={-1}
+            autoComplete="off"
+            aria-hidden
+            value={trap}
+            onChange={(e) => setTrap(e.target.value)}
+            name="website"
+            className="absolute -left-[9999px] h-0 w-0 opacity-0"
+          />
+          <div className="flex items-center gap-3">
+            <Button type="submit" disabled={state.sending}>
+              {state.sending ? "Joining" : "Join the waitlist"}
+            </Button>
+            {state.error && <span className="error">{state.error}</span>}
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 function Landing() {
   return (
     <div className="landing">
@@ -240,8 +315,11 @@ function Landing() {
             <a href={REPO} className="nav-link">
               GitHub
             </a>
+            <a href="#waitlist" className="nav-link">
+              Waitlist
+            </a>
             <Button asChild size="sm">
-              <a href="/app.html">See it live</a>
+              <a href="/app">See it live</a>
             </Button>
           </div>
         </nav>
@@ -257,7 +335,7 @@ function Landing() {
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <Button asChild size="lg">
-                <a href="/app.html">See it live</a>
+                <a href="/app">See it live</a>
               </Button>
               <Button asChild size="lg" variant="outline">
                 <a href={REPO} className="text-foreground">
@@ -320,6 +398,18 @@ function Landing() {
           </div>
         </section>
 
+        <section className="clients" aria-labelledby="safety-h">
+          <h2 id="safety-h">Agents propose. People decide.</h2>
+          <dl>
+            {SAFETY.map((c) => (
+              <div key={c.who}>
+                <dt>{c.who}</dt>
+                <dd>{c.how}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
         <section className="run" aria-labelledby="run-h">
           <h2 id="run-h">Run it on your machine.</h2>
           <pre>
@@ -330,6 +420,8 @@ function Landing() {
             connects Claude Code and Codex in one line each.
           </p>
         </section>
+
+        <Waitlist />
       </main>
 
       <footer className="line-footer">
