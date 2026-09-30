@@ -132,7 +132,7 @@ app.post("/api/invites", (req, res) => {
 app.get("/api/rooms", (req, res) => {
   const m = reader(req, res);
   if (m === false) return;
-  res.json(m ? store.visibleRooms(m) : store.allRooms());
+  res.json(m ? store.visibleRooms(m).map((r) => store.roomView(m, r)) : store.allRooms());
 });
 
 app.get("/api/rooms/:id", (req, res) => {
@@ -140,7 +140,7 @@ app.get("/api/rooms/:id", (req, res) => {
   if (m === false) return;
   const room = store.getRoom(req.params.id);
   if (!room || (m && !store.canSee(m, room.id))) return void res.status(404).json({ error: "no such room" });
-  res.json({ ...room, members: store.roomMembers(room.id).map(store.publicMember) });
+  res.json({ ...store.roomView(m, room), members: store.roomMembers(room.id).map(store.publicMember) });
 });
 
 // New subroom under a room the caller can see. Root rooms: admin token only.
@@ -174,7 +174,7 @@ app.get("/api/rooms/:id/messages", (req, res) => {
   if (m === false) return;
   const room = store.getRoom(req.params.id);
   if (!room || (m && !store.canSee(m, room.id))) return void res.status(404).json({ error: "no such room" });
-  res.json(room.messages);
+  res.json(room.messages.map((x) => store.viewFor(m, x)));
 });
 
 app.post("/api/rooms/:id/messages", (req, res) => {
@@ -211,6 +211,22 @@ app.delete("/api/claims/:id", (req, res) => {
   }
 });
 
+// A person releases or rejects a message the hub held (possible prompt
+// injection from another org, or agents looping without a person).
+app.post("/api/messages/:id/review", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  const decision = req.body?.decision;
+  if (decision !== "release" && decision !== "reject")
+    return void res.status(400).json({ error: 'decision must be "release" or "reject"' });
+  try {
+    res.json(store.review(m, req.params.id, decision));
+  } catch (e) {
+    const msg = (e as Error).message;
+    httpError(res, msg.startsWith("no such") ? 404 : msg.includes("not held") ? 409 : 403, e);
+  }
+});
+
 // Messages addressed to the caller since ?since=<id>; ?all=1 for everything visible.
 app.get("/api/inbox", (req, res) => {
   const m = requireCaller(req, res);
@@ -235,10 +251,15 @@ app.get("/api/events", (req: Request, res: Response) => {
     if (!store.canSee(m, msg.roomId) || msg.from === m.handle) return;
     const forYou = store.isFor(m, msg);
     if (mentionsOnly && !forYou) return;
-    send("message", { ...msg, forYou });
+    send("message", { ...store.viewFor(m, msg), forYou });
+  };
+  // Safety status changed (a person released or rejected a held message).
+  const onMessageUpdate = (msg: store.Message) => {
+    if (mentionsOnly || (m && !store.canSee(m, msg.roomId))) return;
+    send("message_update", m ? store.viewFor(m, msg) : msg);
   };
   const onRoom = (r: store.Room) => {
-    if (!mentionsOnly && (!m || store.canSee(m, r.id))) send("room", r);
+    if (!mentionsOnly && (!m || store.canSee(m, r.id))) send("room", store.roomView(m, r));
   };
   // Other members are only visible to those who share a room with them.
   const knows = (handle: string) => {
@@ -253,6 +274,7 @@ app.get("/api/events", (req: Request, res: Response) => {
   };
   const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
   store.events.on("message", onMessage);
+  store.events.on("message_update", onMessageUpdate);
   store.events.on("room", onRoom);
   store.events.on("member", onMember);
   store.events.on("presence", onPresence);
@@ -260,6 +282,7 @@ app.get("/api/events", (req: Request, res: Response) => {
   req.on("close", () => {
     clearInterval(ping);
     store.events.off("message", onMessage);
+    store.events.off("message_update", onMessageUpdate);
     store.events.off("room", onRoom);
     store.events.off("member", onMember);
     store.events.off("presence", onPresence);
@@ -332,6 +355,7 @@ app.post("/a2a", (req, res) => {
 });
 
 function deliveredTo(msg: store.Message): string {
+  if (msg.safety.status === "held") return `nobody yet: held for human review (${msg.safety.flags.join(", ")})`;
   if (msg.mentionsRoom) return "everyone in the room (@room)";
   return msg.mentions.map((h) => "@" + h).join(", ") || "nobody (no @mention)";
 }

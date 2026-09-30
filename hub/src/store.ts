@@ -4,6 +4,7 @@
 // them (or @room). Restarting the hub wipes everything.
 import { EventEmitter } from "node:events";
 import { randomBytes, randomUUID } from "node:crypto";
+import { injectionFlags, LOOP_LIMIT, redactSecrets, type Safety } from "./safety.js";
 
 export type Adapter = "channel" | "exec" | "inbox" | "a2a" | "dashboard";
 export type MemberKind = "human" | "agent";
@@ -20,6 +21,7 @@ export interface Message {
   text: string;
   mentions: string[]; // handles that get this pushed; "@room" expands to everyone in the room
   mentionsRoom: boolean;
+  safety: Safety;
   at: string;
 }
 
@@ -59,8 +61,8 @@ const rooms = new Map<string, Room>();
 const members = new Map<string, Member>(); // by handle
 const byToken = new Map<string, Member>();
 
-// Emits "message" (Message), "room" (Room), "member" (PublicMember) and
-// "presence" ({ handle, online }).
+// Emits "message" (Message), "message_update" (Message whose safety status
+// changed), "room" (Room), "member" (PublicMember) and "presence" ({ handle, online }).
 export const events = new EventEmitter();
 events.setMaxListeners(0);
 
@@ -201,11 +203,31 @@ export function parseMentions(text: string, roomId: string): { mentions: string[
   return { mentions: [...found], mentionsRoom };
 }
 
+/** Agent messages in a row at the end of the room, since a person last spoke or released a held message. */
+function agentStreak(room: Room): number {
+  let n = 0;
+  for (let i = room.messages.length - 1; i >= 0; i--) {
+    const x = room.messages[i];
+    if (x.fromKind === "human" || x.safety.reviewedBy) break;
+    if (x.safety.status !== "rejected") n++;
+  }
+  return n;
+}
+
 export function post(m: Member, roomId: string, kind: MessageKind, text: string): Message {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
   if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of ${MESSAGE_KINDS.join(", ")}`);
   const room = rooms.get(roomId)!;
+
+  // Safety: mask secrets, flag injection attempts, stop agent ping-pong.
+  const clean = redactSecrets(text);
+  const flags = injectionFlags(clean.text);
+  const crossOrg = roomMembers(roomId).some((x) => x.org !== m.org);
+  const loop = m.kind === "agent" && agentStreak(room) >= LOOP_LIMIT;
+  if (loop) flags.push("agent-loop");
+  const held = loop || (flags.length > 0 && crossOrg);
+
   const msg: Message = {
     id: randomUUID(),
     roomId,
@@ -213,8 +235,9 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
     fromKind: m.kind,
     org: m.org,
     kind,
-    text,
-    ...parseMentions(text, roomId),
+    text: clean.text,
+    ...parseMentions(clean.text, roomId),
+    safety: { status: held ? "held" : "delivered", flags, redactions: clean.redactions },
     at: new Date().toISOString(),
   };
   room.messages.push(msg);
@@ -222,9 +245,45 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
   return msg;
 }
 
-/** True when the message should be pushed to `m`: mentioned by handle or via @room, and not their own. */
+export function getMessage(id: string): Message | undefined {
+  for (const r of rooms.values()) {
+    const msg = r.messages.find((x) => x.id === id);
+    if (msg) return msg;
+  }
+}
+
+/**
+ * A person releases or rejects a held message. Released messages are pushed
+ * to the agents they mention as if they had just been posted.
+ */
+export function review(m: Member, messageId: string, decision: "release" | "reject"): Message {
+  const msg = getMessage(messageId);
+  if (!msg || !canSee(m, msg.roomId)) throw new Error(`no such message ${messageId}`);
+  if (m.kind !== "human") throw new Error("only a person can review held messages");
+  if (msg.from === m.handle) throw new Error("you can't review your own message");
+  if (msg.safety.status !== "held") throw new Error(`message is ${msg.safety.status}, not held`);
+  msg.safety = { ...msg.safety, status: decision === "release" ? "released" : "rejected", reviewedBy: m.handle };
+  events.emit("message_update", msg);
+  if (decision === "release") events.emit("message", msg); // now reaches the agents' streams
+  return msg;
+}
+
+/** What `viewer` may read of a message: agents don't see the text of held or rejected messages from others. */
+export function viewFor(viewer: Member | undefined, msg: Message): Message {
+  const hidden = msg.safety.status === "held" || msg.safety.status === "rejected";
+  if (!hidden || !viewer || viewer.kind !== "agent" || viewer.handle === msg.from) return msg;
+  const note = msg.safety.status === "held" ? "[held for human review]" : `[rejected by @${msg.safety.reviewedBy}]`;
+  return { ...msg, text: note, mentions: [], mentionsRoom: false };
+}
+
+export function roomView(viewer: Member | undefined, room: Room): Room {
+  return viewer?.kind === "agent" ? { ...room, messages: room.messages.map((x) => viewFor(viewer, x)) } : room;
+}
+
+/** True when the message should be pushed to `m`: mentioned by handle or via @room, not their own, not held. */
 export function isFor(m: Member, msg: Message): boolean {
   if (msg.from === m.handle || !canSee(m, msg.roomId)) return false;
+  if (msg.safety.status === "held" || msg.safety.status === "rejected") return false;
   return msg.mentionsRoom || msg.mentions.includes(m.handle);
 }
 
@@ -239,7 +298,8 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Messag
   const idx = sinceId ? all.findIndex((x) => x.id === sinceId) : -1;
   return all
     .slice(idx + 1)
-    .filter((x) => x.from !== m.handle && (!mentionsOnly || isFor(m, x)));
+    .filter((x) => x.from !== m.handle && (!mentionsOnly || isFor(m, x)))
+    .map((x) => viewFor(m, x));
 }
 
 // --- claims and file locks ---------------------------------------------------
