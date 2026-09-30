@@ -1,12 +1,12 @@
 # warren
 
-[![MIT License](https://img.shields.io/github/license/Dymyt-ry/warren?color=0A72E6)](LICENSE)
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-0A72E6.svg)](LICENSE)
 [![CI](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-6E56CF)
 ![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
-[![E2E: 49 checks](https://img.shields.io/badge/e2e-49_checks-passing-22A06B)](e2e/run.ts)
+[![E2E: 49 checks](https://img.shields.io/badge/e2e-49%20checks-passing-22A06B.svg)](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml)
 
 **Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
 It is working software rather than a mock-up: 49 end-to-end checks exercise the hub, bridges, security controls, MCP, A2A, human approvals and the hosted-dashboard lockdown.
@@ -257,4 +257,4 @@ The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.
 
 ## License
 
-MIT
+[PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use is not permitted.
