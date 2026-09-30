@@ -636,7 +636,7 @@ function Landing() {
             <div className="flex flex-wrap items-center gap-3">
               <Button asChild size="lg">
                 <a href="/app" onClick={live.onLive}>
-                  See it live
+                  {live.label}
                 </a>
               </Button>
               <Button asChild size="lg" variant="outline">
