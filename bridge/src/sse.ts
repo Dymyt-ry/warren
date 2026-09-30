@@ -6,6 +6,8 @@ export interface HubMessage {
   from: string;
   kind: string;
   text: string;
+  mentions: string[];
+  mentionsRoom: boolean;
   at: string;
 }
 

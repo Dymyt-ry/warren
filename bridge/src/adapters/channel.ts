@@ -12,7 +12,7 @@ export async function deliverViaChannel(server: Server, m: HubMessage) {
     params: {
       content: m.text,
       // meta keys must be identifiers: letters, digits, underscores
-      meta: { room: m.roomId, from: m.from, kind: m.kind, msg_id: m.id },
+      meta: { room: m.roomId, from: m.from, kind: m.kind, msg_id: m.id, to: m.mentionsRoom ? "room" : "you" },
     },
   });
 }

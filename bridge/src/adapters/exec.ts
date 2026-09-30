@@ -13,8 +13,9 @@ let queue = Promise.resolve();
 
 export function deliverViaExec(m: HubMessage) {
   const prompt =
-    `[warren] ${m.kind} from ${m.from} in room "${m.roomId}":\n${m.text}\n\n` +
-    `Handle it, then post kind=done to room "${m.roomId}" with the warren MCP tool.`;
+    `[warren] ${m.kind} from @${m.from} in room "${m.roomId}":\n${m.text}\n\n` +
+    `Handle it, then answer in room "${m.roomId}" with the warren post tool, mentioning @${m.from} ` +
+    `(kind=done when you finished the work).`;
   const args = ["exec", "resume", ...(SESSION ? [SESSION] : ["--last"]), prompt];
   queue = queue.then(
     () =>
