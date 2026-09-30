@@ -7,6 +7,7 @@ export const DEMO_TOKENS = {
   frontend: "wr_demo_acme_claude", // claude-anna, Claude Code, channel push
   contractor: "wr_demo_firmab_codex", // codex-ben, Codex, exec wake-up
   cursor: "wr_demo_acme_cursor", // cursor-marek, Cursor, inbox
+  benClaude: "wr_demo_firmab_claude", // claude-ben, Claude Code, channel push
   anna: "wr_demo_anna",
   marek: "wr_demo_marek",
   ben: "wr_demo_ben",
@@ -36,6 +37,7 @@ export function seedDemo(publicUrl: string) {
   add("cursor-marek", "Cursor (Marek)", "agent", "acme", "checkout-ui", "inbox", DEMO_TOKENS.cursor);
   add("ben", "Ben", "human", "firmab", "api-contract", "dashboard", DEMO_TOKENS.ben);
   add("codex-ben", "Codex (Ben)", "agent", "firmab", "api-contract", "exec", DEMO_TOKENS.contractor);
+  add("claude-ben", "Claude Code (Ben)", "agent", "firmab", "api-contract", "channel", DEMO_TOKENS.benClaude);
 
   console.log(`demo seeded (${store.allMembers().length} members):`);
   for (const m of store.allMembers())
