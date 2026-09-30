@@ -18,6 +18,8 @@ h1, h2, h3 { letter-spacing: -0.02em; margin: 0; }
 code, pre { font-family: var(--font-mono); }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 6px; }
+::selection { background: color-mix(in srgb, var(--sun) 45%, transparent); color: var(--text); }
+html { scrollbar-color: var(--border) transparent; caret-color: var(--blue); accent-color: var(--blue); }
 
 /* --- logo --- */
 .logo { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.03em; color: var(--text); font-size: 20px; }
@@ -37,6 +39,8 @@ code, pre { font-family: var(--font-mono); }
 }
 .button:active, button.primary:active, button.ghost:active { transform: scale(0.98); }
 .primary { background: var(--blue); color: #fff; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .primary { color: #0E1116; } }
+:root[data-theme="dark"] .primary { color: #0E1116; }
 .primary:hover { background: color-mix(in srgb, var(--blue) 88%, #000); }
 .primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .ghost { background: transparent; color: var(--text); border-color: var(--border); }
@@ -47,8 +51,7 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 /* --- message (shared by hero and dashboard) --- */
 .thread { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .msg { display: grid; grid-template-columns: 32px 1fr; gap: 12px; padding: 10px 12px; border-radius: 12px; position: relative; }
-.msg.for-me { background: var(--mention-bg); }
-.msg.for-me::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px; border-radius: 3px; background: var(--sun); }
+.msg.for-me { background: var(--mention-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sun) 45%, transparent); }
 .msg header { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; font-size: 13px; }
 .msg-name { font-weight: 650; color: var(--text); }
 .msg-handle { color: var(--text-2); }
@@ -58,8 +61,8 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 .avatar.human { border-radius: 50%; background: color-mix(in srgb, var(--blue) 14%, var(--surface)); color: var(--blue); }
 .avatar.agent { border-radius: 8px; background: var(--surface-2); color: var(--text); border: 1.5px solid var(--border); }
 .kind { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; }
-.kind-contract_change { color: var(--coral); background: color-mix(in srgb, var(--coral) 12%, transparent); }
-.kind-done { color: var(--blue); background: color-mix(in srgb, var(--blue) 12%, transparent); }
+.kind-contract_change { color: color-mix(in srgb, var(--coral) 72%, var(--text)); background: color-mix(in srgb, var(--coral) 12%, transparent); }
+.kind-done { color: color-mix(in srgb, var(--blue) 80%, var(--text)); background: color-mix(in srgb, var(--blue) 12%, transparent); }
 .kind-question { color: var(--text-2); background: var(--surface-2); }
 .mention { font-weight: 600; color: var(--blue); }
 .mention.lit { color: var(--text); background: color-mix(in srgb, var(--sun) 55%, transparent); border-radius: 5px; padding: 0 3px; }
@@ -67,7 +70,7 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 .error { color: var(--coral); font-size: 13px; margin: 6px 0 0; }
 
 /* ================= landing ================= */
-.landing { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+.landing { max-width: 1200px; margin: 0 auto; padding: 0 24px; overflow-x: clip; }
 .top-nav { display: flex; align-items: center; justify-content: space-between; height: 72px; }
 .top-nav > a { text-decoration: none; }
 .nav-links { display: flex; align-items: center; gap: 24px; }
@@ -80,7 +83,8 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 .lede { font-size: 20px; color: var(--text-2); max-width: 34ch; margin: 20px 0 32px; }
 
 /* The hero frame is the mark: an outer room, an inner room set toward the corner, the lit message inside. */
-.hero-room { margin: 0; }
+.hero-room { margin: 0; min-width: 0; }
+.hero > *, .scope-section > *, .steps > *, .adapter-row > * { min-width: 0; }
 .frame { position: relative; border-radius: 28px; }
 .frame.outer { border: 3px solid var(--blue); padding: 40px 20px 20px 36px; }
 .frame.inner { border: 3px solid var(--coral); border-radius: 20px; padding: 36px 12px 12px; background: var(--surface); margin-left: 24px; }
@@ -93,11 +97,9 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 @media (prefers-reduced-motion: no-preference) {
   .play { opacity: 0; animation: arrive 0.5s var(--ease) forwards; animation-delay: calc(0.4s + var(--step) * 0.75s); }
   .hero-room .msg.for-me.play { background: var(--surface); animation: arrive 0.5s var(--ease) forwards, light-up 0.6s ease-out forwards; animation-delay: calc(0.4s + var(--step) * 0.75s), calc(0.8s + var(--step) * 0.75s); }
-  .hero-room .msg.for-me.play::before { transform: scaleY(0); animation: bar 0.4s var(--ease) forwards; animation-delay: calc(0.8s + var(--step) * 0.75s); }
 }
 @keyframes arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-@keyframes light-up { to { background: var(--mention-bg); } }
-@keyframes bar { to { transform: scaleY(1); } }
+@keyframes light-up { to { background: var(--mention-bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sun) 45%, transparent); } }
 
 .landing section { padding: 88px 0; border-top: 1px solid var(--border); }
 .landing section h2 { font-size: clamp(28px, 3.2vw, 40px); line-height: 1.1; max-width: 22ch; }
@@ -126,7 +128,7 @@ button.ghost { padding: 7px 12px; font-size: 13px; }
 .scope-tree .hidden-room::after { content: ""; height: 10px; width: 96px; border-radius: 5px; background: var(--surface-2); }
 .scope-tree .hidden-room .room-glyph { opacity: 0.35; }
 
-.run-section .code { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px 24px; margin: 32px 0 16px; font-size: 14px; line-height: 1.7; overflow-x: auto; max-width: 640px; }
+.run-section .code { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 20px 24px; margin: 32px 0 16px; font-size: 14px; line-height: 1.7; overflow-x: auto; max-width: min(640px, 100%); }
 .run-section p { color: var(--text-2); max-width: 60ch; }
 
 .site-footer { display: flex; align-items: center; gap: 24px; padding: 32px 0 48px; border-top: 1px solid var(--border); color: var(--text-2); font-size: 14px; }
