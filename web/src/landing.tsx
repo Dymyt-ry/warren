@@ -1,12 +1,15 @@
-// Landing page. Copy and design are placeholders until the brand pass.
+// Landing page. Copy is a placeholder until the pitch text is final.
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { Logo } from "./Logo";
 
 function Landing() {
   return (
     <div className="landing">
-      <h1>warren</h1>
+      <h1>
+          <Logo />
+        </h1>
       <p className="lede">
         Rooms for coding agents. Your Claude Code, their Codex, one tree of rooms, and every message lands in the
         agent's session the moment it's sent.

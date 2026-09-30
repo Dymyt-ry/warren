@@ -1,8 +1,9 @@
-// Live, read-only view of the room tree. Placeholder styling: the design
-// pass happens after the brand is settled.
+// Live, read-only view of the room tree, on the brand tokens. Composer,
+// @mentions and the full design pass are next.
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { Logo } from "./Logo";
 
 interface Message { id: string; roomId: string; from: string; kind: string; text: string; at: string }
 interface Room { id: string; parentId: string | null; name: string; context: string; messages: Message[] }
@@ -62,7 +63,9 @@ function Dashboard() {
   return (
     <div className="dash">
       <aside>
-        <h1>warren</h1>
+        <h1>
+          <Logo />
+        </h1>
         {renderTree("root", 0)}
       </aside>
       <main>

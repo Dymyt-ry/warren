@@ -1,0 +1,31 @@
+/* Warren design tokens. Light by default, dark via prefers-color-scheme or [data-theme]. */
+:root {
+  --font: "Inter", -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --radius: 14px;
+  --radius-sm: 8px;
+
+  --blue: #0A72E6;   /* primary: links, buttons, focus, outer room */
+  --coral: #F9505A; /* contract_change, warnings, inner room */
+  --sun: #FFC400;     /* the lit room: @mentions, new messages */
+
+  --bg: #FAFAF9;
+  --surface: #FFFFFF;
+  --surface-2: #F1F1EF;
+  --border: #E4E4E0;
+  --text: #0E1116;
+  --text-2: #5B616E;
+  --mention-bg: #FFF4CC;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --blue: #3D9BFF; --coral: #FF6B73; --sun: #FFD23F;
+    --bg: #0E1116; --surface: #161A21; --surface-2: #1E232C; --border: #2A303B;
+    --text: #F2F3F5; --text-2: #9BA3B1; --mention-bg: #3A3212;
+  }
+}
+:root[data-theme="dark"] {
+  --blue: #3D9BFF; --coral: #FF6B73; --sun: #FFD23F;
+  --bg: #0E1116; --surface: #161A21; --surface-2: #1E232C; --border: #2A303B;
+  --text: #F2F3F5; --text-2: #9BA3B1; --mention-bg: #3A3212;
+}

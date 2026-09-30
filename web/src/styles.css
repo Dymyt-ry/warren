@@ -1,43 +1,50 @@
-/* Placeholder tokens: replace after the brand pass. */
-:root {
-  --bg: #0f1115;
-  --panel: #171a21;
-  --text: #e6e8ee;
-  --muted: #8a90a0;
-  --accent: #7cc4a4;
-  --warn: #e8b35a;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  color: var(--text);
-  background: var(--bg);
+/* Brand tokens live in tokens.css (from brand/kit). Component styles below are a
+   first on-brand pass; the dashboard design pass builds on these tokens. */
+@import "./tokens.css";
+
+:root { font-family: var(--font); color: var(--text); background: var(--bg); }
+body { margin: 0; background: var(--bg); -webkit-font-smoothing: antialiased; }
+a { color: var(--blue); }
+
+.logo { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: -0.02em; }
+.logo img { width: 28px; height: 28px; }
+.logo .dark { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .logo .light { display: none; }
+  :root:not([data-theme="light"]) .logo .dark { display: block; }
 }
-body { margin: 0; }
 
 .landing { max-width: 720px; margin: 0 auto; padding: 96px 16px; }
-.landing h1 { font-size: 56px; margin: 0 0 16px; }
-.lede { font-size: 20px; color: var(--muted); }
-.landing a { color: var(--accent); }
+.landing .logo { font-size: 44px; gap: 16px; }
+.landing .logo img { width: 64px; height: 64px; }
+.lede { font-size: 20px; line-height: 1.5; color: var(--text-2); }
 
 .dash { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
-.dash aside { background: var(--panel); padding: 16px 0; }
-.dash aside h1 { font-size: 18px; padding: 0 16px; }
+.dash aside { background: var(--surface); border-right: 1px solid var(--border); padding: 16px 0; }
+.dash aside .logo { padding: 0 16px 16px; font-size: 18px; }
 .room {
   display: flex; justify-content: space-between; width: 100%;
   background: none; border: 0; color: var(--text); text-align: left;
-  padding: 8px 12px; cursor: pointer; font: inherit;
+  padding: 8px 12px; cursor: pointer; font: inherit; border-radius: 0;
 }
-.room:hover, .room.active { background: #222734; }
-.room.done { color: var(--accent); }
-.count { color: var(--muted); font-size: 12px; }
+.room:hover, .room.active { background: var(--surface-2); }
+.room.done { color: var(--blue); }
+.count { color: var(--text-2); font-size: 12px; }
 .dash main { padding: 24px 32px; }
-.context { background: var(--panel); padding: 12px; border-radius: 6px; white-space: pre-wrap; color: var(--muted); }
+.context {
+  background: var(--surface); border: 1px solid var(--border); padding: 12px;
+  border-radius: var(--radius-sm); white-space: pre-wrap; color: var(--text-2); font-family: var(--font-mono); font-size: 13px;
+}
 .thread { list-style: none; padding: 0; }
-.msg { border-left: 3px solid var(--muted); padding: 4px 12px; margin: 12px 0; }
-.msg.contract_change { border-color: var(--warn); }
-.msg.done { border-color: var(--accent); }
-.msg header { font-size: 13px; color: var(--muted); }
+.msg { border-left: 3px solid var(--border); padding: 4px 12px; margin: 12px 0; }
+.msg.contract_change { border-color: var(--coral); }
+.msg.done { border-color: var(--blue); }
+.msg header { font-size: 13px; color: var(--text-2); }
 .msg header b { color: var(--text); }
+.msg .kind { color: var(--coral); }
 .msg p { margin: 4px 0 0; white-space: pre-wrap; }
-.empty { color: var(--muted); }
+.mention { background: var(--mention-bg); border-radius: 5px; padding: 0 4px; font-weight: 600; }
+.empty { color: var(--text-2); }
 
 @media (max-width: 720px) {
   .dash { grid-template-columns: 1fr; }
