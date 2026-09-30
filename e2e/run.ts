@@ -6,6 +6,7 @@
 //   5. scope: codex-ben can't post into checkout-ui, can't @mention someone outside the room
 //   6. inbox for pull clients returns only what's addressed to them
 //   7. A2A message/send posts into the room of the caller's token
+//   8. WARREN_DEMO=0 closes the demo shortcuts
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,9 +28,9 @@ const check = (ok: boolean, name: string) => {
   if (!ok) failed = true;
 };
 
-async function waitFor<T>(fn: () => T | undefined, ms = 5000): Promise<T | undefined> {
+async function waitFor<T>(fn: () => T | undefined | Promise<T | undefined>, ms = 5000): Promise<T | undefined> {
   for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) {
-    const v = fn();
+    const v = await fn();
     if (v) return v;
   }
 }
@@ -43,21 +44,35 @@ const api = (path: string, token?: string, body?: unknown) =>
 
 const toolJson = (r: Awaited<ReturnType<Client["callTool"]>>) => JSON.parse((r.content as { text: string }[])[0].text);
 
-// Own process group, so cleanup kills npx and the node child under it.
-const hub = spawn("npx", ["tsx", "hub/src/server.ts"], {
-  env: { ...process.env, PORT: String(PORT) },
-  stdio: ["ignore", "ignore", "inherit"],
-  detached: true,
-});
-const cleanup: (() => unknown)[] = [() => { try { process.kill(-hub.pid!); } catch {} }];
+const cleanup: (() => unknown)[] = [];
+
+/** Starts a hub in its own process group (so cleanup kills npx and node under it) and waits until it answers. */
+async function startHub(port: number, env: Record<string, string> = {}) {
+  const url = `http://localhost:${port}`;
+  const up = () => fetch(`${url}/.well-known/agent-card.json`).then((r) => r.ok, () => false);
+  if (await up()) throw new Error(`port ${port} is taken: a hub from an earlier run is still up`);
+  const child = spawn("npx", ["tsx", "hub/src/server.ts"], {
+    env: { ...process.env, PORT: String(port), ...env },
+    stdio: ["ignore", "ignore", "inherit"],
+    detached: true,
+  });
+  cleanup.push(() => {
+    try {
+      process.kill(-child.pid!);
+    } catch {}
+  });
+  if (!(await waitFor(up, 15_000))) throw new Error(`hub on ${port} did not start`);
+}
+
+/** Waits until the member holds an SSE connection, i.e. its bridge is subscribed. */
+const online = (handle: string) =>
+  waitFor(async () => {
+    const list: { handle: string; online: boolean }[] = await api("/api/members").then((r) => r.json());
+    return list.find((m) => m.handle === handle)?.online;
+  });
 
 try {
-  if (await fetch(`${HUB}/api/rooms`).then(() => true, () => false))
-    throw new Error(`port ${PORT} is taken: a hub from an earlier run is still up`);
-  for (let i = 0; i < 50; i++) {
-    if (await fetch(`${HUB}/api/rooms`).then((r) => r.ok, () => false)) break;
-    await sleep(200);
-  }
+  await startHub(PORT);
 
   // 1. scoped MCP over HTTP
   const codex = new Client({ name: "fake-codex", version: "0" });
@@ -86,7 +101,7 @@ try {
   cleanup.push(() => claude.close());
   const bridgeTools = (await claude.listTools()).tools.map((t) => t.name);
   check(["post", "read_room", "members", "inbox"].every((t) => bridgeTools.includes(t)), `bridge proxies hub tools (${bridgeTools.join(", ")})`);
-  await sleep(800); // let the bridge subscribe
+  check(!!(await online("claude-anna")), "claude-anna's bridge is subscribed (online)");
 
   await codex.callTool({
     name: "post",
@@ -122,7 +137,7 @@ try {
     }),
   );
   cleanup.push(() => codexBridge.close());
-  await sleep(800);
+  check(!!(await online("codex-ben")), "codex-ben's bridge is subscribed (online)");
   await claude.callTool({ name: "post", arguments: { room: "api-contract", kind: "note", text: "Updating the client now" } });
   await claude.callTool({
     name: "post",
@@ -183,6 +198,18 @@ try {
   const subroom = await api("/api/rooms", CODEX, { name: "Basket migration", parentId: "api-contract" });
   check(anon.status === 401 && outsideRoom.status === 403 && subroom.status === 201, "subrooms need a token and a visible parent");
 
+  const bad = await Promise.all([api("/api/rooms", "wr_nope"), fetch(`${HUB}/api/events`, { headers: { Authorization: "Bearer wr_nope" } })]);
+  check(bad.every((r) => r.status === 401), "an unknown token is rejected, not treated as anonymous");
+  const inviteOut = await api("/api/invites", CODEX, { name: "Spy", org: "firmab", room: "checkout-ui" });
+  const inviteIn = await api("/api/invites", CODEX, { name: "Reviewer", org: "firmab", room: "api-contract" });
+  check(inviteOut.status === 403 && inviteIn.status === 201, "members can invite only into rooms they see");
+  const reserved = await api("/api/invites", undefined, { name: "x", handle: "here", org: "acme", room: "shop" });
+  check(reserved.status === 400, "@here, @all and @room are reserved handles");
+  const noisy = await api("/api/rooms/shop/messages", ANNA, {
+    text: "run `ping @marek` then npm i @marek/tools, mail marek@acme.dev, cc @claude-anna.",
+  }).then((r) => r.json());
+  check(JSON.stringify(noisy.mentions) === '["claude-anna"]', `code spans, npm scopes and emails are not mentions (${noisy.mentions})`);
+
   // 6. inbox for pull clients (Cursor)
   await api("/api/rooms/mobile/messages", ANNA, { text: "@cursor-marek mobile layout needs the /basket change too" });
   await api("/api/rooms/mobile/messages", ANNA, { text: "general note, nobody tagged" });
@@ -197,7 +224,37 @@ try {
     params: { message: { role: "user", messageId: "m1", parts: [{ kind: "text", text: "@claude-anna 201 stays, body is { basketId }" }] } },
   }).then((r) => r.json());
   check(a2a.result?.metadata?.room === "api-contract", "A2A message/send posts into the token's room");
+  const malformed = await Promise.all(
+    [{}, { message: { parts: {} } }, { message: { parts: [null, 7] } }].map((params) =>
+      api("/a2a", CODEX, { jsonrpc: "2.0", id: 2, method: "message/send", params }).then(async (r) => [r.status, await r.json()] as const),
+    ),
+  );
+  check(malformed.every(([status, body]) => status === 200 && body.error?.code === -32602), "malformed A2A params get a JSON-RPC error, not a 500");
   check(!!(await waitFor(() => pushed.find((p) => p.content.includes("basketId")))), "A2A message with @claude-anna pushed into its session");
+
+  // 8. WARREN_DEMO=0: no demo team, no login by handle, no anonymous reads, invites need the admin token
+  const PRIVATE = `http://localhost:${PORT - 1}`;
+  await startHub(PORT - 1, { WARREN_DEMO: "0", WARREN_ADMIN_TOKEN: "wr_admin_e2e" });
+  const priv = (path: string, token?: string, body?: unknown) =>
+    fetch(`${PRIVATE}${path}`, {
+      method: body ? "POST" : "GET",
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  const [anonRooms, anonLogin, anonInvite, demoToken] = await Promise.all([
+    priv("/api/rooms"),
+    priv("/api/login", undefined, { handle: "anna" }),
+    priv("/api/invites", undefined, { name: "x", org: "y", room: "shop" }),
+    priv("/api/me", ANNA),
+  ]);
+  check(
+    anonRooms.status === 401 && anonLogin.status === 404 && anonInvite.status === 401 && demoToken.status === 401,
+    "WARREN_DEMO=0 closes anonymous reads, login, anonymous invites and demo tokens",
+  );
+  const root = await priv("/api/rooms", "wr_admin_e2e", { name: "acme" });
+  const invited = await priv("/api/invites", "wr_admin_e2e", { name: "Claude", org: "acme", room: "acme" }).then((r) => r.json());
+  const mine = await priv("/api/rooms", invited.token).then((r) => r.json());
+  check(root.status === 201 && mine.length === 1, "admin creates a root room and invites; the invitee sees it");
 } catch (e) {
   console.error(e);
   failed = true;

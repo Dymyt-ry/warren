@@ -110,10 +110,10 @@ export function addMember(input: {
   if (!rooms.has(input.scopeRoomId)) throw new Error(`unknown room ${input.scopeRoomId}`);
   const kind = input.kind ?? "agent";
   const wanted = slug(input.handle ?? input.name);
-  if (wanted === "room") throw new Error(`"@room" is reserved`);
+  if (BROADCAST.has(wanted)) throw new Error(`"@${wanted}" is reserved`);
   if (input.handle && members.has(wanted)) throw new Error(`handle @${wanted} is taken`);
   const member: Member = {
-    handle: input.handle ? wanted : uniqueSlug(wanted, members),
+    handle: input.handle ? wanted : uniqueSlug(wanted, members, BROADCAST),
     name: input.name.trim(),
     kind,
     org: input.org.trim(),
@@ -137,6 +137,11 @@ export function getMember(handle: string): Member | undefined {
 
 export function allMembers(): Member[] {
   return [...members.values()];
+}
+
+/** True when `a` and `b` can both see at least one room. */
+export function sharesRoom(a: Member, b: Member): boolean {
+  return visibleRooms(a).some((r) => canSee(b, r.id));
 }
 
 /** Members who share at least one room with `m` (including `m`). */
@@ -167,15 +172,19 @@ export function roomMembers(roomId: string): Member[] {
 
 // --- messages --------------------------------------------------------------
 
-const MENTION = /(^|[^\w@.-])@([a-z0-9][a-z0-9_-]*)/gi;
+// @handle not preceded by a word char (emails) and not followed by "/" or "."+word
+// (npm scopes like @anna/pkg, domains). Code spans and blocks are skipped.
+const MENTION = /(^|[^\w@.\/-])@([a-z0-9][a-z0-9_-]*)(?![\w\/-]|\.\w)/gi;
+const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
+const BROADCAST = new Set(["room", "here", "all"]);
 
 /** Handles mentioned in `text` that are members of the room, plus whether @room was used. */
 export function parseMentions(text: string, roomId: string): { mentions: string[]; mentionsRoom: boolean } {
   const found = new Set<string>();
   let mentionsRoom = false;
-  for (const [, , raw] of text.matchAll(MENTION)) {
+  for (const [, , raw] of text.replace(CODE, " ").matchAll(MENTION)) {
     const handle = raw.toLowerCase();
-    if (handle === "room" || handle === "here" || handle === "all") mentionsRoom = true;
+    if (BROADCAST.has(handle)) mentionsRoom = true;
     else if (members.has(handle) && canSee(members.get(handle)!, roomId)) found.add(handle);
   }
   return { mentions: [...found], mentionsRoom };
@@ -183,7 +192,7 @@ export function parseMentions(text: string, roomId: string): { mentions: string[
 
 export function post(m: Member, roomId: string, kind: MessageKind, text: string): Message {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
-  if (!text?.trim()) throw new Error("text is required");
+  if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of ${MESSAGE_KINDS.join(", ")}`);
   const room = rooms.get(roomId)!;
   const msg: Message = {
@@ -228,9 +237,9 @@ function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "room";
 }
 
-function uniqueSlug(name: string, taken: Map<string, unknown>): string {
+function uniqueSlug(name: string, taken: Map<string, unknown>, reserved = new Set<string>()): string {
   const base = slug(name);
   let id = base;
-  for (let i = 2; taken.has(id); i++) id = `${base}-${i}`;
+  for (let i = 2; taken.has(id) || reserved.has(id); i++) id = `${base}-${i}`;
   return id;
 }

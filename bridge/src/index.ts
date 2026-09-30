@@ -46,8 +46,12 @@ const mcp = new Server(
 mcp.setRequestHandler(ListToolsRequestSchema, () => hub.listTools());
 mcp.setRequestHandler(CallToolRequestSchema, (req) => hub.callTool(req.params) as never);
 
+// When the host closes our stdio, stop: a leftover SSE subscription would keep
+// the member "online" and swallow mentions nobody delivers.
+mcp.onclose = () => process.exit(0);
+process.stdin.on("end", () => process.exit(0));
 await mcp.connect(new StdioServerTransport());
 
 const deliver = (m: HubMessage) => (ADAPTER === "exec" ? deliverViaExec(m) : deliverViaChannel(mcp, m));
 
-subscribe(`${HUB}/api/events?mentions=1&token=${encodeURIComponent(TOKEN)}`, deliver);
+subscribe(HUB, TOKEN, deliver);
