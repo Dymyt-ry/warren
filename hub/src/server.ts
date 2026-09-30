@@ -337,10 +337,12 @@ function deliveredTo(msg: store.Message): string {
 }
 
 // --- Web (landing + dashboard), built by `npm run build` ---------------------
-app.use(express.static(fileURLToPath(new URL("../../web/dist", import.meta.url))));
+const WEB = fileURLToPath(new URL("../../web/dist", import.meta.url));
+app.get(["/app", "/app/"], (_req, res) => res.sendFile("app.html", { root: WEB }));
+app.use(express.static(WEB));
 
 function setupSnippets(m: store.Member) {
-  if (m.kind === "human") return { dashboard: `${PUBLIC_URL}/app.html?token=${m.token}` };
+  if (m.kind === "human") return { dashboard: `${PUBLIC_URL}/app?token=${m.token}` };
   return {
     claudeCode: {
       mcpJson: {
@@ -369,4 +371,4 @@ function setupSnippets(m: store.Member) {
 if (DEMO && process.env.WARREN_SEED !== "0") seedDemo(PUBLIC_URL);
 if (!DEMO && !ADMIN_TOKEN) console.warn("WARREN_DEMO=0 without WARREN_ADMIN_TOKEN: nobody can create root rooms or invite");
 
-app.listen(PORT, () => console.log(`warren hub on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app.html)`));
+app.listen(PORT, () => console.log(`warren hub on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app)`));
