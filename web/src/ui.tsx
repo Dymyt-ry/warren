@@ -1,35 +1,45 @@
-// Pieces shared by the landing hero and the dashboard, so the landing shows the real UI.
-import { CheckCircle, Robot, Swap, Question } from "@phosphor-icons/react";
+// Pieces shared by the landing map and the dashboard, so the landing shows the real UI.
+// Shapes follow the mark: people are circles, agents are rooms (a rounded square with a room inside).
 import type React from "react";
 import type { Member, Message, MessageKind } from "./api";
 
-export function Avatar({ kind, name, size = 32 }: { kind: Member["kind"]; name: string; size?: number }) {
+export function Avatar({
+  kind,
+  name,
+  size = 32,
+  lit = false,
+}: {
+  kind: Member["kind"];
+  name: string;
+  size?: number;
+  lit?: boolean;
+}) {
   return kind === "agent" ? (
-    <span className="avatar agent" style={{ width: size, height: size }} aria-hidden>
-      <Robot size={size * 0.55} weight="bold" />
+    <span className={`avatar agent${lit ? " lit" : ""}`} style={{ width: size, height: size }} aria-hidden>
+      <span className="avatar-room" />
     </span>
   ) : (
-    <span className="avatar human" style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden>
+    <span className={`avatar human${lit ? " lit" : ""}`} style={{ width: size, height: size, fontSize: size * 0.42 }} aria-hidden>
       {name.slice(0, 1).toUpperCase()}
     </span>
   );
 }
 
-const KIND_LABEL: Record<MessageKind, { label: string; Icon?: typeof Swap } | null> = {
+const KIND_LABEL: Record<MessageKind, string | null> = {
   note: null,
-  question: { label: "Question", Icon: Question },
-  contract_change: { label: "Contract change", Icon: Swap },
-  done: { label: "Done", Icon: CheckCircle },
+  question: "Question",
+  contract_change: "Contract change",
+  done: "Done",
 };
 
+/** A message's kind as a small room glyph plus a word; colour only where the kind has a colour role. */
 export function KindTag({ kind }: { kind: MessageKind }) {
-  const k = KIND_LABEL[kind];
-  if (!k) return null;
-  const Icon = k.Icon!;
+  const label = KIND_LABEL[kind];
+  if (!label) return null;
   return (
     <span className={`kind kind-${kind}`}>
-      <Icon size={13} weight="bold" aria-hidden />
-      {k.label}
+      <span className="kind-glyph" aria-hidden />
+      {label}
     </span>
   );
 }
@@ -77,7 +87,6 @@ export function MessageItem({
       <div className="msg-body">
         <header>
           <span className="msg-name">{author?.name ?? m.from}</span>
-          <span className="msg-handle">@{m.from}</span>
           {external && <span className="org">{m.org}</span>}
           <KindTag kind={m.kind} />
           <time dateTime={m.at}>{time}</time>

@@ -1,12 +1,42 @@
-// Dashboard: the room tree, one room's thread with a composer, and who is in the room.
-// People sign in by picking who they are (demo login, see README limits).
+// Dashboard (Operate mode): the room tree, one room's thread with a composer, and who is in the room.
+// Built from shadcn primitives mapped onto the brand tokens (index.css). People sign in by picking
+// who they are (demo login, see README limits). Design rules: web/DESIGN.md.
 import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { PaperPlaneRight, PencilSimple, Plus } from "@phosphor-icons/react";
+import { PaperPlaneRightIcon, PencilSimpleIcon, PlusIcon } from "@phosphor-icons/react";
+import "@fontsource-variable/outfit";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
+import "./index.css";
 import "./styles.css";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { Kbd } from "@/components/ui/kbd";
+import { Marker, MarkerContent } from "@/components/ui/marker";
+import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from "@/components/ui/message-scroller";
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Logo } from "./Logo";
-import { api, ownerOf, storedToken, storeToken, useHub, type Member, type Message, type MessageKind, type Room } from "./api";
-import { Avatar, MessageItem } from "./ui";
+import { api, ownerOf, storedToken, storeToken, useHub, type Member, type Message as Msg, type MessageKind, type Room } from "./api";
+import { Avatar, KindTag, MentionText } from "./ui";
+
+const OVERVIEW = "__overview";
+
+const isForMe = (m: Msg, handle: string) => m.from !== handle && (m.forYou || m.mentions.includes(handle) || m.mentionsRoom);
 
 function Dashboard() {
   const [token, setToken] = useState<string | null>(() => new URLSearchParams(location.search).get("token") ?? storedToken());
@@ -21,12 +51,11 @@ function Dashboard() {
   }, [token]);
 
   // Open where you're needed: a room that mentions you, else the latest activity, else the top room.
-  // Re-picked when the viewer changes or the selection is no longer visible.
   useEffect(() => {
     if (selected && rooms[selected]) return;
     const all = Object.values(rooms);
     const handle = me?.handle;
-    const mentioning = handle && all.find((r) => r.messages.some((m) => m.from !== handle && (m.forYou || m.mentions.includes(handle))));
+    const mentioning = handle && all.find((r) => r.messages.some((m) => isForMe(m, handle)));
     const latest = [...all].sort((a, b) => (b.messages.at(-1)?.at ?? "").localeCompare(a.messages.at(-1)?.at ?? ""))[0];
     const top = all.find((r) => !r.parentId || !rooms[r.parentId]);
     setSelected((mentioning || (latest?.messages.length ? latest : top))?.id ?? null);
@@ -37,66 +66,86 @@ function Dashboard() {
 
   const signIn = async (handle: string) => {
     setSelected(null);
-    if (!handle) return setToken(null);
+    if (handle === OVERVIEW) return setToken(null);
     const m = await api.login(handle);
     setToken(m.token);
   };
 
   return (
-    <div className="dash">
-      <aside className="sidebar">
-        <a href="/" className="sidebar-logo">
-          <Logo />
-        </a>
-        <label className="viewer">
-          <span>Viewing as</span>
-          <select value={me?.handle ?? ""} onChange={(e) => signIn(e.target.value)}>
-            <option value="">Everyone (read only)</option>
-            {people.map((p) => (
-              <option key={p.handle} value={p.handle}>
-                {p.name} ({p.org})
-              </option>
-            ))}
-          </select>
-        </label>
-        <nav aria-label="Rooms">
-          <RoomTree rooms={rooms} selected={selected} onSelect={setSelected} me={me?.handle} />
-        </nav>
-        <p className={`hub-status ${status}`} role="status">
-          {status === "live" ? "Connected to hub" : status === "loading" ? "Connecting to hub" : "Hub offline"}
-        </p>
-      </aside>
+    <TooltipProvider delayDuration={600}>
+      <div className="grid h-dvh grid-cols-1 md:grid-cols-[264px_minmax(0,1fr)]">
+        <aside className="flex min-h-0 flex-col gap-6 border-border bg-card px-3 py-5 md:border-r">
+          <a href="/" className="px-2 no-underline">
+            <Logo />
+          </a>
 
-      <main className="room-main">
-        {status === "offline" && Object.keys(rooms).length === 0 ? (
-          <div className="empty">
-            <h2>Can't reach the hub</h2>
-            <p>
-              Start it with <code>npm run dev</code> in the repo, then reload. {error && <span>({error})</span>}
-            </p>
+          <div className="flex flex-col gap-1.5 px-1">
+            <span className="px-1 text-xs font-medium text-muted-foreground">You are</span>
+            <Select value={me?.handle ?? OVERVIEW} onValueChange={signIn}>
+              <SelectTrigger className="w-full" aria-label="You are">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectLabel>People</SelectLabel>
+                  {people.map((p) => (
+                    <SelectItem key={p.handle} value={p.handle}>
+                      {p.name} <span className="text-muted-foreground">{p.org}</span>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+                <SelectGroup>
+                  <SelectItem value={OVERVIEW}>Nobody, just looking</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
           </div>
-        ) : room ? (
-          <RoomView
-            key={room.id}
-            room={room}
-            rooms={rooms}
-            members={members}
-            me={me}
-            token={token}
-            onPosted={addMessage}
-            onContext={(r) => setRooms((prev) => ({ ...prev, [r.id]: { ...prev[r.id], context: r.context } }))}
-            onNewRoom={(r) => {
-              setRooms((prev) => ({ ...prev, [r.id]: r }));
-              setSelected(r.id);
-            }}
-          />
-        ) : (
-          <div className="empty">
-            <h2>{status === "loading" ? "Loading rooms" : "No rooms you can see"}</h2>
-          </div>
-        )}
-      </main>
-    </div>
+
+          <nav aria-label="Rooms" className="min-h-0 flex-1 overflow-y-auto">
+            <p className="mb-1 px-3 text-xs font-medium text-muted-foreground">Rooms</p>
+            <RoomTree rooms={rooms} selected={selected} onSelect={setSelected} me={me?.handle} />
+          </nav>
+
+          <p role="status" className={cn("px-3 text-xs text-muted-foreground", status === "offline" && "text-coral")}>
+            {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
+          </p>
+        </aside>
+
+        <main className="min-h-0 min-w-0">
+          {status === "offline" && Object.keys(rooms).length === 0 ? (
+            <Empty className="h-full">
+              <EmptyHeader>
+                <EmptyTitle>The hub isn't answering</EmptyTitle>
+                <EmptyDescription>
+                  Start it with <Kbd>npm run dev</Kbd> in the repo, then reload.{error && ` (${error})`}
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : room ? (
+            <RoomView
+              key={room.id}
+              room={room}
+              rooms={rooms}
+              members={members}
+              me={me}
+              token={token}
+              onPosted={addMessage}
+              onContext={(r) => setRooms((prev) => ({ ...prev, [r.id]: { ...prev[r.id], context: r.context } }))}
+              onNewRoom={(r) => {
+                setRooms((prev) => ({ ...prev, [r.id]: r }));
+                setSelected(r.id);
+              }}
+            />
+          ) : (
+            <Empty className="h-full">
+              <EmptyHeader>
+                <EmptyTitle>{status === "loading" ? "Loading rooms" : "No rooms you can see"}</EmptyTitle>
+              </EmptyHeader>
+            </Empty>
+          )}
+        </main>
+      </div>
+    </TooltipProvider>
   );
 }
 
@@ -122,19 +171,29 @@ function RoomTree({
 
   const render = (parent: string, depth: number) =>
     (children[parent] ?? []).map((r) => {
-      const forMe = me ? r.messages.filter((m) => m.from !== me && (m.forYou || m.mentions.includes(me))).length : 0;
+      const forMe = me ? r.messages.filter((m) => isForMe(m, me)).length : 0;
+      const active = selected === r.id;
       return (
         <li key={r.id}>
           <button
-            className={`room-link${selected === r.id ? " active" : ""}`}
-            style={{ paddingLeft: 16 + depth * 16 }}
-            aria-current={selected === r.id ? "page" : undefined}
             onClick={() => onSelect(r.id)}
+            aria-current={active ? "page" : undefined}
+            style={{ paddingLeft: 12 + depth * 18 }}
+            className={cn(
+              "flex h-9 w-full items-center gap-2.5 rounded-lg pr-2 text-left text-sm transition-colors hover:bg-accent",
+              active && "bg-accent font-semibold",
+            )}
           >
-            <span className="room-glyph" aria-hidden />
-            <span className="room-name">{r.name}</span>
+            <span
+              aria-hidden
+              className={cn(
+                "size-3 shrink-0 rounded-[30%] border-[1.5px]",
+                forMe ? "border-sun bg-sun" : active ? "border-primary" : "border-muted-foreground/60",
+              )}
+            />
+            <span className="min-w-0 flex-1 truncate">{r.name}</span>
             {forMe > 0 && (
-              <span className="badge-mention" aria-label={`${forMe} mentions you`}>
+              <span className="text-xs font-semibold tabular-nums" aria-label={`${forMe} for you`}>
                 {forMe}
               </span>
             )}
@@ -144,7 +203,7 @@ function RoomTree({
       );
     });
 
-  return <ul className="room-tree">{render("root", 0)}</ul>;
+  return <ul className="flex flex-col gap-0.5">{render("root", 0)}</ul>;
 }
 
 function RoomView({
@@ -162,62 +221,48 @@ function RoomView({
   members: Record<string, Member>;
   me: Member | null;
   token: string | null;
-  onPosted: (m: Message) => void;
+  onPosted: (m: Msg) => void;
   onContext: (r: Room) => void;
   onNewRoom: (r: Room) => void;
 }) {
   const [inRoom, setInRoom] = useState<Member[]>([]);
-  const threadEnd = useRef<HTMLDivElement>(null);
   const memberCount = Object.keys(members).length;
 
   useEffect(() => {
     api.roomMembers(room.id).then(setInRoom, () => setInRoom([]));
   }, [room.id, memberCount]);
 
-  useEffect(() => {
-    threadEnd.current?.scrollIntoView({ block: "end" });
-  }, [room.messages.length]);
-
   const path: Room[] = [];
   for (let r: Room | undefined = room; r; r = r.parentId ? rooms[r.parentId] : undefined) path.unshift(r);
 
   const addSubroom = async () => {
-    const name = prompt(`Name of the new subroom under ${room.name}`);
+    const name = prompt(`Name the new room inside ${room.name}`);
     if (name?.trim() && token) onNewRoom(await api.createRoom(token, room.id, name.trim()));
   };
 
   return (
-    <div className="room-view">
-      <section className="thread-col">
-        <header className="room-head">
-          <h1>
+    <div className="grid h-full grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px]">
+      <section className="flex min-h-0 min-w-0 flex-col">
+        <header className="flex items-center justify-between gap-4 px-8 pt-6 pb-3">
+          <h1 className="flex min-w-0 flex-wrap items-baseline gap-x-2 font-heading text-2xl">
             {path.map((r, i) => (
-              <span key={r.id} className={i === path.length - 1 ? "crumb current" : "crumb"}>
+              <span key={r.id} className={i === path.length - 1 ? "text-foreground" : "text-muted-foreground"}>
                 {r.name}
+                {i < path.length - 1 && <span className="ml-2 text-border">/</span>}
               </span>
             ))}
           </h1>
           {me && (
-            <button className="ghost" onClick={addSubroom}>
-              <Plus size={14} weight="bold" aria-hidden /> Subroom
-            </button>
+            <Button variant="ghost" size="sm" onClick={addSubroom}>
+              <PlusIcon data-icon="inline-start" weight="bold" />
+              New room inside
+            </Button>
           )}
         </header>
 
         <RoomContext room={room} token={me ? token : null} onSaved={onContext} />
 
-        {room.messages.length === 0 ? (
-          <div className="empty thread-empty">
-            <p>No messages yet. Type @ to hand work to an agent or a person in this room.</p>
-          </div>
-        ) : (
-          <ol className="thread">
-            {room.messages.map((m) => (
-              <MessageItem key={m.id} m={m} author={members[m.from]} me={me?.handle} external={!!me && m.org !== me.org} />
-            ))}
-          </ol>
-        )}
-        <div ref={threadEnd} />
+        <Thread room={room} members={members} me={me} />
 
         <Composer room={room} me={me} token={token} inRoom={inRoom} onPosted={onPosted} />
       </section>
@@ -228,6 +273,7 @@ function RoomView({
 }
 
 function RoomContext({ room, token, onSaved }: { room: Room; token: string | null; onSaved: (r: Room) => void }) {
+  const [open, setOpen] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(room.context);
   const [error, setError] = useState<string | null>(null);
@@ -243,34 +289,111 @@ function RoomContext({ room, token, onSaved }: { room: Room; token: string | nul
   };
 
   return (
-    <details className="context" open>
-      <summary>
-        Room context <span className="hint">what every agent here reads first</span>
-      </summary>
-      {editing ? (
-        <div className="context-edit">
-          <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={6} aria-label="Room context (markdown)" />
-          {error && <p className="error">{error}</p>}
-          <div className="row">
-            <button className="primary" onClick={save}>
-              Save context
-            </button>
-            <button className="ghost" onClick={() => (setEditing(false), setDraft(room.context))}>
-              Cancel
-            </button>
+    <Collapsible open={open} onOpenChange={setOpen} className="px-8 pb-2">
+      <div className="flex items-center gap-3">
+        <CollapsibleTrigger asChild>
+          <button className="text-sm font-medium text-muted-foreground hover:text-foreground">
+            {open ? "Hide" : "Show"} room context
+          </button>
+        </CollapsibleTrigger>
+        {open && token && !editing && (
+          <Button variant="ghost" size="sm" onClick={() => (setDraft(room.context), setEditing(true))}>
+            <PencilSimpleIcon data-icon="inline-start" />
+            Edit
+          </Button>
+        )}
+      </div>
+      <CollapsibleContent>
+        {editing ? (
+          <div className="mt-2 flex flex-col gap-2">
+            <Textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              rows={6}
+              aria-label="Room context, markdown"
+              className="font-mono text-[13px]"
+            />
+            {error && <p className="error">{error}</p>}
+            <div className="flex gap-2">
+              <Button size="sm" onClick={save}>
+                Save context
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => (setEditing(false), setDraft(room.context))}>
+                Cancel
+              </Button>
+            </div>
           </div>
-        </div>
-      ) : (
-        <>
-          <pre>{room.context || "No context yet."}</pre>
-          {token && (
-            <button className="ghost" onClick={() => (setDraft(room.context), setEditing(true))}>
-              <PencilSimple size={14} weight="bold" aria-hidden /> Edit context
-            </button>
-          )}
-        </>
-      )}
-    </details>
+        ) : (
+          <pre className="mt-2 max-h-40 overflow-y-auto font-mono text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+            {room.context || "No context yet. Write down what every agent in this room should know first."}
+          </pre>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function Thread({ room, members, me }: { room: Room; members: Record<string, Member>; me: Member | null }) {
+  // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
+  const [mountedAt] = useState(() => Date.now());
+  if (room.messages.length === 0)
+    return (
+      <Empty className="flex-1">
+        <EmptyHeader>
+          <EmptyTitle>Nothing here yet</EmptyTitle>
+          <EmptyDescription>Type @ in the box below to hand work to an agent or a person in {room.name}.</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+
+  return (
+    <MessageScrollerProvider autoScroll>
+      <MessageScroller className="min-h-0 flex-1">
+        <MessageScrollerViewport>
+          <MessageScrollerContent className="flex flex-col gap-1 px-5 py-4">
+            <MessageScrollerItem messageId="day">
+              <Marker variant="separator" className="py-2">
+                <MarkerContent>Today</MarkerContent>
+              </Marker>
+            </MessageScrollerItem>
+            {room.messages.map((m) => {
+              const author = members[m.from];
+              const forMe = !!me && isForMe(m, me.handle);
+              const time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+              return (
+                <MessageScrollerItem key={m.id} messageId={m.id} scrollAnchor={m.from === me?.handle}>
+                  <Message
+                    className={cn(
+                      "items-start gap-3 rounded-xl px-3 py-2.5",
+                      forMe && "bg-mention",
+                      Date.parse(m.at) > mountedAt && "msg-arrive",
+                    )}
+                  >
+                    <MessageAvatar className="self-start overflow-visible rounded-none bg-transparent">
+                      <Avatar kind={m.fromKind} name={author?.name ?? m.from} size={32} />
+                    </MessageAvatar>
+                    <MessageContent className="gap-1">
+                      <MessageHeader className="gap-2.5 px-0 text-[13px]">
+                        <span className="font-semibold text-foreground">{author?.name ?? m.from}</span>
+                        {me && m.org !== me.org && <span>{m.org}</span>}
+                        <KindTag kind={m.kind} />
+                        <time className="ml-auto tabular-nums" dateTime={m.at}>
+                          {time}
+                        </time>
+                      </MessageHeader>
+                      <p className="m-0 text-[15px] leading-normal whitespace-pre-wrap text-foreground">
+                        <MentionText text={m.text} me={me?.handle} />
+                      </p>
+                    </MessageContent>
+                  </Message>
+                </MessageScrollerItem>
+              );
+            })}
+          </MessageScrollerContent>
+        </MessageScrollerViewport>
+        <MessageScrollerButton />
+      </MessageScroller>
+    </MessageScrollerProvider>
   );
 }
 
@@ -292,13 +415,14 @@ function Composer({
   me: Member | null;
   token: string | null;
   inRoom: Member[];
-  onPosted: (m: Message) => void;
+  onPosted: (m: Msg) => void;
 }) {
   const [text, setText] = useState("");
   const [kind, setKind] = useState<MessageKind>("note");
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
-  const [pick, setPick] = useState(0);
+  const [pick, setPick] = useState("");
+  const [dismissed, setDismissed] = useState<string | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
 
   // @autocomplete for the word being typed, when it starts with @.
@@ -310,10 +434,11 @@ function Composer({
       : [...inRoom.filter((m) => m.handle !== me?.handle), everyone]
           .filter((m) => m.handle.startsWith(query) || m.name.toLowerCase().startsWith(query))
           .slice(0, 6);
+  const open = suggestions.length > 0 && dismissed !== text;
+  const active = suggestions.some((s) => s.handle === pick) ? pick : suggestions[0]?.handle ?? "";
 
   const complete = (handle: string) => {
     setText((t) => t.replace(/@([a-z0-9_-]*)$/i, `@${handle} `));
-    setPick(0);
     input.current?.focus();
   };
 
@@ -333,15 +458,21 @@ function Composer({
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (suggestions.length) {
+    if (open) {
+      const i = suggestions.findIndex((s) => s.handle === active);
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setPick((p) => (p + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length);
+        setPick(suggestions[(i + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length].handle);
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        complete(suggestions[pick].handle);
+        complete(active);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDismissed(text);
         return;
       }
     }
@@ -353,65 +484,84 @@ function Composer({
 
   if (!me)
     return (
-      <p className="composer-signin">
-        Pick who you are under <b>Viewing as</b> to post in {room.name}.
+      <p className="m-0 px-8 pt-3 pb-6 text-sm text-muted-foreground">
+        Pick yourself under <span className="font-medium text-foreground">You are</span> to write in {room.name}.
       </p>
     );
 
   return (
-    <form className="composer" onSubmit={(e) => (e.preventDefault(), send())}>
-      {suggestions.length > 0 && (
-        <ul className="suggest" role="listbox" aria-label="Mention someone">
-          {suggestions.map((m, i) => (
-            <li key={m.handle} role="option" aria-selected={i === pick}>
-              <button type="button" onMouseDown={(e) => (e.preventDefault(), complete(m.handle))}>
-                {m.handle !== "room" && <Avatar kind={m.kind} name={m.name} size={22} />}
-                <span className="msg-name">{m.name}</span>
-                <span className="msg-handle">@{m.handle}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-      <textarea
-        ref={input}
-        value={text}
-        onChange={(e) => (setText(e.target.value), setPick(0))}
-        onKeyDown={onKey}
-        rows={2}
-        placeholder={`Message ${room.name}. Type @ to mention an agent or a person.`}
-        aria-label={`Message ${room.name}`}
-      />
+    <form className="px-8 pt-2 pb-6" onSubmit={(e) => (e.preventDefault(), send())}>
+      <Popover open={open}>
+        <PopoverAnchor asChild>
+          <Textarea
+            ref={input}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={onKey}
+            rows={2}
+            placeholder={`Write to ${room.name}. Type @ to mention someone.`}
+            aria-label={`Message ${room.name}`}
+            aria-autocomplete="list"
+            className="min-h-16 resize-none text-[15px]"
+          />
+        </PopoverAnchor>
+        <PopoverContent
+          side="top"
+          align="start"
+          className="w-72 p-1 data-open:animate-none data-closed:animate-none"
+          onOpenAutoFocus={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => e.preventDefault()}
+        >
+          <Command value={active} onValueChange={setPick} shouldFilter={false}>
+            <CommandList>
+              <CommandEmpty>Nobody by that name here.</CommandEmpty>
+              <CommandGroup heading={`In ${room.name}`}>
+                {suggestions.map((m) => (
+                  <CommandItem key={m.handle} value={m.handle} onSelect={complete} className="gap-2.5">
+                    {m.handle !== "room" && <Avatar kind={m.kind} name={m.name} size={22} />}
+                    <span className="font-medium">{m.name}</span>
+                    <span className="ml-auto text-xs text-muted-foreground">@{m.handle}</span>
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
       {error && <p className="error">{error}</p>}
-      <div className="composer-bar">
-        <div className="kinds" role="radiogroup" aria-label="Message type">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+        <ToggleGroup
+          type="single"
+          size="sm"
+          value={kind}
+          onValueChange={(v) => v && setKind(v as MessageKind)}
+          aria-label="What kind of message"
+        >
           {KINDS.map((k) => (
-            <button
+            <ToggleGroupItem
               key={k.kind}
-              type="button"
-              role="radio"
-              aria-checked={kind === k.kind}
-              className={`kind-pick kind-${k.kind}${kind === k.kind ? " on" : ""}`}
-              onClick={() => setKind(k.kind)}
+              value={k.kind}
+              className={cn(k.kind === "contract_change" && "data-[state=on]:text-coral")}
             >
               {k.label}
-            </button>
+            </ToggleGroupItem>
           ))}
-        </div>
-        <button className="primary" type="submit" disabled={!text.trim() || sending}>
-          <PaperPlaneRight size={15} weight="fill" aria-hidden /> Send
-        </button>
+        </ToggleGroup>
+        <Button type="submit" disabled={!text.trim() || sending}>
+          <PaperPlaneRightIcon data-icon="inline-start" weight="fill" />
+          {sending ? "Sending" : "Send"}
+        </Button>
       </div>
     </form>
   );
 }
 
 const DELIVERY: Record<Member["adapter"], string> = {
-  channel: "pushed into its session",
-  exec: "woken up on mention",
-  inbox: "checks its inbox",
-  a2a: "reached over A2A",
-  dashboard: "in the dashboard",
+  channel: "Messages are pushed into its running session",
+  exec: "Woken in its own thread when mentioned",
+  inbox: "Reads its inbox when it checks in",
+  a2a: "Reached over A2A",
+  dashboard: "Reads this dashboard",
 };
 
 function MembersPanel({ inRoom, members, me }: { inRoom: Member[]; members: Record<string, Member>; me: Member | null }) {
@@ -422,65 +572,67 @@ function MembersPanel({ inRoom, members, me }: { inRoom: Member[]; members: Reco
   const orgs = [...new Set(humans.map((h) => h.org))];
 
   return (
-    <aside className="members" aria-label="Who is in this room">
-      <h2>In this room</h2>
-      {orgs.map((org) => (
-        <section key={org}>
-          <h3>
-            {org}
-            {me && org !== me.org && <span className="org">guest company</span>}
-          </h3>
-          <ul>
-            {humans
-              .filter((h) => h.org === org)
-              .map((h) => (
-                <li key={h.handle}>
-                  <MemberRow m={h} me={me} />
-                  {agentsOf(h).length > 0 && (
-                    <ul className="agents">
-                      {agentsOf(h).map((a) => (
-                        <li key={a.handle}>
-                          <MemberRow m={a} me={me} />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </li>
-              ))}
-          </ul>
-        </section>
-      ))}
-      {orphans.length > 0 && (
-        <section>
-          <h3>Other agents</h3>
-          <ul>
+    <aside aria-label="Who is in this room" className="hidden min-h-0 overflow-y-auto border-l border-border px-5 py-6 xl:block">
+      <h2 className="mb-5 font-heading text-base">In this room</h2>
+      <div className="flex flex-col gap-6">
+        {orgs.map((org) => (
+          <section key={org} className="flex flex-col gap-3">
+            <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">
+              {org}
+              {me && org !== me.org && " (guest company)"}
+            </h3>
+            <ul className="flex flex-col gap-3">
+              {humans
+                .filter((h) => h.org === org)
+                .map((h) => (
+                  <li key={h.handle} className="flex flex-col gap-2">
+                    <MemberRow m={h} me={me} />
+                    {agentsOf(h).map((a) => (
+                      <div key={a.handle} className="ml-3 border-l border-border pl-4">
+                        <MemberRow m={a} me={me} />
+                      </div>
+                    ))}
+                  </li>
+                ))}
+            </ul>
+          </section>
+        ))}
+        {orphans.length > 0 && (
+          <section className="flex flex-col gap-3">
+            <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">Other agents</h3>
             {orphans.map((a) => (
-              <li key={a.handle}>
-                <MemberRow m={a} me={me} />
-              </li>
+              <MemberRow key={a.handle} m={a} me={me} />
             ))}
-          </ul>
-        </section>
-      )}
+          </section>
+        )}
+      </div>
     </aside>
   );
 }
 
 function MemberRow({ m, me }: { m: Member; me: Member | null }) {
-  return (
-    <div className="member">
-      <Avatar kind={m.kind} name={m.name} size={26} />
-      <div>
-        <div className="member-name">
+  const row = (
+    <div className="flex items-center gap-3">
+      <Avatar kind={m.kind} name={m.name} size={28} />
+      <div className="min-w-0">
+        <div className="truncate text-sm font-semibold">
           {m.name}
-          {me?.handle === m.handle && <span className="you">you</span>}
+          {me?.handle === m.handle && <span className="ml-1.5 text-xs font-medium text-primary">you</span>}
         </div>
-        <div className="member-sub">
-          @{m.handle}
-          {m.kind === "agent" && <>, {DELIVERY[m.adapter]}</>}
-        </div>
+        <div className="truncate text-xs text-muted-foreground">@{m.handle}</div>
       </div>
     </div>
+  );
+  if (m.kind !== "agent") return row;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div tabIndex={0} className="rounded-md">
+          {row}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="left">{DELIVERY[m.adapter]}</TooltipContent>
+    </Tooltip>
   );
 }
 

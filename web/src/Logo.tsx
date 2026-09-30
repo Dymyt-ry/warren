@@ -1,9 +1,11 @@
-// Mark + wordmark. The mark swaps to its dark-mode colours via CSS.
+// Mark + wordmark. The mark swaps to its dark-mode colours through <picture>, independent of any CSS layer.
 export function Logo() {
   return (
     <span className="logo">
-      <img className="light" src="/warren-mark.svg" alt="" />
-      <img className="dark" src="/warren-mark-dark.svg" alt="" />
+      <picture>
+        <source srcSet="/warren-mark-dark.svg" media="(prefers-color-scheme: dark)" />
+        <img src="/warren-mark.svg" alt="" width={26} height={26} />
+      </picture>
       warren
     </span>
   );

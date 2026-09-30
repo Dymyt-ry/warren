@@ -30,7 +30,7 @@ Colour carries meaning: yellow means "this is for you", coral means "something y
 
 ## Type
 
-Inter (Google Fonts, OFL), weight 650 for the wordmark with tight tracking (-0.02em), 400/500 for UI. Fallback: the system font (SF Pro on Apple devices). JetBrains Mono / SF Mono for code and room context.
+Outfit (OFL) for headings and the wordmark, weight 500 to 600, tracking -0.03em. Inter (OFL) 400/500/600 for text and UI. Both self-hosted via Fontsource in `web/`. Display face added 2026-09-30 with Tim's approval after a Hallmark audit flagged Inter-only as a generated-UI tell. Fallback: the system font (SF Pro on Apple devices). JetBrains Mono / SF Mono for code and room context.
 
 ## Rules
 

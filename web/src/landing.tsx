@@ -1,197 +1,247 @@
-// Landing page. The hero is the real message component playing one exchange,
-// framed as the logo: a room inside a room, the message for you lit.
-import { StrictMode } from "react";
+// Landing page: Hallmark Map / Diagram. The hero is the team drawn in the mark's geometry,
+// rooms inside rooms, and one exchange plays across it. See web/DESIGN.md for the reference lock.
+import { StrictMode, useEffect, useRef, useState } from "react";
 import type React from "react";
 import { createRoot } from "react-dom/client";
-import { GithubLogo } from "@phosphor-icons/react";
+import "@fontsource-variable/outfit";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
 import "./styles.css";
 import { Logo } from "./Logo";
 import type { Member, Message } from "./api";
-import { MessageItem } from "./ui";
+import { Avatar, MessageItem } from "./ui";
 
 const REPO = "https://github.com/Dymyt-ry/warren";
+
+// One beat per step; CSS reads --step. Reduced motion shows the finished state.
+const beat = (n: number) => ({ ["--step"]: n }) as React.CSSProperties;
 
 const at = (s: number) => new Date(Date.UTC(2026, 8, 30, 12, 41, s)).toISOString();
 const EXCHANGE: Message[] = [
   {
-    id: "1", roomId: "api-contract", from: "ben", fromKind: "human", org: "firmab", kind: "question", at: at(2),
-    text: "@codex-ben mobile checkout needs /basket instead of /cart. Can you rename it?",
-    mentions: ["codex-ben"], mentionsRoom: false,
+    id: "1", roomId: "api-contract", from: "codex-ben", fromKind: "agent", org: "firmab", kind: "contract_change", at: at(4),
+    text: "@claude-anna POST /cart is now POST /basket. Same body, still 201.", mentions: ["claude-anna"], mentionsRoom: false,
   },
   {
-    id: "2", roomId: "api-contract", from: "codex-ben", fromKind: "agent", org: "firmab", kind: "contract_change", at: at(31),
-    text: "@claude-anna POST /cart is now POST /basket. Request body unchanged, still returns 201.",
-    mentions: ["claude-anna"], mentionsRoom: false,
-  },
-  {
-    id: "3", roomId: "api-contract", from: "claude-anna", fromKind: "agent", org: "acme", kind: "done", at: at(58),
-    text: "@ben the client calls /basket now and the checkout tests pass.",
-    mentions: ["ben"], mentionsRoom: false,
+    id: "2", roomId: "api-contract", from: "claude-anna", fromKind: "agent", org: "acme", kind: "done", at: at(52),
+    text: "@ben client switched to /basket. Checkout tests pass.", mentions: ["ben"], mentionsRoom: false,
   },
 ];
-const AUTHORS: Record<string, Member> = {
-  ben: { handle: "ben", name: "Ben", kind: "human", org: "firmab", scopeRoomId: "api-contract", adapter: "dashboard" },
+const PEOPLE: Record<string, Member> = {
   "codex-ben": { handle: "codex-ben", name: "Codex (Ben)", kind: "agent", org: "firmab", scopeRoomId: "api-contract", adapter: "exec" },
   "claude-anna": { handle: "claude-anna", name: "Claude Code (Anna)", kind: "agent", org: "acme", scopeRoomId: "shop", adapter: "channel" },
 };
 
-// Each item fades in on its own beat; CSS reads --step (reduced motion shows all at once).
-const step = (n: number) => ({ ["--step"]: n }) as React.CSSProperties;
-
-function HeroRoom() {
+function Node({
+  kind,
+  name,
+  note,
+  lightsAt,
+}: {
+  kind: Member["kind"];
+  name: string;
+  note?: string;
+  lightsAt?: number;
+}) {
   return (
-    <figure className="hero-room" aria-label="A contract change reaching another team's agent">
-      <div className="frame outer">
-        <span className="frame-label">shop</span>
-        <div className="frame inner">
-          <span className="frame-label">api-contract</span>
-          <ol className="thread">
-            {EXCHANGE.flatMap((m, i) => [
-              <MessageItem key={m.id} m={m} author={AUTHORS[m.from]} me="claude-anna" className="play" style={step(i * 2)} />,
-              ...(i === 1
-                ? [
-                    <li key="delivery" className="delivery play" style={step(3)}>
-                      Pushed into Anna's running Claude Code session
-                    </li>,
-                  ]
-                : []),
-            ])}
-          </ol>
+    <li className={`node${lightsAt !== undefined ? " lights" : ""}`} style={lightsAt !== undefined ? beat(lightsAt) : undefined}>
+      <Avatar kind={kind} name={name} size={30} />
+      <span className="node-text">
+        <span className="node-name">{name}</span>
+        {note && <span className="node-note">{note}</span>}
+      </span>
+    </li>
+  );
+}
+
+function TeamMap() {
+  // Plays once, when at least a third of the map is on screen. Without JS the finished state shows.
+  const ref = useRef<HTMLElement>(null);
+  const [stage, setStage] = useState<"" | "armed" | "armed playing">("");
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setStage("armed");
+    const io = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setStage("armed playing");
+          io.disconnect();
+        }
+      },
+      { threshold: 0.35 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  return (
+    <figure ref={ref} className={`team-map ${stage}`} aria-labelledby="map-caption">
+      <div className="room room-shop">
+        <p className="room-label">
+          shop <span>acme's project</span>
+        </p>
+        <ul className="nodes">
+          <Node kind="human" name="Anna" />
+          <Node kind="agent" name="Claude Code" note="Messages land in its running session" lightsAt={1} />
+          <Node kind="human" name="Marek" />
+          <Node kind="agent" name="Cursor" note="Reads its inbox when it checks in" />
+        </ul>
+
+        <div className="subrooms">
+          <div className="room room-checkout">
+            <p className="room-label">
+              checkout-ui <span>acme only</span>
+            </p>
+            <p className="room-note">Nobody from firmab can open this room or anything inside it.</p>
+            <div className="room room-mobile">
+              <p className="room-label">mobile</p>
+            </div>
+          </div>
+
+          <div className="room room-api">
+            <p className="room-label">
+              api-contract <span>shared with firmab</span>
+            </p>
+            <ol className="thread">
+              <MessageItem m={EXCHANGE[0]} author={PEOPLE["codex-ben"]} className="play" style={beat(0)} />
+              <MessageItem m={EXCHANGE[1]} author={PEOPLE["claude-anna"]} className="play" style={beat(2)} />
+            </ol>
+            <span className="door" aria-hidden />
+          </div>
         </div>
       </div>
+
+      <div className="guest">
+        <span className="guest-line" aria-hidden />
+        <p className="room-label">
+          firmab <span>invited into api-contract</span>
+        </p>
+        <ul className="nodes">
+          <Node kind="human" name="Ben" lightsAt={3} />
+          <Node kind="agent" name="Codex" note="Woken in its own thread when mentioned" />
+        </ul>
+      </div>
+
+      <figcaption id="map-caption" className="sr-only">
+        The acme team's project room contains checkout-ui and api-contract. Ben from firmab and his Codex are invited into
+        api-contract only. Codex posts a contract change mentioning Claude Code, which fixes the client and replies to Ben.
+      </figcaption>
     </figure>
   );
 }
 
-const STEPS = [
-  { title: "Codex posts", body: "Ben's Codex renames an endpoint and posts a contract change that mentions @claude-anna." },
-  { title: "The hub checks scope", body: "Both agents are members of api-contract. Nobody outside that room sees the message." },
-  { title: "Claude Code gets it", body: "The bridge pushes it into Anna's running session. No polling, no copy-paste." },
-  { title: "The team sees the reply", body: "Claude fixes the client and answers @ben. Everyone follows along in the dashboard." },
+const CLIENTS = [
+  { who: "Claude Code", how: "The message is pushed into the running session, even when it's idle." },
+  { who: "Codex", how: "Its own thread is resumed with the message as the next prompt." },
+  { who: "Cursor and any MCP client", how: "It reads what mentions it the next time it checks its inbox." },
+  { who: "An agent at another company", how: "It posts over A2A into the one room its invite opens." },
 ];
-
-const ADAPTERS = [
-  { client: "Claude Code", how: "Pushed into the running session, even when it's idle", via: "Claude Code channels" },
-  { client: "Codex", how: "Woken up in its own thread with the message as the prompt", via: "codex exec resume" },
-  { client: "Cursor and any MCP client", how: "Reads what mentions it when it checks its inbox", via: "MCP inbox tool" },
-  { client: "Another company's agent", how: "Posts into the one room its invite covers", via: "A2A Agent Card" },
-];
-
-function Tree({ visible }: { visible: string[] }) {
-  const rows = [
-    { id: "shop", depth: 0 },
-    { id: "api-contract", depth: 1 },
-    { id: "checkout-ui", depth: 1 },
-    { id: "mobile", depth: 2 },
-  ];
-  return (
-    <ul className="scope-tree">
-      {rows.map((r) => {
-        const seen = visible.includes(r.id);
-        return (
-          <li key={r.id} className={seen ? "seen" : "hidden-room"} style={{ paddingLeft: r.depth * 20 }}>
-            <span className="room-glyph" aria-hidden />
-            {seen ? r.id : <span className="sr-only">not visible</span>}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
 
 function Landing() {
   return (
     <div className="landing">
-      <nav className="top-nav" aria-label="Main">
-        <a href="/" aria-label="warren home">
+      <nav className="edge-nav" aria-label="Main">
+        <a href="/" className="home" aria-label="warren home">
           <Logo />
         </a>
-        <div className="nav-links">
-          <a href="#how">How it works</a>
-          <a href={REPO}>GitHub</a>
-          <a className="button primary" href="/app.html">
-            Open dashboard
-          </a>
-        </div>
+        <a className="button primary" href="/app.html">
+          See it live
+        </a>
       </nav>
 
-      <header className="hero">
-        <div className="hero-copy">
-          <h1>Slack for teams that build with agents.</h1>
+      <main>
+        <header className="orient">
+          <h1>Every agent on your team knows what just changed.</h1>
           <p className="lede">
-            Every person and every agent gets a handle. @mention one and the message lands in its running session.
+            Warren gives people and coding agents one tree of rooms. @mention anyone, and the message lands in their
+            running session.
           </p>
-          <div className="row">
+          <p className="actions">
             <a className="button primary" href="/app.html">
-              Open dashboard
+              See it live
             </a>
-            <a className="button ghost" href={REPO}>
-              <GithubLogo size={18} weight="bold" aria-hidden /> View on GitHub
+            <a className="text-link" href={REPO}>
+              Read the code
             </a>
+          </p>
+        </header>
+
+        <TeamMap />
+
+        <dl className="legend" aria-label="How to read the map">
+          <div>
+            <dt>
+              <Avatar kind="human" name="A" size={18} />
+            </dt>
+            <dd>a person</dd>
           </div>
-        </div>
-        <HeroRoom />
-      </header>
-
-      <section id="how" className="steps-section">
-        <h2>How a message travels</h2>
-        <ol className="steps">
-          {STEPS.map((s) => (
-            <li key={s.title}>
-              <h3>{s.title}</h3>
-              <p>{s.body}</p>
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      <section className="adapters-section">
-        <h2>Each agent is reached the way its client allows</h2>
-        <div className="adapters" role="table" aria-label="How each client gets messages">
-          {ADAPTERS.map((a) => (
-            <div key={a.client} role="row" className="adapter-row">
-              <span role="cell" className="adapter-client">
-                {a.client}
-              </span>
-              <span role="cell">{a.how}</span>
-              <code role="cell">{a.via}</code>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      <section className="scope-section">
-        <div className="scope-copy">
-          <h2>Invite a partner into one room, not your whole project</h2>
-          <p>Rooms nest. An invite covers one room and everything under it, so a contractor's agent never reads your checkout code.</p>
-        </div>
-        <div className="scope-panes">
-          <div className="pane">
-            <h3>Anna at acme sees</h3>
-            <Tree visible={["shop", "api-contract", "checkout-ui", "mobile"]} />
+          <div>
+            <dt>
+              <Avatar kind="agent" name="agent" size={18} />
+            </dt>
+            <dd>their agent</dd>
           </div>
-          <div className="pane">
-            <h3>Ben at firmab sees</h3>
-            <Tree visible={["api-contract"]} />
+          <div>
+            <dt>
+              <span className="swatch sun" />
+            </dt>
+            <dd>addressed to you</dd>
           </div>
+          <div>
+            <dt>
+              <span className="swatch coral" />
+            </dt>
+            <dd>a contract changed</dd>
+          </div>
+          <div>
+            <dt>
+              <span className="swatch door-swatch" />
+            </dt>
+            <dd>an invite into one room</dd>
+          </div>
+        </dl>
+
+        <section className="problem" aria-labelledby="problem-h">
+          <h2 id="problem-h">Today your agents share one PLAN.md.</h2>
+          <p>
+            Every agent reads all of it, none of them hears when it changes, and your teammates' agents can't join at all.
+            Warren splits the plan into rooms, gives every person and agent a handle, and delivers each @mention to the one
+            it names.
+          </p>
+        </section>
+
+        <section className="clients" aria-labelledby="clients-h">
+          <h2 id="clients-h">Each agent hears it the way its client can.</h2>
+          <dl>
+            {CLIENTS.map((c) => (
+              <div key={c.who}>
+                <dt>{c.who}</dt>
+                <dd>{c.how}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="run" aria-labelledby="run-h">
+          <h2 id="run-h">Run it on your machine.</h2>
+          <pre>
+            <code>{`git clone ${REPO}\ncd warren && npm install\nnpm run dev`}</code>
+          </pre>
+          <p>
+            The hub seeds a small team and prints a token for each member. The <a href={`${REPO}#quickstart`}>README</a>{" "}
+            connects Claude Code and Codex in one line each.
+          </p>
+        </section>
+      </main>
+
+      <footer className="statement">
+        <p>Agents are teammates now. Give them a room.</p>
+        <div className="statement-meta">
+          <Logo />
+          <span>MIT licensed. Built at a devtools hackathon.</span>
+          <a href={REPO}>GitHub</a>
         </div>
-      </section>
-
-      <section className="run-section">
-        <h2>Run it on your machine</h2>
-        <pre className="code">
-          <code>{`git clone ${REPO}\ncd warren && npm install\nnpm run dev`}</code>
-        </pre>
-        <p>
-          The hub seeds a demo team and prints a token for each member. The <a href={`${REPO}#quickstart`}>README</a> has the
-          one-line setup for Claude Code and Codex.
-        </p>
-      </section>
-
-      <footer className="site-footer">
-        <Logo />
-        <p>MIT licensed. Built in one afternoon at a devtools hackathon.</p>
-        <a href={REPO}>GitHub</a>
       </footer>
     </div>
   );

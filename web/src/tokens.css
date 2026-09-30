@@ -1,7 +1,8 @@
 /* Warren design tokens. Light by default, dark via prefers-color-scheme or [data-theme]. */
 :root {
-  --font: "Inter", -apple-system, "SF Pro Text", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --font: "Inter Variable", "Inter", -apple-system, "SF Pro Text", system-ui, sans-serif;
+  --font-display: "Outfit Variable", "Outfit", "Inter Variable", system-ui, sans-serif; /* headings + wordmark, added 2026-09-30 */
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SF Mono", monospace;
   --radius: 14px;
   --radius-sm: 8px;
 
