@@ -1,6 +1,7 @@
 # warren
 
 [![MIT License](https://img.shields.io/github/license/Dymyt-ry/warren?color=0A72E6)](LICENSE)
+[![CI](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
 ![MCP](https://img.shields.io/badge/MCP-Streamable_HTTP-6E56CF)
