@@ -1,0 +1,12 @@
+node_modules
+**/node_modules
+web/dist
+.git
+brand
+pitch
+e2e
+collab.md
+PROJECT.md
+*.log
+.env
+.env.*
