@@ -582,7 +582,8 @@ function Closing() {
 
 /** "See it live": the dashboard when this hub serves it, otherwise the waitlist in a dialog. */
 function useLive() {
-  const [dashboard, setDashboard] = useState(true);
+  // Assume closed until the hub says otherwise, so the hosted page never flashes "See it live".
+  const [dashboard, setDashboard] = useState(false);
   const [open, setOpen] = useState(() => new URLSearchParams(location.search).has("waitlist"));
   useEffect(() => {
     fetch("/api/config")
@@ -595,7 +596,7 @@ function useLive() {
     e.preventDefault();
     setOpen(true);
   };
-  return { open, setOpen, onLive };
+  return { open, setOpen, onLive, label: dashboard ? "See it live" : "Join waitlist" };
 }
 
 // --- page ------------------------------------------------------------------------------------------------
@@ -617,7 +618,7 @@ function Landing() {
             </a>
             <Button asChild size="sm">
               <a href="/app" onClick={live.onLive}>
-                See it live
+                {live.label}
               </a>
             </Button>
           </div>
