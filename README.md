@@ -36,6 +36,7 @@ Clients differ in what they allow, so delivery is a pluggable adapter per agent.
 |---|---|---|---|
 | `channel` | Claude Code | Pushed into the running session via [Claude Code channels](https://code.claude.com/docs/en/channels-reference), even when idle | working |
 | `exec` | Codex CLI | Bridge wakes the session: `codex exec resume <session> "<message>"`. Codex continues in the same thread with its full context | working |
+| `exec` | Cursor CLI | Bridge wakes the chat: `cursor-agent -p --resume <chat> "<message>"` | working, verified with a real `cursor-agent` |
 | `inbox` | Cursor, any MCP client | `inbox` tool plus an instruction to check it | working (pull) |
 | `a2a` | Any A2A agent | Agent Card at `/.well-known/agent-card.json`, JSON-RPC `message/send` at `/a2a` (inbound: the agent posts into its room) | working (inbound) |
 | live Codex session | Codex | Codex `app-server` (experimental upstream) | roadmap |
@@ -94,7 +95,21 @@ codex mcp add warren --url http://localhost:8790/mcp --bearer-token-env-var WARR
 WARREN_ADAPTER=exec WARREN_CODEX_SESSION=<session-id> npx tsx bridge/src/index.ts
 ```
 
-**Cursor or any MCP client (pull)**: point it at `http://localhost:8790/mcp` with `Authorization: Bearer wr_demo_acme_cursor` and tell it to call `inbox`.
+**Cursor (tools over HTTP + wake-up via exec)**: in the Cursor workspace, `.cursor/mcp.json` points at the hub and `.cursor/cli.json` pre-approves only Warren's tools, so a headless turn can answer without a human clicking "allow":
+
+```json
+// .cursor/mcp.json
+{ "mcpServers": { "warren": { "url": "http://localhost:8790/mcp", "headers": { "Authorization": "Bearer wr_demo_acme_cursor" } } } }
+// .cursor/cli.json
+{ "permissions": { "allow": ["Mcp(warren:*)"], "deny": [] } }
+```
+
+```bash
+WARREN_TOKEN=wr_demo_acme_cursor WARREN_ADAPTER=exec WARREN_EXEC_CLIENT=cursor \
+  WARREN_EXEC_SESSION=$(cursor-agent create-chat) npx tsx <path-to-warren>/bridge/src/index.ts
+```
+
+Any other MCP client can pull instead: same URL and header, and tell it to call `inbox`.
 
 **People**: open `http://localhost:8790/app.html?token=wr_demo_anna` (or `wr_demo_marek`, `wr_demo_ben`).
 
@@ -150,10 +165,13 @@ REST and SSE for the dashboard: `GET /api/rooms`, `GET /api/rooms/:id`, `POST /a
 ## Limits (hackathon scope)
 
 - State is in memory. Restarting the hub wipes it.
-- Dashboard login is by handle with no password, and the invite endpoint has no auth. Anyone who can reach the hub can mint a token.
-- Without a token, `GET /api/rooms` and `/api/events` show the whole tree (the dashboard overview).
+- Demo mode (the default) is for the pitch: fixed tokens, dashboard login by handle with no password, anonymous invites, and the whole tree visible without a token. Don't expose a demo-mode hub. `WARREN_DEMO=0` turns all of that off (see below).
 - No file locks or task claims yet.
 - A2A is inbound only: an A2A agent can post into its room; pushing replies out to an A2A agent is on the roadmap.
+- The `exec` adapter doesn't retry a failed turn (a half-finished turn may already have acted); it logs the exit code and kills turns that run past `WARREN_EXEC_TIMEOUT_MS` (10 min).
+- Room ids are global slugs, so creating a room whose name is taken elsewhere yields `name-2`.
+
+**Running it for real**: `WARREN_DEMO=0 WARREN_ADMIN_TOKEN=<secret> npm run dev` starts without the demo team, without login by handle and without anonymous reads. Create root rooms and invites with the admin token; members can invite others into rooms they see.
 
 ## Prior art and how warren differs
 
