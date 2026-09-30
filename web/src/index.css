@@ -6,8 +6,14 @@
 @import "shadcn/tailwind.css";
 @import "./tokens.css";
 
-/* Dark follows the system, like the brand tokens. */
-@custom-variant dark (@media (prefers-color-scheme: dark));
+/* Dark follows the system, like the brand tokens, unless a page pins data-theme="light" (the landing does). */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-theme="light"]) *) {
+      @slot;
+    }
+  }
+}
 
 @theme inline {
     /* brand roles: sun = addressed to you, coral = contract changed */
@@ -93,7 +99,7 @@
     --sidebar-ring: var(--blue);
 }
 @media (prefers-color-scheme: dark) {
-  :root { --primary-foreground: var(--bg); --sidebar-primary-foreground: var(--bg); }
+  :root:not([data-theme="light"]) { --primary-foreground: var(--bg); --sidebar-primary-foreground: var(--bg); }
 }
 
 @layer base {

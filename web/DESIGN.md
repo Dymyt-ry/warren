@@ -1,6 +1,6 @@
 # Warren web: design system
 
-Hallmark genre modern-minimal, tone austere. Landing macrostructure: Map / Diagram. Nav N9 edge-aligned minimal. Footer Ft5 statement.
+Hallmark genre modern-minimal, tone austere. Landing macrostructure: Workbench (was Map / Diagram until Tim's review, see below). Nav N5 floating bar. Footer Ft2 inline single line. The landing is pinned to light (`data-theme="light"`); the dashboard follows the system.
 Brand (logo, colours) is locked in `brand/`. Display face added 2026-09-30 with Tim's approval.
 
 ## Reference lock
@@ -35,3 +35,12 @@ Shapes: people are circles; agents and rooms are rounded squares (radius about 2
 | Real message components in the map | Linear (real UI in hero) | Proof the product exists, not a render |
 | No cards, sections separated by space | Things, Refero anti-slop (#2) | Austere tone |
 | Status as small square glyph + word | Linear status glyphs, brand room glyph | Replaces pills |
+
+## Revision 2026-09-30: landing speaks the dashboard's language
+
+Tim's review: the team map (thick coloured room outlines, big sun circles, heavy rounded headline) read as "Duolingo"; the dashboard is the bar. Studied DNA from his two references (image mode):
+
+- **Multiplayer cursors around the hero:** people and agents of the demo team (Anna, Ben, Claude Code, Codex) drift slowly around the headline. Initials and agent avatars, never stock photos.
+- **Workbench showcase:** a still of the real dashboard, built from the same shadcn components, in a white hairline frame with a soft shadow, sitting on a pale blue rounded backdrop and fading out at the bottom.
+- **One floating card:** Claude Code's run, four steps that spin and check off when the showcase comes into view, joined by a dotted connector to the action it ends in ("Ben gets the reply").
+- **Rejected from the first pass:** 3px coloured outlines, large colour fills, Outfit at 600 with -0.04em tracking (now 500, -0.025em).

@@ -1,136 +1,210 @@
-// Landing page: Hallmark Map / Diagram. The hero is the team drawn in the mark's geometry,
-// rooms inside rooms, and one exchange plays across it. See web/DESIGN.md for the reference lock.
+// Landing page, pinned to light. Hallmark Workbench: the real dashboard UI is the proof. Studied DNA from Tim's
+// references: multiplayer cursors around the hero, the product in a hairline frame over a soft blue backdrop,
+// one floating card that checks its steps off, a dotted connector to the action it ends in. See web/DESIGN.md.
 import { StrictMode, useEffect, useRef, useState } from "react";
 import type React from "react";
 import { createRoot } from "react-dom/client";
+import { CheckCircleIcon, CircleNotchIcon, CursorIcon, GithubLogoIcon, PaperPlaneTiltIcon } from "@phosphor-icons/react";
 import "@fontsource-variable/outfit";
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
+import "./index.css";
 import "./styles.css";
+import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
+import { Marker, MarkerContent } from "@/components/ui/marker";
+import { Message, MessageAvatar, MessageContent, MessageHeader } from "@/components/ui/message";
 import { Logo } from "./Logo";
-import type { Member, Message } from "./api";
-import { Avatar, MessageItem } from "./ui";
+import type { Member, Message as Msg } from "./api";
+import { Avatar, KindTag, MentionText } from "./ui";
 
 const REPO = "https://github.com/Dymyt-ry/warren";
 
-// One beat per step; CSS reads --step. Reduced motion shows the finished state.
-const beat = (n: number) => ({ ["--step"]: n }) as React.CSSProperties;
+/** True once the element has been a third on screen; plays the showcase once. */
+function useSeen<T extends HTMLElement>() {
+  const ref = useRef<T>(null);
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([e]) => e.isIntersecting && (setSeen(true), io.disconnect()), { threshold: 0.35 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  return [ref, seen] as const;
+}
 
-const at = (s: number) => new Date(Date.UTC(2026, 8, 30, 12, 41, s)).toISOString();
-const EXCHANGE: Message[] = [
-  {
-    id: "1", roomId: "api-contract", from: "codex-ben", fromKind: "agent", org: "firmab", kind: "contract_change", at: at(4),
-    text: "@claude-anna POST /cart is now POST /basket. Same body, still 201.", mentions: ["claude-anna"], mentionsRoom: false,
-  },
-  {
-    id: "2", roomId: "api-contract", from: "claude-anna", fromKind: "agent", org: "acme", kind: "done", at: at(52),
-    text: "@ben client switched to /basket. Checkout tests pass.", mentions: ["ben"], mentionsRoom: false,
-  },
-];
+// --- demo data: the seeded team -------------------------------------------------------------------------
 const PEOPLE: Record<string, Member> = {
+  anna: { handle: "anna", name: "Anna", kind: "human", org: "acme", scopeRoomId: "shop", adapter: "dashboard" },
+  ben: { handle: "ben", name: "Ben", kind: "human", org: "firmab", scopeRoomId: "api-contract", adapter: "dashboard" },
   "codex-ben": { handle: "codex-ben", name: "Codex (Ben)", kind: "agent", org: "firmab", scopeRoomId: "api-contract", adapter: "exec" },
   "claude-anna": { handle: "claude-anna", name: "Claude Code (Anna)", kind: "agent", org: "acme", scopeRoomId: "shop", adapter: "channel" },
 };
+const at = (m: number) => new Date(Date.UTC(2026, 8, 30, 12, m)).toISOString();
+const THREAD: Msg[] = [
+  {
+    id: "1", roomId: "api-contract", from: "ben", fromKind: "human", org: "firmab", kind: "question", at: at(38),
+    text: "@codex-ben mobile checkout needs /basket instead of /cart. Can you rename it?", mentions: ["codex-ben"], mentionsRoom: false,
+  },
+  {
+    id: "2", roomId: "api-contract", from: "codex-ben", fromKind: "agent", org: "firmab", kind: "contract_change", at: at(41),
+    text: "@claude-anna POST /cart is now POST /basket. Same body, still 201.", mentions: ["claude-anna"], mentionsRoom: false,
+  },
+  {
+    id: "3", roomId: "api-contract", from: "claude-anna", fromKind: "agent", org: "acme", kind: "done", at: at(42),
+    text: "@ben client switched to /basket. Checkout tests pass. @anna FYI.", mentions: ["ben", "anna"], mentionsRoom: false,
+  },
+];
 
-function Node({
-  kind,
-  name,
-  note,
-  lightsAt,
-}: {
-  kind: Member["kind"];
-  name: string;
-  note?: string;
-  lightsAt?: number;
-}) {
+// --- hero cursors -----------------------------------------------------------------------------------------
+function Cursor({ who, label, className }: { who: Member; label: string; className?: string }) {
   return (
-    <li className={`node${lightsAt !== undefined ? " lights" : ""}`} style={lightsAt !== undefined ? beat(lightsAt) : undefined}>
-      <Avatar kind={kind} name={name} size={30} />
-      <span className="node-text">
-        <span className="node-name">{name}</span>
-        {note && <span className="node-note">{note}</span>}
+    <div className={cn("cursor-float", className)} aria-hidden>
+      <CursorIcon weight="fill" className="cursor-arrow" />
+      <span className="cursor-tag">
+        <Avatar kind={who.kind} name={who.name} size={22} />
+        {label}
       </span>
+    </div>
+  );
+}
+
+// --- the showcase: a still of the dashboard, built from the same components -------------------------------
+function RoomRow({ name, depth = 0, active, forMe }: { name: string; depth?: number; active?: boolean; forMe?: number }) {
+  return (
+    <li
+      style={{ paddingLeft: 12 + depth * 18 }}
+      className={cn("flex h-8 items-center gap-2.5 rounded-lg pr-2 text-[13px]", active && "bg-accent font-semibold")}
+    >
+      <span aria-hidden className={cn("size-3 shrink-0 rounded-[30%] border-[1.5px]", forMe ? "border-sun bg-sun" : "border-muted-foreground/60")} />
+      <span className="flex-1 truncate">{name}</span>
+      {forMe ? <span className="text-xs font-semibold tabular-nums">{forMe}</span> : null}
     </li>
   );
 }
 
-function TeamMap() {
-  // Plays once, when at least a third of the map is on screen. Without JS the finished state shows.
-  const ref = useRef<HTMLElement>(null);
-  const [stage, setStage] = useState<"" | "armed" | "armed playing">("");
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    setStage("armed");
-    const io = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setStage("armed playing");
-          io.disconnect();
-        }
-      },
-      { threshold: 0.35 },
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
+function AppStill() {
   return (
-    <figure ref={ref} className={`team-map ${stage}`} aria-labelledby="map-caption">
-      <div className="room room-shop">
-        <p className="room-label">
-          shop <span>acme's project</span>
-        </p>
-        <ul className="nodes">
-          <Node kind="human" name="Anna" />
-          <Node kind="agent" name="Claude Code" note="Messages land in its running session" lightsAt={1} />
-          <Node kind="human" name="Marek" />
-          <Node kind="agent" name="Cursor" note="Reads its inbox when it checks in" />
-        </ul>
-
-        <div className="subrooms">
-          <div className="room room-checkout">
-            <p className="room-label">
-              checkout-ui <span>acme only</span>
-            </p>
-            <p className="room-note">Nobody from firmab can open this room or anything inside it.</p>
-            <div className="room room-mobile">
-              <p className="room-label">mobile</p>
-            </div>
-          </div>
-
-          <div className="room room-api">
-            <p className="room-label">
-              api-contract <span>shared with firmab</span>
-            </p>
-            <ol className="thread">
-              <MessageItem m={EXCHANGE[0]} author={PEOPLE["codex-ben"]} className="play" style={beat(0)} />
-              <MessageItem m={EXCHANGE[1]} author={PEOPLE["claude-anna"]} className="play" style={beat(2)} />
-            </ol>
-            <span className="door" aria-hidden />
+    <div className="app-still" aria-hidden>
+      <aside className="hidden flex-col gap-5 border-r border-border bg-card px-2.5 py-4 sm:flex">
+        <div className="px-2">
+          <Logo theme="light" />
+        </div>
+        <div className="flex flex-col gap-1 px-1">
+          <span className="px-1 text-[11px] font-medium text-muted-foreground">You are</span>
+          <div className="flex h-8 items-center justify-between rounded-lg border border-border bg-background px-2.5 text-[13px]">
+            Anna <span className="text-muted-foreground">acme</span>
           </div>
         </div>
-      </div>
-
-      <div className="guest">
-        <span className="guest-line" aria-hidden />
-        <p className="room-label">
-          firmab <span>invited into api-contract</span>
-        </p>
-        <ul className="nodes">
-          <Node kind="human" name="Ben" lightsAt={3} />
-          <Node kind="agent" name="Codex" note="Woken in its own thread when mentioned" />
+        <ul className="flex flex-col gap-0.5">
+          <RoomRow name="shop" />
+          <RoomRow name="api-contract" depth={1} active forMe={1} />
+          <RoomRow name="checkout-ui" depth={1} />
+          <RoomRow name="mobile" depth={2} />
         </ul>
+      </aside>
+      <div className="flex min-w-0 flex-col">
+        <div className="flex items-baseline gap-2 px-6 pt-5 pb-2 font-heading text-xl">
+          <span className="text-muted-foreground">shop</span>
+          <span className="text-border">/</span>
+          <span>api-contract</span>
+        </div>
+        <pre className="mx-6 mb-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+          {"# API contract\nfirmab owns the HTTP API, acme consumes it."}
+        </pre>
+        <div className="flex flex-col gap-1 px-4">
+          <Marker variant="separator" className="py-1.5 text-xs">
+            <MarkerContent>Today</MarkerContent>
+          </Marker>
+          {THREAD.map((m) => {
+            const author = PEOPLE[m.from];
+            const forMe = m.mentions.includes("anna");
+            return (
+              <Message key={m.id} className={cn("items-start gap-3 rounded-xl px-3 py-2", forMe && "bg-mention")}>
+                <MessageAvatar className="self-start overflow-visible rounded-none bg-transparent">
+                  <Avatar kind={m.fromKind} name={author.name} size={28} />
+                </MessageAvatar>
+                <MessageContent className="gap-0.5">
+                  <MessageHeader className="gap-2.5 px-0 text-[12px]">
+                    <span className="font-semibold text-foreground">{author.name}</span>
+                    {m.org !== "acme" && <span>{m.org}</span>}
+                    <KindTag kind={m.kind} />
+                    <time className="ml-auto tabular-nums">{new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+                  </MessageHeader>
+                  <p className="m-0 text-[14px] leading-normal text-foreground">
+                    <MentionText text={m.text} me="anna" />
+                  </p>
+                </MessageContent>
+              </Message>
+            );
+          })}
+        </div>
+        <div className="mx-6 mt-auto mb-5 rounded-lg border border-border bg-background px-3 py-2.5 text-[13px] text-muted-foreground">
+          Write to api-contract. Type @ to mention someone.
+        </div>
       </div>
+    </div>
+  );
+}
 
-      <figcaption id="map-caption" className="sr-only">
-        The acme team's project room contains checkout-ui and api-contract. Ben from firmab and his Codex are invited into
-        api-contract only. Codex posts a contract change mentioning Claude Code, which fixes the client and replies to Ben.
+const STEPS = ["Read the contract change", "Switch the client to /basket", "Run the checkout tests", "Reply to @ben"];
+
+function AgentCard({ playing }: { playing: boolean }) {
+  return (
+    <div className="agent-card" aria-hidden>
+      <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+        <Avatar kind="agent" name="Claude Code" size={36} lit />
+        <div className="min-w-0">
+          <div className="text-[14px] font-semibold">Claude Code</div>
+          <div className="text-[12.5px] text-muted-foreground">Mentioned by Codex, pushed into Anna's session</div>
+        </div>
+      </div>
+      <ul className="flex flex-col">
+        {STEPS.map((s, i) => (
+          <li
+            key={s}
+            className={cn("step flex items-center justify-between gap-4 border-b border-border px-4 py-2.5 text-[13.5px] last:border-b-0", playing && "run")}
+            style={{ ["--i" as string]: i } as React.CSSProperties}
+          >
+            {s}
+            <span className="step-state">
+              <CircleNotchIcon className="step-spin" weight="bold" />
+              <CheckCircleIcon className="step-done" weight="fill" />
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function Showcase() {
+  const [ref, seen] = useSeen<HTMLElement>();
+  return (
+    <figure ref={ref} className={cn("showcase", seen && "playing")} aria-labelledby="showcase-caption">
+      <div className="showcase-backdrop" aria-hidden />
+      <div className="showcase-frame">
+        <AppStill />
+      </div>
+      <AgentCard playing={seen} />
+      <svg className="showcase-link" viewBox="0 0 64 84" aria-hidden>
+        <path d="M8 2 C 8 48, 56 36, 56 82" fill="none" stroke="currentColor" strokeWidth="1.5" strokeDasharray="2 5" strokeLinecap="round" />
+      </svg>
+      <div className="action-chip" aria-hidden>
+        <Avatar kind="human" name="Ben" size={22} />
+        Ben gets the reply
+        <PaperPlaneTiltIcon />
+      </div>
+      <figcaption id="showcase-caption" className="sr-only">
+        The Warren dashboard, signed in as Anna: the api-contract room shared with firmab. Codex posted a contract change
+        mentioning Claude Code; Claude Code works through it in Anna's running session and replies to Ben.
       </figcaption>
     </figure>
   );
 }
 
+// --- page ------------------------------------------------------------------------------------------------
 const CLIENTS = [
   { who: "Claude Code", how: "The message is pushed into the running session, even when it's idle." },
   { who: "Codex", how: "Its own thread is resumed with the message as the next prompt." },
@@ -138,72 +212,71 @@ const CLIENTS = [
   { who: "An agent at another company", how: "It posts over A2A into the one room its invite opens." },
 ];
 
+function ScopeTree({ rows }: { rows: { name: string; depth: number; hidden?: boolean }[] }) {
+  return (
+    <ul className="flex flex-col gap-0.5">
+      {rows.map((r) => (
+        <li key={r.name} style={{ paddingLeft: 12 + r.depth * 18 }} className="flex h-8 items-center gap-2.5 text-sm">
+          <span aria-hidden className={cn("size-3 rounded-[30%] border-[1.5px] border-muted-foreground/60", r.hidden && "opacity-30")} />
+          {r.hidden ? <span className="h-2.5 w-20 rounded bg-muted" aria-label="not visible" /> : r.name}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Landing() {
   return (
     <div className="landing">
-      <nav className="edge-nav" aria-label="Main">
-        <a href="/" className="home" aria-label="warren home">
-          <Logo />
-        </a>
-        <a className="button primary" href="/app.html">
-          See it live
-        </a>
-      </nav>
+      <header className="float-nav-wrap">
+        <nav className="float-nav" aria-label="Main">
+          <a href="/" aria-label="warren home" className="no-underline">
+            <Logo theme="light" />
+          </a>
+          <div className="flex items-center gap-6">
+            <a href="#how" className="nav-link">
+              How it works
+            </a>
+            <a href={REPO} className="nav-link">
+              GitHub
+            </a>
+            <Button asChild size="sm">
+              <a href="/app.html">See it live</a>
+            </Button>
+          </div>
+        </nav>
+      </header>
 
       <main>
-        <header className="orient">
-          <h1>Every agent on your team knows what just changed.</h1>
-          <p className="lede">
-            Warren gives people and coding agents one tree of rooms. @mention anyone, and the message lands in their
-            running session.
-          </p>
-          <p className="actions">
-            <a className="button primary" href="/app.html">
-              See it live
-            </a>
-            <a className="text-link" href={REPO}>
-              Read the code
-            </a>
-          </p>
-        </header>
+        <section className="hero">
+          <div className="hero-copy">
+            <h1>Every agent on your team knows what just changed.</h1>
+            <p className="lede">
+              Warren gives people and coding agents one tree of rooms. @mention anyone, and the message lands in their running
+              session.
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Button asChild size="lg">
+                <a href="/app.html">See it live</a>
+              </Button>
+              <Button asChild size="lg" variant="outline">
+                <a href={REPO} className="text-foreground">
+                  <GithubLogoIcon data-icon="inline-start" weight="bold" />
+                  Read the code
+                </a>
+              </Button>
+            </div>
+          </div>
+          <Cursor who={PEOPLE.anna} label="Anna" className="c-anna" />
+          <Cursor who={PEOPLE["claude-anna"]} label="Claude Code" className="c-claude" />
+          <Cursor who={PEOPLE.ben} label="Ben, firmab" className="c-ben" />
+          <Cursor who={PEOPLE["codex-ben"]} label="Codex" className="c-codex" />
+        </section>
 
-        <TeamMap />
+        <Showcase />
 
-        <dl className="legend" aria-label="How to read the map">
-          <div>
-            <dt>
-              <Avatar kind="human" name="A" size={18} />
-            </dt>
-            <dd>a person</dd>
-          </div>
-          <div>
-            <dt>
-              <Avatar kind="agent" name="agent" size={18} />
-            </dt>
-            <dd>their agent</dd>
-          </div>
-          <div>
-            <dt>
-              <span className="swatch sun" />
-            </dt>
-            <dd>addressed to you</dd>
-          </div>
-          <div>
-            <dt>
-              <span className="swatch coral" />
-            </dt>
-            <dd>a contract changed</dd>
-          </div>
-          <div>
-            <dt>
-              <span className="swatch door-swatch" />
-            </dt>
-            <dd>an invite into one room</dd>
-          </div>
-        </dl>
-
-        <section className="problem" aria-labelledby="problem-h">
-          <h2 id="problem-h">Today your agents share one PLAN.md.</h2>
+        <section id="how" className="problem">
+          <h2>Today your agents share one PLAN.md.</h2>
           <p>
             Every agent reads all of it, none of them hears when it changes, and your teammates' agents can't join at all.
             Warren splits the plan into rooms, gives every person and agent a handle, and delivers each @mention to the one
@@ -223,6 +296,30 @@ function Landing() {
           </dl>
         </section>
 
+        <section className="scope" aria-labelledby="scope-h">
+          <div>
+            <h2 id="scope-h">Invite a partner into one room, not your whole project.</h2>
+            <p>An invite covers one room and everything inside it. The contractor's agent never reads your checkout code.</p>
+          </div>
+          <div className="scope-panes">
+            <div className="scope-pane">
+              <p className="scope-who">Anna, acme</p>
+              <ScopeTree rows={[{ name: "shop", depth: 0 }, { name: "api-contract", depth: 1 }, { name: "checkout-ui", depth: 1 }, { name: "mobile", depth: 2 }]} />
+            </div>
+            <div className="scope-pane">
+              <p className="scope-who">Ben, firmab</p>
+              <ScopeTree
+                rows={[
+                  { name: "shop", depth: 0, hidden: true },
+                  { name: "api-contract", depth: 1 },
+                  { name: "checkout-ui", depth: 1, hidden: true },
+                  { name: "mobile", depth: 2, hidden: true },
+                ]}
+              />
+            </div>
+          </div>
+        </section>
+
         <section className="run" aria-labelledby="run-h">
           <h2 id="run-h">Run it on your machine.</h2>
           <pre>
@@ -235,13 +332,12 @@ function Landing() {
         </section>
       </main>
 
-      <footer className="statement">
-        <p>Agents are teammates now. Give them a room.</p>
-        <div className="statement-meta">
-          <Logo />
-          <span>MIT licensed. Built at a devtools hackathon.</span>
-          <a href={REPO}>GitHub</a>
-        </div>
+      <footer className="line-footer">
+        <Logo theme="light" />
+        <span>Agents are teammates now. Give them a room.</span>
+        <span className="line-footer-meta">
+          MIT, <a href={REPO}>GitHub</a>
+        </span>
       </footer>
     </div>
   );

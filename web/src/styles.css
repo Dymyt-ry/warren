@@ -1,5 +1,5 @@
-/* Hallmark · genre: modern-minimal · tone: austere · macrostructure: Map / Diagram · theme: custom (brand-locked)
- * nav: N9 edge-aligned (CTA filled) · footer: Ft5 statement (38ch, wordmark under, hairline) · enrichment: none, the map is the hero
+/* Hallmark · genre: modern-minimal · tone: austere · macrostructure: Workbench · theme: studied-DNA (source: image, Tim's references) on brand tokens
+ * nav: N5 floating bar · footer: Ft2 inline single line · enrichment: real component still + floating agent card + cursors · landing pinned light
  * paper #FAFAF9 · accent blue (interactive only) · display Outfit + body Inter · anchor hue: blue
  * Reference lock + decision ledger: web/DESIGN.md
  *
@@ -90,58 +90,98 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .org { font-size: 12px; font-weight: 500; color: var(--text-2); }
 .error { color: color-mix(in srgb, var(--coral) 75%, var(--text)); font-size: 13px; margin: 6px 0 0; }
 
-/* ================= landing ================= */
-.landing { max-width: 1180px; margin: 0 auto; padding: 0 32px; }
+/* ================= landing (pinned light, Workbench) ================= */
+.landing { max-width: 1200px; margin: 0 auto; padding: 0 32px; }
+.landing h1, .landing h2 { font-weight: 500; letter-spacing: -0.025em; }
 
-/* N9 edge-aligned: wordmark hard left, one action hard right, nothing between */
-.edge-nav { display: flex; align-items: center; justify-content: space-between; height: 76px; }
-.edge-nav .home { text-decoration: none; }
-.edge-nav .button { min-height: 38px; font-size: 14px; padding: 0 14px; }
+/* N5 floating bar: detached from the edges, hairline, no blur theatre */
+.float-nav-wrap { position: sticky; top: 12px; z-index: 30; padding-top: 12px; }
+.float-nav {
+  display: flex; align-items: center; justify-content: space-between; gap: 24px;
+  height: 60px; padding: 0 12px 0 20px; border-radius: 16px;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--border);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 4%, transparent), 0 8px 24px color-mix(in srgb, var(--text) 5%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+}
+.nav-link { color: var(--text-2); font-size: 14px; font-weight: 500; text-decoration: none; }
+@media (hover: hover) { .nav-link:hover { color: var(--text); } }
 
-.orient { padding: 40px 0 56px; max-width: 760px; }
-.orient h1 { font-size: clamp(2.5rem, 4.6vw + 0.6rem, 4.25rem); line-height: 1.02; font-weight: 600; letter-spacing: -0.04em; }
-.lede { font-size: 20px; line-height: 1.5; color: var(--text-2); max-width: 46ch; margin: 24px 0 32px; }
-.actions { display: flex; gap: 28px; align-items: center; margin: 0; }
+/* Hero: copy left, the team's cursors drifting around it */
+.hero { position: relative; padding: 96px 0 72px; min-height: 480px; }
+.hero-copy { position: relative; z-index: 1; max-width: 680px; }
+.hero h1 { font-size: clamp(2.5rem, 4.4vw + 0.6rem, 4.25rem); line-height: 1.04; }
+.lede { font-size: 19px; line-height: 1.55; color: var(--text-2); max-width: 48ch; margin: 22px 0 32px; }
 
-/* The map: the mark at page scale. Outer room blue, the shared inner room coral, the lit state sun. */
-.team-map { margin: 24px 0 0; display: grid; grid-template-columns: minmax(0, 1fr) 260px; align-items: end; gap: 0; position: relative; }
-.room { position: relative; border-radius: 28px; border: 2px solid var(--border); padding: 20px; }
-.room-label { margin: 0 0 16px; font-family: var(--font-display); font-weight: 600; font-size: 16px; letter-spacing: -0.02em; }
-.room-label span { font-family: var(--font); font-weight: 400; font-size: 13px; letter-spacing: 0; color: var(--text-2); margin-left: 8px; }
-.room-shop { border: 3px solid var(--blue); border-radius: 40px; padding: 28px 28px 28px; }
-.room-shop > .room-label { font-size: 18px; }
-.nodes { list-style: none; margin: 0 0 28px; padding: 0; display: flex; flex-wrap: wrap; gap: 16px 36px; }
-.node { display: flex; align-items: center; gap: 10px; }
-.node-text { display: grid; line-height: 1.3; }
-.node-name { font-weight: 600; font-size: 15px; }
-.node-note { font-size: 13px; color: var(--text-2); max-width: 30ch; text-wrap: balance; }
-.subrooms { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.4fr); gap: 20px; align-items: stretch; }
-.room-checkout { border-radius: 24px; display: flex; flex-direction: column; }
-.room-note { margin: 0 0 16px; font-size: 13.5px; color: var(--text-2); max-width: 26ch; }
-.room-mobile { border-radius: 20px; margin-top: auto; padding: 16px; min-height: 84px; }
-.room-mobile .room-label { font-size: 14px; margin: 0; }
-.room-api { border: 3px solid var(--coral); border-radius: 28px; padding: 24px 16px 16px; background: var(--bg); }
-.room-api .room-label { padding: 0 12px; }
-.room-api .msg { padding: 10px 12px; }
+.cursor-float { position: absolute; display: flex; align-items: flex-start; gap: 2px; pointer-events: none; }
+.cursor-arrow { width: 18px; height: 18px; color: var(--text); transform: rotate(-8deg); filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--text) 25%, transparent)); }
+.cursor-tag {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 14px;
+  padding: 3px 10px 3px 3px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: var(--surface); border: 1px solid var(--border);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--text) 8%, transparent);
+}
+.c-anna { top: 132px; right: 9%; }
+.c-claude { top: 258px; right: 30%; }
+.c-ben { top: 350px; right: 4%; }
+.c-codex { top: 452px; right: 40%; }
+@media (prefers-reduced-motion: no-preference) {
+  .cursor-float { animation: drift 7s var(--ease-in-out) infinite alternate; }
+  .c-claude { animation-duration: 8.5s; animation-delay: -2s; }
+  .c-ben { animation-duration: 6.5s; animation-delay: -4s; }
+  .c-codex { animation-duration: 9s; animation-delay: -1s; }
+}
+@keyframes drift { from { transform: translate(0, 0); } to { transform: translate(-14px, 10px); } }
 
-/* The door: a gap in the walls where firmab's invite comes in. */
-.door { position: absolute; right: -3px; bottom: 34px; width: 3px; height: 44px; background: var(--bg); }
-.room-shop::after { content: ""; position: absolute; right: -3px; bottom: 62px; width: 3px; height: 44px; background: var(--bg); }
-.guest { padding: 0 0 36px 32px; position: relative; }
-.guest-line { position: absolute; left: -2px; bottom: 84px; width: 34px; border-top: 2px dashed var(--coral); }
-.guest .nodes { flex-direction: column; gap: 16px; margin: 0; }
+/* Showcase: the product in a hairline frame over a soft blue backdrop, fading out at the bottom */
+.showcase { position: relative; margin: 8px 0 0; padding: 0 0 104px; }
+.showcase-backdrop {
+  position: absolute; left: -28px; right: -28px; top: 34%; bottom: 0; border-radius: 32px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--blue) 9%, var(--bg)), color-mix(in srgb, var(--blue) 16%, var(--bg)));
+}
+.showcase-frame {
+  position: relative; margin-right: 22%; border-radius: 16px; overflow: hidden;
+  background: var(--bg); border: 1px solid var(--border);
+  box-shadow: 0 2px 4px color-mix(in srgb, var(--text) 4%, transparent), 0 24px 60px color-mix(in srgb, var(--blue) 14%, transparent);
+  -webkit-mask-image: linear-gradient(180deg, #000 78%, transparent);
+  mask-image: linear-gradient(180deg, #000 78%, transparent);
+}
+.app-still { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 520px; }
 
-.legend { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 28px 0 0; padding: 0; font-size: 13.5px; color: var(--text-2); }
-.legend > div { display: flex; align-items: center; gap: 8px; }
-.legend dt, .legend dd { margin: 0; display: flex; }
-.swatch { width: 16px; height: 16px; border-radius: 30%; display: inline-block; }
-.swatch.sun { background: var(--sun); }
-.swatch.coral { background: var(--coral); }
-.swatch.door-swatch { width: 18px; height: 0; border-top: 2px dashed var(--coral); border-radius: 0; }
+.agent-card {
+  position: absolute; top: 318px; right: 0; width: 330px; z-index: 2;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 2px 4px color-mix(in srgb, var(--text) 5%, transparent), 0 18px 44px color-mix(in srgb, var(--text) 12%, transparent);
+}
+.step-state { position: relative; display: inline-grid; width: 18px; height: 18px; flex: none; }
+.step-state > * { grid-area: 1 / 1; width: 18px; height: 18px; }
+.step-spin { color: var(--text-2); opacity: 0; }
+.step-done { color: var(--blue); }
+@media (prefers-reduced-motion: no-preference) {
+  /* armed until the showcase is seen: steps wait, then each spins briefly and checks off */
+  .showcase:not(.playing) .step-done { opacity: 0; }
+  .showcase:not(.playing) .step-spin { opacity: 1; }
+  .step.run .step-spin { animation: spin 700ms linear infinite, spin-out 1ms linear forwards; animation-delay: 0ms, calc(500ms + var(--i) * 700ms); opacity: 1; }
+  .step.run .step-done { opacity: 0; transform: scale(0.9); animation: check-in 260ms var(--ease-out) forwards; animation-delay: calc(500ms + var(--i) * 700ms); }
+  .step.run { color: var(--text-2); animation: step-on 1ms linear forwards; animation-delay: calc(500ms + var(--i) * 700ms); }
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes spin-out { to { opacity: 0; } }
+@keyframes check-in { to { opacity: 1; transform: none; } }
+@keyframes step-on { to { color: var(--text); } }
 
-.problem { padding: 144px 0 0; max-width: 720px; }
-.problem h2, .clients h2, .run h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
-.problem p { font-size: 19px; color: var(--text-2); margin: 20px 0 0; max-width: 58ch; }
+.showcase-link { position: absolute; right: 236px; top: 556px; width: 64px; height: 84px; color: var(--text-2); z-index: 1; }
+.action-chip {
+  position: absolute; right: 56px; top: 624px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 10px; padding: 8px 14px 8px 8px;
+  font-size: 14px; font-weight: 600; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--text) 10%, transparent);
+}
+.action-chip svg { width: 18px; height: 18px; color: var(--text-2); }
+
+/* Sections below the fold: type and space, no boxes */
+.problem { padding: 120px 0 0; max-width: 720px; }
+.problem h2, .clients h2, .scope h2, .run h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
+.problem p, .scope p { font-size: 18px; color: var(--text-2); margin: 18px 0 0; max-width: 58ch; }
 
 .clients { padding: 112px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: start; }
 .clients dl { margin: 6px 0 0; display: grid; gap: 22px; }
@@ -149,58 +189,36 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .clients dt { font-weight: 600; }
 .clients dd { margin: 0; color: var(--text-2); }
 
+.scope { padding: 112px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 48px; align-items: center; }
+.scope-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.scope-pane { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 12px; box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 4%, transparent); }
+.scope-who { margin: 0 0 8px 12px; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+
 .run { padding: 112px 0 0; max-width: 720px; }
 .run pre { margin: 24px 0 16px; font-size: 14.5px; line-height: 1.8; padding: 16px 0; border-block: 1px solid var(--border); overflow-x: auto; }
 .run p { color: var(--text-2); max-width: 58ch; }
 
-/* Ft5 statement */
-.statement { padding: 160px 0 48px; }
-.statement > p { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.035em; font-size: clamp(2rem, 3.6vw + 0.5rem, 3.5rem); line-height: 1.05; max-width: 16ch; margin: 0 0 56px; }
-.statement-meta { display: flex; align-items: center; gap: 24px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--text-2); font-size: 14px; flex-wrap: wrap; }
-.statement-meta span { flex: 1; min-width: 200px; }
+/* Ft2 inline single line */
+.line-footer { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; margin-top: 144px; padding: 24px 0 40px; border-top: 1px solid var(--border); font-size: 14px; color: var(--text-2); }
+.line-footer > span:nth-child(2) { flex: 1; min-width: 220px; }
 
-/* One orchestrated moment: the exchange plays once when the map comes into view (JS adds .armed, then
-   .playing). The default, the no-JS state and reduced motion all show the finished picture. Lighting a node
-   fades a sun layer in (opacity only), it never animates background-color. */
-.lights .avatar { position: relative; isolation: isolate; }
-.lights .avatar.agent .avatar-room { position: relative; }
-.lights .avatar.agent .avatar-room::after,
-.lights .avatar.human::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--sun); }
-.lights .avatar.human::before { inset: -1.5px; z-index: -1; }
-.lights .avatar.human { color: var(--on-sun); border-color: var(--sun); }
-@media (prefers-reduced-motion: no-preference) {
-  .team-map.armed .play { opacity: 0; transform: translateY(6px); filter: blur(3px); }
-  .team-map.playing .play { animation: arrive 560ms var(--ease-out) forwards; animation-delay: calc(300ms + var(--step) * 650ms); }
-  .team-map.armed .guest-line { clip-path: inset(0 0 0 100%); }
-  .team-map.playing .guest-line { animation: draw-in 420ms var(--ease-in-out) 60ms forwards; }
-  .team-map.armed .lights .avatar-room::after, .team-map.armed .lights .avatar.human::before { opacity: 0; }
-  .team-map.armed .lights .avatar.human { color: var(--text); border-color: var(--border); }
-  .team-map.playing .lights .avatar-room::after,
-  .team-map.playing .lights .avatar.human::before { animation: light-on 500ms var(--ease-out) forwards; animation-delay: calc(300ms + var(--step) * 650ms); }
-  .team-map.playing .lights .avatar.human { transition: color 500ms var(--ease-out) calc(300ms + var(--step) * 650ms), border-color 500ms var(--ease-out) calc(300ms + var(--step) * 650ms); color: var(--on-sun); border-color: var(--sun); }
-}
-@keyframes arrive { to { opacity: 1; transform: none; filter: none; } }
-@keyframes draw-in { to { clip-path: inset(0 0 0 0); } }
-@keyframes light-on { from { opacity: 0; } to { opacity: 1; } }
-
-@media (max-width: 960px) {
-  .team-map { grid-template-columns: minmax(0, 1fr); }
-  .guest { padding: 28px 0 0 20px; border-left: 2px dashed var(--coral); margin: 0 0 0 40px; }
-  .guest-line, .door, .room-shop::after { display: none; }
-  .clients { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+@media (max-width: 1000px) {
+  .showcase-frame { margin-right: 0; }
+  .agent-card { position: relative; top: auto; right: auto; width: auto; max-width: 420px; margin: -64px 16px 0 auto; }
+  .showcase-link, .action-chip { display: none; }
+  .clients, .scope { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .c-anna, .c-codex { display: none; }
 }
 @media (max-width: 640px) {
   .landing { padding: 0 16px; }
-  .orient { padding: 40px 0 32px; }
-  .lede { font-size: 18px; }
-  .room-shop { border-radius: 28px; padding: 20px 12px; }
-  .subrooms { grid-template-columns: minmax(0, 1fr); }
-  .room-api { padding: 20px 8px 8px; }
-  .clients dl > div { grid-template-columns: minmax(0, 1fr); gap: 4px; }
-  .problem { padding-top: 96px; }
-  .statement { padding-top: 112px; }
+  .hero { padding: 48px 0 40px; min-height: 0; }
+  .lede { font-size: 17px; }
+  .cursor-float { display: none; }
+  .app-still { grid-template-columns: minmax(0, 1fr); min-height: 440px; } /* sidebar hides via sm:flex in the markup */
+  .agent-card { margin: -48px 0 0; max-width: none; }
+  .clients dl > div, .scope-panes { grid-template-columns: minmax(0, 1fr); }
+  .problem { padding-top: 88px; }
 }
-
 
 /* Dashboard: a message that arrives while you watch slides in; a mention for you warms up. */
 .msg-arrive { transition: opacity 240ms var(--ease-out), transform 240ms var(--ease-out), background-color 400ms var(--ease-out); }
