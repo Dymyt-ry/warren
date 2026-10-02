@@ -1,6 +1,7 @@
-// Minimal SSE client over fetch, reconnects forever. Only "message" events
-// matter to the bridge. After a reconnect, messages posted while the stream
-// was down are replayed from the hub's inbox, so a mention is never lost.
+// Minimal SSE client over fetch, reconnects forever. Two events matter to the
+// bridge: "message" (deliver it) and "held" (a message for this agent waits
+// for its person). On connect the hub replays what the agent missed while it
+// was offline; after a reconnect the inbox is read too, so a mention is never lost.
 export interface HubMessage {
   id: string;
   roomId: string;
@@ -10,9 +11,27 @@ export interface HubMessage {
   mentions: string[];
   mentionsRoom: boolean;
   at: string;
+  late?: boolean; // sent while the agent was offline
 }
 
-export async function subscribe(hub: string, token: string, onMessage: (m: HubMessage) => void | Promise<void>) {
+/** A message to this agent that the hub holds until its person decides. No text: the agent must not read it. */
+export interface HeldNotice {
+  id: string;
+  roomId: string;
+  from: string;
+  org: string;
+  kind: string;
+  flags: string[];
+  waitsFor: string; // the person who decides (or "org:<company>")
+  reviewUrl: string;
+}
+
+export async function subscribe(
+  hub: string,
+  token: string,
+  onMessage: (m: HubMessage) => void | Promise<void>,
+  onHeld: (h: HeldNotice) => void | Promise<void> = () => {},
+) {
   const headers = { Accept: "text/event-stream", Authorization: `Bearer ${token}` };
   let lastAt = new Date().toISOString(); // newest message we handled, or start time
   const seen = new Set<string>(); // replay and live stream can overlap
@@ -46,8 +65,9 @@ export async function subscribe(hub: string, token: string, onMessage: (m: HubMe
           buffer = buffer.slice(end + 2);
           const event = frame.match(/^event: (.*)$/m)?.[1];
           const data = frame.match(/^data: (.*)$/m)?.[1];
-          if (event !== "message" || !data) continue;
-          handle(JSON.parse(data));
+          if (!data) continue;
+          if (event === "message") handle(JSON.parse(data));
+          else if (event === "held") void Promise.resolve(onHeld(JSON.parse(data))).catch((e) => console.error(`warren-bridge: ${(e as Error).message}`));
         }
       }
     } catch (e) {

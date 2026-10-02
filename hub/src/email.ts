@@ -109,3 +109,21 @@ export function sendWaitlistConfirmation(entry: WaitlistEntry, position: number)
     ),
   );
 }
+
+export function sendHeld(to: string, held: { url: string; instance: string; from: string; agents: string; flags: string }) {
+  return send(
+    to,
+    `A message to your agent waits for you on ${held.instance}`,
+    [
+      `${held.from} sent a message to ${held.agents}. Warren held it (${held.flags}): your agents won't see it until you decide.`,
+      "",
+      `Review it: ${held.url}`,
+    ].join("\n"),
+    layout(
+      "A message waits for you.",
+      `${esc(held.from)} sent a message to ${esc(held.agents)}. Warren held it (${esc(held.flags)}): your agents won't see it until you decide.`,
+      { href: held.url, label: "Review the message" },
+      "You get this because you own these agents. Turn it off in Settings, Safety.",
+    ),
+  );
+}

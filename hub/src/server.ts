@@ -10,11 +10,11 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
 import { tx } from "./db.js";
-import { checkPassword, hashPassword, newSecret, verifyPassword } from "./auth.js";
+import { checkPassword, hashPassword, newRecoveryCodes, newSecret, newTotpSecret, totpUri, verifyPassword, verifyTotp } from "./auth.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
 import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
-import { canEmail, sendInvite, sendReset, sendWaitlistConfirmation } from "./email.js";
+import { canEmail, sendHeld, sendInvite, sendReset, sendWaitlistConfirmation } from "./email.js";
 
 const PORT = Number(process.env.PORT ?? 8790);
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -179,8 +179,13 @@ function limiter(max: number, windowMs: number) {
 }
 const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 10), 15 * 60_000);
 
-/** What a person sees about themselves: their member record with email. */
-const self = (m: store.Member) => ({ ...store.publicMember(m), email: m.email });
+/** What a person sees about themselves: their member record with email and settings. */
+const self = (m: store.Member) => ({
+  ...store.publicMember(m),
+  email: m.email,
+  prefs: m.prefs,
+  ...(m.twoFactor ? { recoveryCodesLeft: store.recoveryCodesLeft(m.handle) } : {}),
+});
 
 // --- MCP (stateless: fresh server + transport per request) -----------------
 app.post("/mcp", async (req, res) => {
@@ -207,9 +212,28 @@ app.get("/api/config", (_req, res) =>
     setupToken: !!SETUP_TOKEN,
     instanceName: store.instanceName(),
     email: canEmail(),
+    privacyContact: store.privacyContact(),
+    retentionDays: store.retentionDays(),
     version: VERSION,
   }),
 );
+
+// Instance settings for owners and admins: name, message retention, privacy contact.
+app.put("/api/instance", (req, res) => {
+  const actor = requireAdmin(req, res);
+  if (actor === undefined) return;
+  const b = req.body ?? {};
+  if (b.name !== undefined) store.setInstanceName(String(b.name));
+  if (b.retentionDays !== undefined) {
+    const days = Number(b.retentionDays);
+    if (!Number.isFinite(days) || days < 0 || days > 36500) return void res.status(400).json({ error: "retentionDays must be 0 (keep) or a number of days" });
+    store.setRetentionDays(days);
+    store.sweep();
+  }
+  if (b.privacyContact !== undefined) store.setPrivacyContact(String(b.privacyContact));
+  store.audit({ type: "policy", roomId: "*", actor: actor?.handle ?? "admin-token", detail: `changed instance settings: ${Object.keys(b).join(", ")}` });
+  res.json({ instanceName: store.instanceName(), retentionDays: store.retentionDays(), privacyContact: store.privacyContact() });
+});
 
 // First run: whoever opens the hub first creates the owner account (as in n8n
 // or Coolify). Set WARREN_SETUP_TOKEN to require a secret for it.
@@ -250,6 +274,13 @@ app.post("/api/auth/login", signInLimit, (req, res) => {
   // Always verify, so a wrong email takes as long as a wrong password.
   const ok = verifyPassword(password, m ? store.passwordHashOf(m.handle) : null);
   if (!m || !ok) return void res.status(401).json({ error: "wrong email or password" });
+  if (m.twoFactor) {
+    const code = req.body?.code;
+    if (!code) return void res.status(401).json({ error: "enter the code from your authenticator app", twoFactor: true });
+    const secret = store.totpSecretOf(m.handle);
+    if (!(secret && verifyTotp(secret, code)) && !store.useRecoveryCode(m.handle, code))
+      return void res.status(401).json({ error: "that code didn't work; try the next one, or a recovery code", twoFactor: true });
+  }
   setSessionCookie(req, res, m.handle);
   res.json(self(m));
 });
@@ -298,6 +329,154 @@ app.post("/api/me/password", signInLimit, (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     httpError(res, 400, e);
+  }
+});
+
+// Your settings: language, theme, and how strictly messages to your agents are held.
+app.put("/api/me/prefs", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  try {
+    const before = m.prefs.holdAllForeign;
+    const updated = store.setPrefs(m.handle, req.body ?? {});
+    if (before !== updated.prefs.holdAllForeign)
+      store.audit({
+        type: "policy",
+        roomId: m.scopeRoomId ?? "*",
+        actor: m.handle,
+        detail: `${updated.prefs.holdAllForeign ? "holds every" : "holds only suspicious"} message from other companies to @${m.handle}'s agents`,
+      });
+    res.json(self(updated));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+// Two-factor sign-in (TOTP). Setup returns a secret to scan; enable confirms it with a code.
+app.post("/api/me/2fa/setup", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (m.twoFactor) return void res.status(409).json({ error: "two-factor sign-in is already on" });
+  const secret = newTotpSecret();
+  store.setPendingTotp(m.handle, secret);
+  res.json({ secret, uri: totpUri(secret, m.email ?? m.handle, `Warren (${store.instanceName()})`) });
+});
+
+app.post("/api/me/2fa/enable", signInLimit, (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  const secret = store.pendingTotpOf(m.handle);
+  if (!secret) return void res.status(409).json({ error: "start the setup first" });
+  if (!verifyTotp(secret, req.body?.code)) return void res.status(400).json({ error: "that code didn't match; check the time on your phone and try the next one" });
+  const codes = newRecoveryCodes();
+  store.enableTotp(m.handle, secret, codes);
+  store.endSessions(m.handle, sessionId(req));
+  store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} turned on two-factor sign-in` });
+  res.json({ recoveryCodes: codes });
+});
+
+app.post("/api/me/2fa/disable", signInLimit, (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (!verifyPassword(String(req.body?.password ?? ""), store.passwordHashOf(m.handle))) return void res.status(403).json({ error: "your password is wrong" });
+  const secret = store.totpSecretOf(m.handle);
+  if (secret && !verifyTotp(secret, req.body?.code) && !store.useRecoveryCode(m.handle, req.body?.code))
+    return void res.status(403).json({ error: "enter a current code or a recovery code" });
+  store.disableTotp(m.handle);
+  store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} turned off two-factor sign-in` });
+  res.json(self(m));
+});
+
+// Approver keys: put one next to your agents so you can approve held messages from inside their session.
+app.get("/api/me/approver-keys", (req, res) => {
+  const m = requirePerson(req, res);
+  if (m) res.json(store.approverKeys(m.handle));
+});
+
+app.post("/api/me/approver-keys", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  const { key, id } = store.createApproverKey(m.handle, String(req.body?.label ?? ""));
+  store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} created an approver key` });
+  res.status(201).json({ id, key });
+});
+
+app.delete("/api/me/approver-keys/:id", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (!store.deleteApproverKey(m.handle, req.params.id)) return void res.status(404).json({ error: "no such key" });
+  res.json({ ok: true });
+});
+
+// Your data, as JSON (GDPR art. 15, 20).
+app.get("/api/me/export", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  res.setHeader("Content-Disposition", `attachment; filename="warren-${m.handle}.json"`);
+  res.json(store.exportFor(m.handle));
+});
+
+// Delete your account (GDPR art. 17). { password, deleteMessages }
+app.delete("/api/me", signInLimit, (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (m.role === "owner") return void res.status(403).json({ error: "the owner can't leave; hand over ownership in Settings first" });
+  if (m.email && !verifyPassword(String(req.body?.password ?? ""), store.passwordHashOf(m.handle)))
+    return void res.status(403).json({ error: "your password is wrong" });
+  store.eraseMember(m.handle, req.body?.deleteMessages === true, m.handle);
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+// --- approving held messages from inside an agent's session ----------------------
+// The bridge next to your agent holds your approver key (not the agent's token):
+// it shows you the held text in a dialog (Claude Code) or its terminal and sends
+// your answer here. It can only decide for your own agents.
+
+function approver(req: Request, res: Response): store.Member | undefined {
+  const m = store.byApproverKey(presentedToken(req));
+  if (!m) res.status(401).json({ error: "missing or unknown approver key" });
+  return m;
+}
+
+app.get("/api/session-review/:id", signInLimit, (req, res) => {
+  const m = approver(req, res);
+  if (!m) return;
+  const msg = store.getMessage(String(req.params.id));
+  const mine = msg && store.decisionsFor(m, msg).keys.length > 0;
+  if (!msg || !mine) return void res.status(404).json({ error: "nothing waits for you on that message" });
+  const agents = Object.entries(msg.safety.approvals ?? {})
+    .filter(([k]) => k === m.handle || k === `org:${m.org}`)
+    .flatMap(([, a]) => a.agents);
+  res.json({ id: msg.id, roomId: msg.roomId, from: msg.from, fromKind: msg.fromKind, org: msg.org, kind: msg.kind, text: msg.text, flags: msg.safety.flags, at: msg.at, agents });
+});
+
+app.post("/api/session-review/:id", signInLimit, (req, res) => {
+  const m = approver(req, res);
+  if (!m) return;
+  const decision = req.body?.decision;
+  if (decision !== "release" && decision !== "reject") return void res.status(400).json({ error: 'decision must be "release" or "reject"' });
+  try {
+    const msg = store.review(m, String(req.params.id), decision, "agents");
+    res.json({ id: msg.id, status: msg.safety.status, yours: decision === "release" ? "released" : "rejected" });
+  } catch (e) {
+    const t = (e as Error).message;
+    httpError(res, t.startsWith("no such") ? 404 : t.includes("not held") ? 409 : 403, e);
+  }
+});
+
+// Email the people a held message waits for (when they want that and SMTP is set up).
+store.events.on("held", (msg: store.Message) => {
+  for (const key of Object.keys(msg.safety.approvals ?? {})) {
+    const person = key.startsWith("org:") ? undefined : store.getMember(key);
+    if (!person?.email || !person.prefs.emailOnHold || person.disabled) continue;
+    void sendHeld(person.email, {
+      url: `${PUBLIC_URL}/app?review=${msg.id}`,
+      instance: store.instanceName(),
+      from: `@${msg.from} (${msg.org})`,
+      agents: msg.safety.approvals![key].agents.map((a) => "@" + a).join(", "),
+      flags: msg.safety.flags.join(", "),
+    });
   }
 });
 
@@ -773,8 +952,9 @@ app.post("/api/messages/:id/review", (req, res) => {
   const decision = req.body?.decision;
   if (decision !== "release" && decision !== "reject")
     return void res.status(400).json({ error: 'decision must be "release" or "reject"' });
+  const scope = req.body?.scope === "gate" || req.body?.scope === "agents" ? req.body.scope : undefined;
   try {
-    res.json(store.review(m, req.params.id, decision));
+    res.json(store.review(m, req.params.id, decision, scope));
   } catch (e) {
     const msg = (e as Error).message;
     httpError(res, msg.startsWith("no such") ? 404 : msg.includes("not held") ? 409 : 403, e);
@@ -868,8 +1048,34 @@ app.get("/api/events", (req: Request, res: Response) => {
     if (!m) return send("message", msg);
     if (!me || !store.canSee(me, msg.roomId) || msg.from === me.handle) return;
     const forYou = store.isFor(me, msg);
-    if (mentionsOnly && !forYou) return;
-    send("message", { ...store.viewFor(me, msg), forYou });
+    if (mentionsOnly) {
+      // Bridges: each message is pushed once, and counts as delivered.
+      if (!forYou || !store.markDelivered(msg, me.handle)) return;
+    }
+    send("message", { ...store.withDeliveries(me, store.viewFor(me, msg)), forYou });
+  };
+  // A message to this agent waits for its person: tell the bridge (no text) so it can ask them.
+  const onHeld = (msg: store.Message) => {
+    const me = live();
+    if (!mentionsOnly || !me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
+    const approval = msg.safety.approvals?.[store.approvalKey(me)];
+    if (!approval?.agents.includes(me.handle) || !(msg.mentionsRoom || msg.mentions.includes(me.handle))) return;
+    send("held", {
+      id: msg.id,
+      roomId: msg.roomId,
+      from: msg.from,
+      org: msg.org,
+      kind: msg.kind,
+      flags: msg.safety.flags,
+      waitsFor: store.approvalKey(me),
+      reviewUrl: `${PUBLIC_URL}/app?review=${msg.id}`,
+    });
+  };
+  // People see who got a message, live.
+  const onDelivery = (d: { messageId: string; roomId: string; handle: string }) => {
+    const me = live();
+    if (mentionsOnly || (m && !(me && me.kind === "human" && store.canSee(me, d.roomId)))) return;
+    send("delivery", d);
   };
   // Safety status changed (a person released or rejected a held message).
   const onMessageUpdate = (msg: store.Message) => {
@@ -921,10 +1127,15 @@ app.get("/api/events", (req: Request, res: Response) => {
     ["presence", onPresence],
     ["audit", onAudit],
     ["kick", onKick],
+    ["held", onHeld],
+    ["delivery", onDelivery],
   ];
   const ping = setInterval(() => (m && !live() ? res.end() : res.write(": ping\n\n")), 15_000);
   for (const [e, fn] of handlers) store.events.on(e, fn);
   if (m) store.trackConnection(m, 1);
+  // An agent that was offline catches up: what it was sent in the last week and never got.
+  if (m && mentionsOnly)
+    for (const msg of store.undelivered(m)) if (store.markDelivered(msg, m.handle)) send("message", { ...store.viewFor(m, msg), forYou: true, late: true });
   req.on("close", () => {
     clearInterval(ping);
     for (const [e, fn] of handlers) store.events.off(e, fn);
@@ -1043,6 +1254,8 @@ function setupSnippets(m: store.Member, token: string) {
 }
 
 if (DEMO && process.env.WARREN_SEED !== "0") seedDemo(PUBLIC_URL);
+store.sweep();
+setInterval(() => store.sweep(), 60 * 60_000).unref();
 if (!DEMO && !store.isSetUp())
   console.log(`no owner yet: open ${PUBLIC_URL}/app to create the owner account${SETUP_TOKEN ? " (needs WARREN_SETUP_TOKEN)" : ""}`);
 

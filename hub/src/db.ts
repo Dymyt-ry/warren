@@ -102,6 +102,33 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX audit_room ON audit(room_id, seq);
   `,
+  `
+  -- Per-person settings (language, theme, safety), two-factor sign-in.
+  ALTER TABLE members ADD COLUMN prefs TEXT NOT NULL DEFAULT '{}';
+  ALTER TABLE members ADD COLUMN totp_secret TEXT;
+  ALTER TABLE members ADD COLUMN totp_pending TEXT;
+  ALTER TABLE members ADD COLUMN recovery_codes TEXT;
+
+  -- Which agent got which message pushed (or read it from its inbox):
+  -- an agent that was offline gets the rest when it reconnects.
+  CREATE TABLE deliveries (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    handle TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (message_id, handle)
+  );
+
+  -- Keys a person puts next to their agents so they can approve held messages
+  -- from inside the agent's session (Claude Code dialog, bridge terminal).
+  CREATE TABLE approver_keys (
+    id TEXT PRIMARY KEY,
+    handle TEXT NOT NULL REFERENCES members(handle) ON DELETE CASCADE,
+    key_hash TEXT UNIQUE NOT NULL,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+  );
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

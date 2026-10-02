@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { db, getMeta, setMeta, tx } from "./db.js";
 import { newSecret, sha256 } from "./auth.js";
-import { injectionFlags, LOOP_LIMIT, redactSecrets, type Safety } from "./safety.js";
+import { injectionFlags, isAttackFlag, LOOP_LIMIT, redactSecrets, settle, type Approval, type Decision, type Safety } from "./safety.js";
 
 export type Adapter = "channel" | "exec" | "inbox" | "a2a" | "dashboard";
 export const ADAPTERS: Adapter[] = ["channel", "exec", "inbox", "a2a", "dashboard"];
@@ -30,6 +30,7 @@ export interface Message {
   mentionsRoom: boolean;
   safety: Safety;
   at: string;
+  delivered?: string[]; // for people: agents that got it pushed or read it from their inbox
 }
 
 /** "I'm on this": a task, optionally with the files the holder is about to change. */
@@ -84,11 +85,25 @@ export interface Member {
   owner: string | null; // agents: the person who added them
   paused: boolean; // stopped by a person: can't post, gets no pushes
   disabled: boolean; // removed: can't sign in, keeps their handle so history stays readable
+  prefs: Prefs; // people: their own settings
+  twoFactor: boolean; // people: signs in with a one-time code too
   createdAt: string;
 }
 
-/** A member as other members see it: no email, with presence. */
-export type PublicMember = Omit<Member, "email"> & { online: boolean };
+export type Language = "en" | "cs";
+export type Theme = "system" | "light" | "dark";
+
+export interface Prefs {
+  language: Language;
+  theme: Theme;
+  holdAllForeign: boolean; // hold every message from another company to my agents, not only suspicious ones
+  emailOnHold: boolean; // email me when a message to my agents waits for me
+}
+
+export const DEFAULT_PREFS: Prefs = { language: "en", theme: "system", holdAllForeign: false, emailOnHold: true };
+
+/** A member as other members see it: no email or settings, with presence. */
+export type PublicMember = Omit<Member, "email" | "prefs"> & { online: boolean };
 
 export const HISTORY = 200; // messages a room carries in API responses
 
@@ -98,7 +113,15 @@ export const HISTORY = 200; // messages a room carries in API responses
 export const events = new EventEmitter();
 events.setMaxListeners(0);
 
-export const publicMember = ({ email: _e, ...m }: Member): PublicMember => ({ ...m, online: isOnline(m.handle) });
+export const publicMember = ({ email: _e, prefs: _p, ...m }: Member): PublicMember => ({ ...m, online: isOnline(m.handle) });
+
+function parsePrefs(raw: unknown): Prefs {
+  try {
+    return { ...DEFAULT_PREFS, ...JSON.parse(String(raw ?? "{}")) };
+  } catch {
+    return { ...DEFAULT_PREFS };
+  }
+}
 
 // --- cache -------------------------------------------------------------------
 
@@ -118,6 +141,8 @@ const toMember = (r: Row): Member => ({
   owner: (r.owner_handle as string | null) ?? null,
   paused: !!r.paused,
   disabled: !!r.disabled,
+  prefs: parsePrefs(r.prefs),
+  twoFactor: !!r.totp_secret,
   createdAt: r.created_at as string,
 });
 
@@ -278,7 +303,15 @@ export function visibleRooms(m: Member): Room[] {
 
 /** A room with its latest messages, as `viewer` may read them. */
 export function roomView(viewer: Member | undefined, room: Room, limit = HISTORY): RoomWithMessages {
-  return { ...room, messages: recentMessages(room.id, limit).map((x) => viewFor(viewer, x)) };
+  const messages = recentMessages(room.id, limit).map((x) => viewFor(viewer, x));
+  if (viewer?.kind === "agent") return { ...room, messages };
+  const delivered = deliveriesOf(messages.map((x) => x.id));
+  return { ...room, messages: messages.map((x) => ({ ...x, delivered: delivered.get(x.id) ?? [] })) };
+}
+
+/** Adds who got the message, for people's dashboards. */
+export function withDeliveries(viewer: Member | undefined, msg: Message): Message {
+  return viewer?.kind === "agent" ? msg : { ...msg, delivered: deliveriesOf([msg.id]).get(msg.id) ?? [] };
 }
 
 // --- members -----------------------------------------------------------------
@@ -326,6 +359,8 @@ export function addMember(input: {
     owner: input.owner ?? null,
     paused: false,
     disabled: false,
+    prefs: { ...DEFAULT_PREFS },
+    twoFactor: false,
     createdAt: new Date().toISOString(),
   };
   db.prepare(
@@ -495,6 +530,178 @@ function kick(handle: string) {
 /** Everyone who can see the room: these are the room's members. */
 export function roomMembers(roomId: string): Member[] {
   return allMembers().filter((m) => canSee(m, roomId));
+}
+
+// --- personal settings, two-factor sign-in, approver keys ----------------------------
+
+export function setPrefs(handle: string, patch: Partial<Prefs>): Member {
+  const m = members.get(handle);
+  if (!m) throw new Error(`no such member @${handle}`);
+  const next = { ...m.prefs };
+  if (patch.language !== undefined) {
+    if (!["en", "cs"].includes(patch.language)) throw new Error("language must be en or cs");
+    next.language = patch.language;
+  }
+  if (patch.theme !== undefined) {
+    if (!["system", "light", "dark"].includes(patch.theme)) throw new Error("theme must be system, light or dark");
+    next.theme = patch.theme;
+  }
+  for (const k of ["holdAllForeign", "emailOnHold"] as const)
+    if (patch[k] !== undefined) {
+      if (typeof patch[k] !== "boolean") throw new Error(`${k} must be true or false`);
+      next[k] = patch[k];
+    }
+  db.prepare("UPDATE members SET prefs = ? WHERE handle = ?").run(JSON.stringify(next), handle);
+  m.prefs = next;
+  return m;
+}
+
+type TotpRow = { totp_secret: string | null; totp_pending: string | null; recovery_codes: string | null };
+const totpRow = (handle: string) => db.prepare("SELECT totp_secret, totp_pending, recovery_codes FROM members WHERE handle = ?").get(handle) as TotpRow | undefined;
+
+export const totpSecretOf = (handle: string) => totpRow(handle)?.totp_secret ?? null;
+export const pendingTotpOf = (handle: string) => totpRow(handle)?.totp_pending ?? null;
+
+export function setPendingTotp(handle: string, secret: string | null) {
+  db.prepare("UPDATE members SET totp_pending = ? WHERE handle = ?").run(secret, handle);
+}
+
+/** Turns two-factor on with the confirmed secret; stores the recovery codes hashed. */
+export function enableTotp(handle: string, secret: string, recoveryCodes: string[]) {
+  db.prepare("UPDATE members SET totp_secret = ?, totp_pending = NULL, recovery_codes = ? WHERE handle = ?").run(
+    secret,
+    JSON.stringify(recoveryCodes.map((c) => sha256(c))),
+    handle,
+  );
+  members.get(handle)!.twoFactor = true;
+}
+
+export function disableTotp(handle: string) {
+  db.prepare("UPDATE members SET totp_secret = NULL, totp_pending = NULL, recovery_codes = NULL WHERE handle = ?").run(handle);
+  const m = members.get(handle);
+  if (m) m.twoFactor = false;
+}
+
+/** Uses up a recovery code; false when it isn't one of theirs (or was used). */
+export function useRecoveryCode(handle: string, code: unknown): boolean {
+  if (typeof code !== "string") return false;
+  const hashes: string[] = JSON.parse(totpRow(handle)?.recovery_codes ?? "[]");
+  const h = sha256(code.trim().toLowerCase());
+  if (!hashes.includes(h)) return false;
+  db.prepare("UPDATE members SET recovery_codes = ? WHERE handle = ?").run(JSON.stringify(hashes.filter((x) => x !== h)), handle);
+  return true;
+}
+
+export const recoveryCodesLeft = (handle: string) => (JSON.parse(totpRow(handle)?.recovery_codes ?? "[]") as string[]).length;
+
+export interface ApproverKey {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** A key that lets its person approve held messages for their own agents, and nothing else. Returned once. */
+export function createApproverKey(handle: string, label: string): { key: string; id: string } {
+  const key = newSecret("wa");
+  const id = randomUUID();
+  db.prepare("INSERT INTO approver_keys (id, handle, key_hash, label, created_at) VALUES (?, ?, ?, ?, ?)").run(
+    id,
+    handle,
+    sha256(key),
+    String(label || "agent session").trim().slice(0, 60),
+    new Date().toISOString(),
+  );
+  return { key, id };
+}
+
+export function approverKeys(handle: string): ApproverKey[] {
+  return (db.prepare("SELECT id, label, created_at, last_used_at FROM approver_keys WHERE handle = ? ORDER BY created_at").all(handle) as Row[]).map((r) => ({
+    id: r.id as string,
+    label: r.label as string,
+    createdAt: r.created_at as string,
+    lastUsedAt: (r.last_used_at as string | null) ?? null,
+  }));
+}
+
+export function deleteApproverKey(handle: string, id: string): boolean {
+  return db.prepare("DELETE FROM approver_keys WHERE handle = ? AND id = ?").run(handle, id).changes === 1;
+}
+
+export function byApproverKey(key: string | undefined): Member | undefined {
+  if (!key?.startsWith("wa_")) return undefined;
+  const row = db.prepare("SELECT handle FROM approver_keys WHERE key_hash = ?").get(sha256(key)) as { handle: string } | undefined;
+  const m = row ? members.get(row.handle) : undefined;
+  if (!m || m.disabled) return undefined;
+  db.prepare("UPDATE approver_keys SET last_used_at = ? WHERE key_hash = ?").run(new Date().toISOString(), sha256(key));
+  return m;
+}
+
+// --- privacy: export, erasure, retention ---------------------------------------------
+
+/** Everything the hub stores about a person and their agents (GDPR art. 15 and 20). */
+export function exportFor(handle: string) {
+  const m = members.get(handle)!;
+  const agents = allMembers().filter((a) => a.owner === handle);
+  const handles = [handle, ...agents.map((a) => a.handle)];
+  const list = JSON.stringify(handles);
+  return {
+    exportedAt: new Date().toISOString(),
+    instance: instanceName(),
+    account: { ...publicMember(m), email: m.email, prefs: m.prefs, twoFactor: m.twoFactor, approverKeys: approverKeys(handle) },
+    agents: agents.map(publicMember),
+    messages: (db.prepare("SELECT * FROM messages WHERE from_handle IN (SELECT value FROM json_each(?)) ORDER BY seq").all(list) as Row[]).map(toMessage),
+    claims: allRooms().flatMap((r) => r.claims.filter((c) => handles.includes(c.by))),
+    audit: (db.prepare("SELECT * FROM audit WHERE actor IN (SELECT value FROM json_each(?)) OR target IN (SELECT value FROM json_each(?)) ORDER BY seq").all(list, list) as Row[]).map(toAudit),
+    sessions: (db.prepare("SELECT created_at, expires_at FROM sessions WHERE handle = ?").all(handle) as Row[]).map((r) => ({ createdAt: r.created_at, expiresAt: r.expires_at })),
+    invitesSent: (db.prepare("SELECT email, org, scope_room_id, role, created_at, used_at FROM links WHERE created_by = ? AND purpose = 'invite'").all(handle) as Row[]),
+  };
+}
+
+/**
+ * Deletes a person's account (GDPR art. 17): their name, email, password,
+ * two-factor and keys go; their agents are removed; their handle stays taken
+ * so old threads still read. With `deleteMessages`, what they and their agents
+ * wrote is deleted too; otherwise it stays, signed "former member".
+ */
+export function eraseMember(handle: string, deleteMessages: boolean, actor: string) {
+  const m = members.get(handle);
+  if (!m) throw new Error(`no such member @${handle}`);
+  const agents = allMembers().filter((a) => a.owner === handle);
+  disableMember(handle, actor);
+  const handles = JSON.stringify([handle, ...agents.map((a) => a.handle)]);
+  tx(() => {
+    db.prepare(
+      "UPDATE members SET name = 'Former member', email = NULL, password_hash = NULL, totp_secret = NULL, totp_pending = NULL, recovery_codes = NULL, prefs = '{}' WHERE handle = ?",
+    ).run(handle);
+    db.prepare("DELETE FROM approver_keys WHERE handle = ?").run(handle);
+    db.prepare("DELETE FROM links WHERE handle = ? OR (created_by = ? AND used_at IS NULL)").run(handle, handle);
+    if (deleteMessages) {
+      const rooms = db.prepare("SELECT DISTINCT room_id FROM messages WHERE from_handle IN (SELECT value FROM json_each(?))").all(handles) as { room_id: string }[];
+      db.prepare("DELETE FROM messages WHERE from_handle IN (SELECT value FROM json_each(?))").run(handles);
+      for (const r of rooms) events.emit("room_messages_deleted", { roomId: r.room_id });
+    }
+  });
+  Object.assign(m, { name: "Former member", email: null, prefs: { ...DEFAULT_PREFS }, twoFactor: false });
+  events.emit("member", publicMember(m));
+}
+
+export const retentionDays = () => Number(getMeta("retention_days") ?? 0);
+export const setRetentionDays = (days: number) => setMeta("retention_days", String(Math.max(0, Math.floor(days) || 0)));
+export const privacyContact = () => getMeta("privacy_contact") ?? "";
+export const setPrivacyContact = (v: string) => setMeta("privacy_contact", String(v ?? "").trim().slice(0, 200));
+
+/** Deletes messages older than the retention period, expired sessions and links. Returns how many messages went. */
+export function sweep(): number {
+  const now = new Date();
+  db.prepare("DELETE FROM sessions WHERE expires_at < ?").run(now.toISOString());
+  db.prepare("DELETE FROM links WHERE expires_at < ? AND used_at IS NULL").run(new Date(now.getTime() - 30 * 86_400_000).toISOString());
+  const days = retentionDays();
+  if (!days) return 0;
+  const cutoff = new Date(now.getTime() - days * 86_400_000).toISOString();
+  const n = db.prepare("DELETE FROM messages WHERE at < ?").run(cutoff).changes;
+  if (n) audit({ type: "room", roomId: "*", actor: "hub", detail: `deleted ${n} messages older than ${days} days (retention)` });
+  return Number(n);
 }
 
 // --- sessions ------------------------------------------------------------------
@@ -675,6 +882,22 @@ function agentStreak(roomId: string): number {
   return n;
 }
 
+/** Whose decision lets a message from another company reach this agent: its person, or its company when nobody owns it. */
+export const approvalKey = (agent: Member) => agent.owner ?? `org:${agent.org}`;
+
+/** True when `m` decides for `key`: it's them, or `org:<their org>` for agents nobody owns. */
+const decidesFor = (m: Member, key: string) => key === m.handle || key === `org:${m.org}`;
+
+/**
+ * Posts a message. Safety, in order:
+ *  1. secrets are masked;
+ *  2. text that looks like an attack, from another company, is held separately
+ *     for every person whose agents are in the room: each one decides for their
+ *     own agents (people who turned on "hold everything from other companies"
+ *     get every foreign message to their agents held the same way);
+ *  3. agents talking without a person, and agents' contract changes under the
+ *     room's approval policy, close a room-wide gate until a person decides.
+ */
 export function post(m: Member, roomId: string, kind: MessageKind, text: string): Message {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
   if (m.paused) throw new Error(`@${m.handle} is paused by a person of ${m.org}; ask them to resume you`);
@@ -683,15 +906,33 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
   if (!MESSAGE_KINDS.includes(kind)) throw new Error(`kind must be one of ${MESSAGE_KINDS.join(", ")}`);
   const room = rooms.get(roomId)!;
 
-  // Safety: mask secrets, flag injection attempts, stop agent ping-pong.
   const clean = redactSecrets(text);
   const flags = injectionFlags(clean.text);
-  const crossOrg = roomMembers(roomId).some((x) => x.org !== m.org);
+  const mentioned = parseMentions(clean.text, roomId);
+  const reaches = (a: Member) => mentioned.mentionsRoom || mentioned.mentions.includes(a.handle);
+
+  const approvals: Record<string, Approval> = {};
+  let strict = false;
+  for (const a of roomMembers(roomId)) {
+    if (a.kind !== "agent" || a.org === m.org) continue;
+    const owner = a.owner ? members.get(a.owner) : undefined;
+    const holdAll = !!owner?.prefs.holdAllForeign && reaches(a);
+    if (!flags.length && !holdAll) continue;
+    strict ||= holdAll && !flags.length;
+    const key = approvalKey(a);
+    (approvals[key] ??= { decision: "pending", agents: [] }).agents.push(a.handle);
+  }
+  if (strict) flags.push("strict");
+
   const loop = m.kind === "agent" && agentStreak(roomId) >= LOOP_LIMIT;
   if (loop) flags.push("agent-loop");
   const needsApproval = room.policy.approveContractChanges && kind === "contract_change" && m.kind === "agent";
   if (needsApproval) flags.push("needs-approval");
-  const held = loop || needsApproval || (flags.length > 0 && crossOrg);
+
+  const safety: Safety = { status: "delivered", flags, redactions: clean.redactions };
+  if (loop || needsApproval) safety.gate = "pending";
+  if (Object.keys(approvals).length) safety.approvals = approvals;
+  safety.status = settle(safety);
 
   const msg: Message = {
     id: randomUUID(),
@@ -701,18 +942,29 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
     org: m.org,
     kind,
     text: clean.text,
-    ...parseMentions(clean.text, roomId),
-    safety: { status: held ? "held" : "delivered", flags, redactions: clean.redactions },
+    ...mentioned,
+    safety,
     at: new Date().toISOString(),
   };
   db.prepare(
     `INSERT INTO messages (id, room_id, from_handle, from_kind, org, kind, text, mentions, mentions_room, safety, at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(msg.id, roomId, msg.from, msg.fromKind, msg.org, kind, msg.text, JSON.stringify(msg.mentions), msg.mentionsRoom ? 1 : 0, JSON.stringify(msg.safety), msg.at);
+  ).run(msg.id, roomId, msg.from, msg.fromKind, msg.org, kind, msg.text, JSON.stringify(msg.mentions), msg.mentionsRoom ? 1 : 0, JSON.stringify(safety), msg.at);
   events.emit("message", msg);
   if (clean.redactions.length)
     audit({ type: "redacted", roomId, actor: "hub", target: msg.id, detail: `masked ${clean.redactions.join(", ")} in a message from @${m.handle}` });
-  if (held) audit({ type: "held", roomId, actor: "hub", target: msg.id, detail: `held a message from @${m.handle}: ${flags.join(", ")}` });
+  if (safety.status === "held") {
+    const who = Object.keys(approvals).map((k) => (k.startsWith("org:") ? k.slice(4) : "@" + k));
+    audit({
+      type: "held",
+      roomId,
+      actor: "hub",
+      target: msg.id,
+      detail: `held a message from @${m.handle}: ${flags.join(", ")}${who.length ? `; waiting for ${who.join(", ")}` : ""}`,
+    });
+    // Tell the agents it was meant for (without the text) and their people.
+    events.emit("held", msg);
+  }
   return msg;
 }
 
@@ -721,57 +973,109 @@ export function getMessage(id: string): Message | undefined {
   return row ? toMessage(row) : undefined;
 }
 
+/** What `m` could decide on a held message: the room-wide gate, and the agents they answer for. */
+export function decisionsFor(m: Member, msg: Message): { gate: boolean; keys: string[] } {
+  const s = msg.safety;
+  if (m.kind !== "human" || m.disabled || msg.from === m.handle || !canSee(m, msg.roomId)) return { gate: false, keys: [] };
+  const gate =
+    s.gate === "pending" &&
+    // A contract change is approved by the people of the company that proposed it; a loop by any person.
+    (!s.flags.includes("needs-approval") || m.org === msg.org);
+  const keys = Object.entries(s.approvals ?? {})
+    .filter(([key, a]) => a.decision === "pending" && decidesFor(m, key))
+    .map(([key]) => key);
+  return { gate, keys };
+}
+
 /**
- * A person releases or rejects a held message. Released messages are pushed
- * to the agents they mention as if they had just been posted.
+ * A person releases or rejects a held message: the room-wide gate if they may
+ * decide it (scope "gate"), otherwise their own agents' copy (scope "agents").
+ * Agents get a released message pushed as if it had just been posted.
  */
-export function review(m: Member, messageId: string, decision: "release" | "reject"): Message {
+export function review(m: Member, messageId: string, decision: "release" | "reject", scope?: "gate" | "agents"): Message {
   const msg = getMessage(messageId);
   if (!msg || !canSee(m, msg.roomId)) throw new Error(`no such message ${messageId}`);
   if (m.kind !== "human") throw new Error("only a person can review held messages");
   if (msg.from === m.handle) throw new Error("you can't review your own message");
   if (msg.safety.status !== "held") throw new Error(`message is ${msg.safety.status}, not held`);
-  // A contract change is approved by the people who own the agent that proposed it.
-  if (msg.safety.flags.includes("needs-approval") && m.org !== msg.org)
-    throw new Error(`only a person of ${msg.org} can approve @${msg.from}'s contract change`);
-  // A suspected injection is released by the people it targets, not by the company that sent it
-  // (unless no person of another company can see the room).
-  const suspicious = msg.safety.flags.some((f) => f !== "needs-approval" && f !== "agent-loop");
-  const otherOrgPerson = roomMembers(msg.roomId).some((x) => x.kind === "human" && x.org !== msg.org);
-  if (suspicious && m.org === msg.org && otherOrgPerson)
-    throw new Error(`a person outside ${msg.org} reviews this: it was flagged as a possible attack from ${msg.org}`);
-  msg.safety = { ...msg.safety, status: decision === "release" ? "released" : "rejected", reviewedBy: m.handle };
+  const can = decisionsFor(m, msg);
+  const useGate = scope === "gate" || (scope === undefined && can.gate);
+  const result: Decision = decision === "release" ? "released" : "rejected";
+  const now = new Date().toISOString();
+  let releasedKeys: string[] = [];
+
+  if (useGate) {
+    if (!can.gate) {
+      if (msg.safety.gate !== "pending") throw new Error("nothing room-wide to decide on this message");
+      throw new Error(`only a person of ${msg.org} can approve @${msg.from}'s contract change`);
+    }
+    msg.safety.gate = result;
+  } else {
+    if (!can.keys.length) {
+      const waiting = Object.entries(msg.safety.approvals ?? {})
+        .filter(([, a]) => a.decision === "pending")
+        .map(([k, a]) => `${k.startsWith("org:") ? `a person of ${k.slice(4)}` : "@" + k} (for ${a.agents.map((x) => "@" + x).join(", ")})`);
+      if (msg.safety.gate === "pending") throw new Error(`only a person of ${msg.org} can approve @${msg.from}'s contract change`);
+      throw new Error(
+        waiting.length
+          ? `each person decides for their own agents: this waits for ${waiting.join(", ")}`
+          : "nothing here for you to decide",
+      );
+    }
+    for (const key of can.keys) Object.assign(msg.safety.approvals![key], { decision: result, by: m.handle, at: now });
+    if (result === "released") releasedKeys = can.keys;
+  }
+  msg.safety.reviewedBy = m.handle;
+  msg.safety.status = settle(msg.safety);
   db.prepare("UPDATE messages SET safety = ? WHERE id = ?").run(JSON.stringify(msg.safety), msg.id);
   events.emit("message_update", msg);
   audit({
-    type: decision === "release" ? "released" : "rejected",
+    type: result,
     roomId: msg.roomId,
     actor: m.handle,
     target: msg.id,
-    detail: `${decision === "release" ? "released" : "rejected"} @${msg.from}'s held message (${msg.safety.flags.join(", ")})`,
+    detail: `${result} @${msg.from}'s held message${useGate ? "" : ` for ${can.keys.map((k) => (k.startsWith("org:") ? k.slice(4) + "'s agents" : "@" + k + "'s agents")).join(", ")}`} (${msg.safety.flags.join(", ")})`,
   });
-  if (decision === "release") events.emit("message", msg); // now reaches the agents' streams
+  // Now reaches the agents' streams; each stream checks which agents may have it.
+  if (result === "released" && (useGate || releasedKeys.length)) events.emit("message", msg);
   return msg;
 }
 
-/** What `viewer` may read of a message: agents don't see the text of held or rejected messages from others. */
+/** True when an agent may read the text: not held from it, not an unreviewed attack from another company. */
+function agentMayRead(agent: Member, msg: Message): boolean {
+  if (agent.handle === msg.from) return true;
+  const s = msg.safety;
+  if (s.gate === "pending" || s.gate === "rejected") return false;
+  const mine = s.approvals?.[approvalKey(agent)];
+  if (mine) return mine.decision === "released";
+  // Joined after the message was posted, or nobody had to decide for it: attacks from
+  // another company stay hidden from agents unless someone released them for the room.
+  if (agent.org !== msg.org && s.flags.some(isAttackFlag)) return false;
+  return true;
+}
+
+/** What `viewer` may read of a message: agents don't see the text of messages held from them. */
 export function viewFor(viewer: Member | undefined, msg: Message): Message {
-  const hidden = msg.safety.status === "held" || msg.safety.status === "rejected";
-  if (!hidden || !viewer || viewer.kind !== "agent" || viewer.handle === msg.from) return msg;
-  const note = msg.safety.status === "held" ? "[held for human review]" : `[rejected by @${msg.safety.reviewedBy}]`;
+  if (!viewer || viewer.kind !== "agent" || agentMayRead(viewer, msg)) return msg;
+  const s = msg.safety;
+  const note =
+    s.status === "rejected" || s.gate === "rejected" || s.approvals?.[approvalKey(viewer)]?.decision === "rejected"
+      ? `[rejected by @${s.reviewedBy ?? "a person"}]`
+      : "[held for human review]";
   return { ...msg, text: note, mentions: [], mentionsRoom: false };
 }
 
-/** True when the message should be pushed to `m`: mentioned by handle or via @room, not their own, not held. */
+/** True when the message should be pushed to `m`: mentioned by handle or via @room, not their own, not held from them. */
 export function isFor(m: Member, msg: Message): boolean {
   if (m.paused || msg.from === m.handle || !canSee(m, msg.roomId)) return false;
-  if (msg.safety.status === "held" || msg.safety.status === "rejected") return false;
+  if (m.kind === "agent" ? !agentMayRead(m, msg) : msg.safety.gate === "pending" || msg.safety.gate === "rejected") return false;
   return msg.mentionsRoom || msg.mentions.includes(m.handle);
 }
 
 /**
  * Messages the member can see that arrived after `sinceId` (the last 500 when
- * omitted), minus their own. With `mentionsOnly`, just the ones addressed to them.
+ * omitted), minus their own. With `mentionsOnly`, just the ones addressed to
+ * them, which then count as delivered.
  */
 export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Message[] {
   const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
@@ -785,7 +1089,45 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Messag
           .prepare("SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ? ORDER BY seq LIMIT 500")
           .all(visible, m.handle, since) as Row[])
   ).map(toMessage);
-  return rows.filter((x) => !mentionsOnly || isFor(m, x)).map((x) => viewFor(m, x));
+  const out = rows.filter((x) => !mentionsOnly || isFor(m, x));
+  if (mentionsOnly) for (const x of out) markDelivered(x, m.handle);
+  return out.map((x) => viewFor(m, x));
+}
+
+// --- delivery: who got what, and catching up agents that were offline ---------------
+
+/** Records that `handle` got the message; false when it already had. */
+export function markDelivered(msg: Message, handle: string): boolean {
+  const done = db.prepare("INSERT OR IGNORE INTO deliveries (message_id, handle, at) VALUES (?, ?, ?)").run(msg.id, handle, new Date().toISOString()).changes === 1;
+  if (done) events.emit("delivery", { messageId: msg.id, roomId: msg.roomId, handle });
+  return done;
+}
+
+/** Handles that got each message pushed or read it from their inbox. */
+export function deliveriesOf(ids: string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  if (!ids.length) return out;
+  const rows = db.prepare("SELECT message_id, handle FROM deliveries WHERE message_id IN (SELECT value FROM json_each(?))").all(JSON.stringify(ids)) as {
+    message_id: string;
+    handle: string;
+  }[];
+  for (const r of rows) out.set(r.message_id, [...(out.get(r.message_id) ?? []), r.handle]);
+  return out;
+}
+
+const CATCH_UP_DAYS = 7;
+
+/** Messages for `m` from the last week that it never got (it was offline, or held at the time), oldest first. */
+export function undelivered(m: Member): Message[] {
+  const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
+  const since = new Date(Date.now() - CATCH_UP_DAYS * 86_400_000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND at > ?
+       AND id NOT IN (SELECT message_id FROM deliveries WHERE handle = ?) ORDER BY seq LIMIT 200`,
+    )
+    .all(visible, m.handle, since, m.handle) as Row[];
+  return rows.map(toMessage).filter((x) => isFor(m, x));
 }
 
 // --- human in the loop: pause, room policy, audit ----------------------------------

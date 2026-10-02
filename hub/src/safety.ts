@@ -13,15 +13,42 @@
 export type SafetyStatus = "delivered" | "held" | "released" | "rejected";
 
 export interface Safety {
-  status: SafetyStatus;
+  status: SafetyStatus; // overall: held while any decision is pending
   flags: string[]; // e.g. "override-instructions", "shell-payload", "agent-loop"
   redactions: string[]; // kinds of secrets that were masked, e.g. "github-token"
-  reviewedBy?: string; // handle of the person who released or rejected it
+  reviewedBy?: string; // handle of the person who made the last decision
+  // A room-wide decision (agent loop, contract change under the approval policy):
+  // nobody's agent gets the message until it's released.
+  gate?: Decision;
+  // Per-recipient decisions for a message from another company: each person
+  // decides for their own agents ("org:<org>" for agents nobody owns).
+  approvals?: Record<string, Approval>;
+}
+
+export type Decision = "pending" | "released" | "rejected";
+
+export interface Approval {
+  decision: Decision;
+  agents: string[]; // the owner's agents in the room when it was posted
+  by?: string;
+  at?: string;
+}
+
+/** Flags that mean "this text may be an attack", as opposed to process holds. */
+export const isAttackFlag = (f: string) => f !== "agent-loop" && f !== "needs-approval" && f !== "strict";
+
+/** Overall status from the gate and the per-owner decisions. */
+export function settle(s: Safety): SafetyStatus {
+  const decisions = [...(s.gate ? [s.gate] : []), ...Object.values(s.approvals ?? {}).map((a) => a.decision)];
+  if (decisions.length === 0) return "delivered";
+  if (s.gate === "rejected") return "rejected";
+  if (decisions.includes("pending")) return "held";
+  return decisions.includes("released") ? "released" : "rejected";
 }
 
 const SECRETS: [string, RegExp][] = [
   ["private-key", /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g],
-  ["warren-token", /\bw[rsi]_[a-z0-9_]{8,}\b/gi],
+  ["warren-token", /\bw[rsia]_[a-z0-9_]{8,}\b/gi],
   ["anthropic-key", /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
   ["openai-key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g],
   ["github-token", /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/g],
