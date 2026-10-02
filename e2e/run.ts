@@ -8,6 +8,7 @@
 //   7. A2A message/send posts into the room of the caller's token
 //   +  claims and file locks, WARREN_DEMO=0, safety (secrets, injection hold, loop guard)
 //   8. WARREN_DEMO=0 closes the demo shortcuts
+//  13. accounts: owner setup, sign-in, invite links, guests scoped by room and company, removal, resets, restart
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -48,22 +49,25 @@ const toolJson = (r: Awaited<ReturnType<Client["callTool"]>>) => JSON.parse((r.c
 
 const cleanup: (() => unknown)[] = [];
 
-/** Starts a hub in its own process group (so cleanup kills npx and node under it) and waits until it answers. */
+/** Starts a hub in its own process group (so cleanup kills npx and node under it) and waits until it answers. Returns a stop function. */
 async function startHub(port: number, env: Record<string, string> = {}) {
   const url = `http://localhost:${port}`;
   const up = () => fetch(`${url}/.well-known/agent-card.json`).then((r) => r.ok, () => false);
   if (await up()) throw new Error(`port ${port} is taken: a hub from an earlier run is still up`);
   const child = spawn("npx", ["tsx", "hub/src/server.ts"], {
-    env: { ...process.env, PORT: String(port), WARREN_DATA_DIR: mkdtempSync(join(tmpdir(), "warren-data-")), ...env },
+    env: { ...process.env, PORT: String(port), WARREN_DATA_DIR: mkdtempSync(join(tmpdir(), "warren-data-")), WARREN_LOGIN_LIMIT: "50", ...env },
     stdio: ["ignore", "ignore", "inherit"],
     detached: true,
   });
-  cleanup.push(() => {
+  const stop = async () => {
     try {
       process.kill(-child.pid!);
     } catch {}
-  });
+    await waitFor(async () => !(await up()), 5000);
+  };
+  cleanup.push(stop);
   if (!(await waitFor(up, 15_000))) throw new Error(`hub on ${port} did not start`);
+  return stop;
 }
 
 /** Waits until the member holds an SSE connection, i.e. its bridge is subscribed. */
@@ -74,7 +78,7 @@ const online = (handle: string) =>
   });
 
 try {
-  await startHub(PORT);
+  await startHub(PORT, { WARREN_DEMO: "1" });
 
   // 1. scoped MCP over HTTP
   const codex = new Client({ name: "fake-codex", version: "0" });
@@ -171,7 +175,8 @@ try {
     })
     .catch(() => {}); // aborted at cleanup
   const login = await api("/api/login", undefined, { handle: "anna" }).then((r) => r.json());
-  check(login.token === ANNA && login.kind === "human", "anna logs into the dashboard by handle");
+  const annaMe = await api("/api/me", login.token).then((r) => r.json());
+  check(login.kind === "human" && annaMe.handle === "anna", "anna signs into the demo dashboard by handle");
   await sleep(300);
   const annaPost = await api("/api/rooms/checkout-ui/messages", ANNA, { kind: "question", text: "@claude-anna can you switch checkout to /basket?" });
   const annaMsg = await annaPost.json();
@@ -202,9 +207,14 @@ try {
 
   const bad = await Promise.all([api("/api/rooms", "wr_nope"), fetch(`${HUB}/api/events`, { headers: { Authorization: "Bearer wr_nope" } })]);
   check(bad.every((r) => r.status === 401), "an unknown token is rejected, not treated as anonymous");
-  const inviteOut = await api("/api/invites", CODEX, { name: "Spy", org: "firmab", room: "checkout-ui" });
-  const inviteIn = await api("/api/invites", CODEX, { name: "Reviewer", org: "firmab", room: "api-contract" });
-  check(inviteOut.status === 403 && inviteIn.status === 201, "members can invite only into rooms they see");
+  const byAgent0 = await api("/api/agents", CODEX, { name: "Reviewer", room: "api-contract" });
+  const inviteOut = await api("/api/agents", BEN, { name: "Spy", room: "checkout-ui" });
+  const posing = await api("/api/agents", BEN, { name: "Fake Anna bot", org: "acme", room: "api-contract" });
+  const inviteIn = await api("/api/agents", BEN, { name: "Reviewer", room: "api-contract" });
+  const reviewer = await inviteIn.json();
+  const reviewerMe = await api("/api/me", reviewer.token).then((r) => r.json());
+  check(byAgent0.status === 403 && inviteOut.status === 403 && posing.status === 403, "agents can't add agents; people add them only into rooms they see, for their own company");
+  check(inviteIn.status === 201 && reviewerMe.org === "firmab" && reviewerMe.owner === "ben" && !!reviewer.setup?.codex, "ben's new agent belongs to ben and firmab, with a token and setup");
   const reserved = await api("/api/invites", undefined, { name: "x", handle: "here", org: "acme", room: "shop" });
   check(reserved.status === 400, "@here, @all and @room are reserved handles");
   const noisy = await api("/api/rooms/shop/messages", ANNA, {
@@ -359,9 +369,105 @@ try {
   const mine = await priv("/api/rooms", invited.token).then((r) => r.json());
   check(root.status === 201 && mine.length === 1, "admin creates a root room and invites; the invitee sees it");
 
+  // 13. accounts on a self-hosted hub
+  const OWN_DATA = mkdtempSync(join(tmpdir(), "warren-own-"));
+  const OWN = `http://localhost:${PORT - 3}`;
+  let stopOwn = await startHub(PORT - 3, { WARREN_DATA_DIR: OWN_DATA });
+  type Session = { cookie?: string };
+  const as = async (who: Session, path: string, init: { method?: string; body?: unknown; origin?: string; token?: string } = {}) => {
+    const res = await fetch(`${OWN}${path}`, {
+      method: init.method ?? (init.body ? "POST" : "GET"),
+      headers: {
+        "Content-Type": "application/json",
+        ...(who.cookie ? { Cookie: who.cookie } : {}),
+        ...(init.origin ? { Origin: init.origin } : {}),
+        ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
+      },
+      body: init.body ? JSON.stringify(init.body) : undefined,
+    });
+    const set = res.headers.getSetCookie().find((c) => c.startsWith("warren_session="));
+    if (set) who.cookie = set.split(";")[0];
+    return res;
+  };
+  const PASS = "correct horse battery";
+  const owner: Session = {};
+  const cfg = await as({}, "/api/config").then((r) => r.json());
+  const weak = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: "short" } });
+  const setup = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: PASS, room: "Agency" } });
+  const second = await as({}, "/api/setup", { body: { name: "Eve", org: "Evil", email: "eve@example.com", password: PASS } });
+  check(cfg.needsSetup && !cfg.demo && weak.status === 400 && setup.status === 201 && !!owner.cookie && second.status === 409, "first visit creates the owner, once");
+  const ownerMe = await as(owner, "/api/me").then((r) => r.json());
+  const anonOwn = await as({}, "/api/rooms");
+  const crossSite = await as(owner, "/api/rooms", { body: { name: "x", parentId: "agency" }, origin: "https://evil.example" });
+  check(ownerMe.role === "owner" && ownerMe.scopeRoomId === null && anonOwn.status === 401 && crossSite.status === 403, "owner sees every room; no anonymous reads; the cookie doesn't work cross-site");
+  const wrong = await as({}, "/api/auth/login", { body: { email: "olga@example.com", password: "wrong password!" } });
+  const relogin: Session = {};
+  const right = await as(relogin, "/api/auth/login", { body: { email: "OLGA@example.com", password: PASS } });
+  check(wrong.status === 401 && right.status === 200 && !!relogin.cookie, "sign in with email and password");
+
+  const clientRoom = await as(owner, "/api/rooms", { body: { name: "Client X", parentId: "agency" } }).then((r) => r.json());
+  await as(owner, "/api/rooms", { body: { name: "Internal", parentId: "agency" } });
+  const invite = await as(owner, "/api/invites", { body: { kind: "human", org: "clientco", room: clientRoom.id, email: "gina@example.com" } }).then((r) => r.json());
+  const code = new URL(invite.url).searchParams.get("invite")!;
+  const info = await as({}, `/api/join/${code}`).then((r) => r.json());
+  const gina: Session = {};
+  const joined = await as(gina, `/api/join/${code}`, { body: { name: "Gina", password: PASS } });
+  const reuse = await as({}, `/api/join/${code}`, { body: { name: "Gina 2", password: PASS, email: "g2@example.com" } });
+  const ginaMe = await as(gina, "/api/me").then((r) => r.json());
+  check(
+    info.room === "Client X" && info.org === "clientco" && joined.status === 201 && reuse.status === 404 && ginaMe.email === "gina@example.com" && ginaMe.org === "clientco",
+    "an invite link creates a guest of another company, once",
+  );
+  const ginaRooms = await as(gina, "/api/rooms").then((r) => r.json());
+  const ginaPoses = await as(gina, "/api/invites", { body: { kind: "human", org: "Agency", room: clientRoom.id } });
+  const ginaOwn = await as(gina, "/api/invites", { body: { kind: "human", room: clientRoom.id } }).then((r) => r.json());
+  const ginaAdmin = await as(gina, "/api/invites", { body: { kind: "human", role: "admin" } });
+  check(ginaRooms.map((r: { id: string }) => r.id).join() === clientRoom.id, `the guest sees only the room she was invited to (${ginaRooms.map((r: { id: string }) => r.id)})`);
+  check(ginaPoses.status === 403 && ginaOwn.org === "clientco" && ginaAdmin.status === 403, "a guest invites only people of her own company, never admins");
+  const ginaTop = await as(gina, "/api/rooms", { body: { name: "Mine" } });
+  const ginaDelScope = await as(gina, `/api/rooms/${clientRoom.id}`, { method: "DELETE" });
+  const ginaSub = await as(gina, "/api/rooms", { body: { name: "Gina's sub", parentId: clientRoom.id } }).then((r) => r.json());
+  const ginaRename = await as(gina, `/api/rooms/${ginaSub.id}`, { method: "PUT", body: { name: "Specs" } }).then((r) => r.json());
+  const ginaMoveOut = await as(gina, `/api/rooms/${ginaSub.id}`, { method: "PUT", body: { parentId: "internal" } });
+  check(ginaTop.status === 403 && ginaDelScope.status === 403 && ginaRename.name === "Specs" && ginaMoveOut.status === 403, "a guest restructures only inside her room");
+  const ginaUsers = await as(gina, "/api/users");
+  const ginaAgent = await as(gina, "/api/agents", { body: { name: "Claude Code (Gina)", room: clientRoom.id, adapter: "channel" } }).then((r) => r.json());
+  const ownerAgents = await as(owner, "/api/agents").then((r) => r.json());
+  check(ginaUsers.status === 403 && ginaAgent.org === "clientco" && ginaAgent.owner === "gina" && ownerAgents.length === 1, "people add their own agents; admins see all of them");
+  const occupied = await as(owner, `/api/rooms/${clientRoom.id}`, { method: "DELETE" });
+  check(occupied.status === 409, "a room someone's access starts at can't be deleted");
+
+  // reset link, removal, restart
+  const ada: Session = {};
+  const adaInvite = await as(owner, "/api/invites", { body: { kind: "human", role: "admin", email: "ada@example.com" } }).then((r) => r.json());
+  await as(ada, `/api/join/${new URL(adaInvite.url).searchParams.get("invite")}`, { body: { name: "Ada", password: PASS } });
+  const adaMe = await as(ada, "/api/me").then((r) => r.json());
+  const adaVsOwner = await as(ada, `/api/users/${ownerMe.handle}`, { method: "DELETE" });
+  const reset = await as(owner, `/api/users/${adaMe.handle}/reset`, { body: {} }).then((r) => r.json());
+  const adaNew: Session = {};
+  await as(adaNew, `/api/reset/${new URL(reset.url).searchParams.get("reset")}`, { body: { password: "a brand new passphrase" } });
+  const oldPass = await as({}, "/api/auth/login", { body: { email: "ada@example.com", password: PASS } });
+  const oldSession = await as(ada, "/api/me");
+  check(adaMe.role === "admin" && adaMe.scopeRoomId === null && adaVsOwner.status === 403, "admins are invited by link and can't remove the owner");
+  check(!!adaNew.cookie && oldPass.status === 401 && oldSession.status === 401, "a reset link sets a new password and signs out old sessions");
+  const removed = await as(owner, `/api/users/${ginaMe.handle}`, { method: "DELETE" });
+  const [ginaAfter, agentAfter] = await Promise.all([as(gina, "/api/me"), as({}, "/api/me", { token: ginaAgent.token })]);
+  const deleted = await as(owner, `/api/rooms/${clientRoom.id}`, { method: "DELETE" }).then((r) => r.json());
+  check(removed.status === 200 && ginaAfter.status === 401 && agentAfter.status === 401, "removing a person signs them out and revokes their agents");
+  check(deleted.deleted?.length === 2, `deleting a room deletes the rooms inside it (${deleted.deleted})`);
+  await as(owner, "/api/rooms/agency/messages", { body: { text: "this survives a restart" } });
+  await stopOwn();
+  stopOwn = await startHub(PORT - 3, { WARREN_DATA_DIR: OWN_DATA });
+  const back = await as(owner, "/api/rooms").then((r) => r.json());
+  const cfg2 = await as({}, "/api/config").then((r) => r.json());
+  check(
+    !cfg2.needsSetup && back.some((r: { id: string; messages: { text: string }[] }) => r.id === "agency" && r.messages.some((m) => m.text === "this survives a restart")),
+    "rooms, messages, accounts and sessions survive a restart (SQLite)",
+  );
+
   // 12. WARREN_DASHBOARD=closed (the hosted demo): no dashboard, no open doors, demo tokens still work
   const CLOSED = `http://localhost:${PORT - 2}`;
-  await startHub(PORT - 2, { WARREN_DASHBOARD: "closed" });
+  await startHub(PORT - 2, { WARREN_DEMO: "1", WARREN_DASHBOARD: "closed" });
   const [dash, anonClosed, loginClosed, tokenClosed] = await Promise.all([
     fetch(`${CLOSED}/app`, { redirect: "manual" }),
     fetch(`${CLOSED}/api/rooms`),

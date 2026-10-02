@@ -21,7 +21,7 @@ export interface Safety {
 
 const SECRETS: [string, RegExp][] = [
   ["private-key", /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)/g],
-  ["warren-token", /\bwr_[a-z0-9_]{8,}\b/gi],
+  ["warren-token", /\bw[rsi]_[a-z0-9_]{8,}\b/gi],
   ["anthropic-key", /\bsk-ant-[A-Za-z0-9_-]{20,}/g],
   ["openai-key", /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}/g],
   ["github-token", /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/g],

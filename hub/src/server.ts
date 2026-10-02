@@ -1,72 +1,173 @@
 // Warren hub: REST + SSE for the dashboard and bridges, MCP over Streamable
 // HTTP for agents, A2A (Agent Card + message/send) for agents of other companies.
-import express, { type Request, type Response } from "express";
+//
+// Who is calling: people sign in with email + password and get a session
+// cookie; agents present a bearer token. WARREN_ADMIN_TOKEN is an
+// instance-wide bearer token for scripts.
+import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
+import { tx } from "./db.js";
+import { checkPassword, hashPassword, newSecret, verifyPassword } from "./auth.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
 import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
-import { sendWaitlistConfirmation } from "./email.js";
+import { canEmail, sendInvite, sendReset, sendWaitlistConfirmation } from "./email.js";
 
 const PORT = Number(process.env.PORT ?? 8790);
-const PUBLIC_URL = process.env.PUBLIC_URL ?? `http://localhost:${PORT}`;
+const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
+const VERSION = "0.3.0";
 
-const app = express();
-app.set("trust proxy", true); // behind Cloudflare + Traefik
-app.use(express.json({ limit: "1mb" }));
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  if (req.method === "OPTIONS") return void res.status(204).end();
-  next();
-});
-
-// Demo mode (default) seeds the demo team with fixed tokens, lets the
-// dashboard log in by handle, and shows the whole tree to visitors without a
-// token. WARREN_DEMO=0 turns all three off: reads need a token, and invites
-// and root rooms need WARREN_ADMIN_TOKEN or a member token that sees the room.
-const DEMO = process.env.WARREN_DEMO !== "0";
+// Demo mode (WARREN_DEMO=1) seeds the demo team with fixed tokens into a
+// throwaway database, lets the dashboard sign in by picking a person, and
+// shows the whole tree to visitors without a token. Off by default: a
+// self-hosted hub starts empty and asks for its owner on the first visit.
+const DEMO = process.env.WARREN_DEMO === "1";
 // WARREN_DASHBOARD=closed (the hosted demo): the dashboard isn't served, and the
 // demo's open doors close with it: no anonymous reads, no login by handle, no
 // anonymous invites. The seeded team and its fixed tokens still work for invited agents.
 const DASHBOARD_OPEN = process.env.WARREN_DASHBOARD !== "closed";
 const OPEN_DOORS = DEMO && DASHBOARD_OPEN;
 const ADMIN_TOKEN = process.env.WARREN_ADMIN_TOKEN;
+// Optional: the first visitor must also know this to create the owner account.
+const SETUP_TOKEN = process.env.WARREN_SETUP_TOKEN;
+const INVITE_DAYS = 7;
+const RESET_HOURS = 24;
+
+const app = express();
+app.set("trust proxy", process.env.WARREN_TRUST_PROXY ?? true); // behind Cloudflare + Traefik, or Caddy
+app.disable("x-powered-by");
+app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+  // Bearer-token API: any origin may call it. Cookies are never sent cross-origin (no credentials allowed).
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  if (req.method === "OPTIONS") return void res.status(204).end();
+  next();
+});
+
+// --- who is calling ------------------------------------------------------------
+
+const COOKIE = "warren_session";
+
+function cookies(req: Request): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const part of (req.headers.cookie ?? "").split(";")) {
+    const i = part.indexOf("=");
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
 
 /** `Authorization: Bearer <token>`, or `?token=` (EventSource can't set headers). */
 function presentedToken(req: Request): string | undefined {
   return req.headers.authorization?.replace(/^Bearer\s+/i, "") || (req.query.token as string | undefined) || undefined;
 }
 
-const isAdmin = (req: Request) => !!ADMIN_TOKEN && presentedToken(req) === ADMIN_TOKEN;
+const sessionId = (req: Request) => cookies(req)[COOKIE];
 
+const sameSecret = (a: string | undefined, b: string | undefined) =>
+  !!a && !!b && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+
+const isAdminToken = (req: Request) => sameSecret(presentedToken(req), ADMIN_TOKEN);
+
+/** The member behind the bearer token (agent token, or a session id for scripts), else the session cookie. */
 function caller(req: Request): store.Member | undefined {
-  return store.byTokenValue(presentedToken(req));
+  const token = presentedToken(req);
+  if (token) return token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token);
+  return store.sessionMember(sessionId(req));
 }
+
+// Cookie sessions only work from the hub's own pages: a state-changing request
+// carrying a session cookie must come from this origin. Browsers always send
+// Origin on POST/PUT/DELETE, so another site can't ride on the cookie.
+app.use((req, res, next) => {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method) || presentedToken(req) || !sessionId(req)) return next();
+  const origin = req.headers.origin;
+  if (!origin) return next();
+  const host = req.headers["x-forwarded-host"] ?? req.headers.host;
+  let ok = false;
+  try {
+    const o = new URL(origin).host;
+    ok = o === host || o === new URL(PUBLIC_URL).host;
+  } catch {}
+  if (!ok) return void res.status(403).json({ error: "cross-origin request refused" });
+  next();
+});
 
 function requireCaller(req: Request, res: Response): store.Member | undefined {
   const m = caller(req);
-  if (!m) res.status(401).json({ error: "missing or unknown token" });
+  if (!m) res.status(401).json({ error: presentedToken(req) ? "unknown token" : "sign in first" });
+  return m;
+}
+
+function requirePerson(req: Request, res: Response): store.Member | undefined {
+  const m = requireCaller(req, res);
+  if (m && m.kind !== "human") return void res.status(403).json({ error: "only a person can do this" });
+  return m;
+}
+
+/** An owner or admin, or the admin token (returns null then). */
+function requireAdmin(req: Request, res: Response): store.Member | null | undefined {
+  if (isAdminToken(req)) return null;
+  const m = requirePerson(req, res);
+  if (m && !store.isAdmin(m)) return void res.status(403).json({ error: "only an owner or admin can do this" });
   return m;
 }
 
 /**
  * For read endpoints: the member, or undefined for the full overview (anonymous
- * in demo mode, or the admin). Answers 401 and returns false for an unknown
- * token, or for an anonymous visitor outside demo mode.
+ * in demo mode, or the admin token). Answers 401 and returns false for an
+ * unknown token, or for an anonymous visitor outside demo mode.
  */
 function reader(req: Request, res: Response): store.Member | undefined | false {
   const m = caller(req);
   if (m) return m;
-  if (isAdmin(req) || (OPEN_DOORS && !presentedToken(req))) return undefined;
-  res.status(401).json({ error: presentedToken(req) ? "unknown token" : "token required" });
+  if (isAdminToken(req) || (OPEN_DOORS && !presentedToken(req))) return undefined;
+  res.status(401).json({ error: presentedToken(req) ? "unknown token" : "sign in first" });
   return false;
 }
 
 const httpError = (res: Response, status: number, e: unknown) => res.status(status).json({ error: (e as Error).message });
+const statusFor = (e: unknown, fallback = 400) => ((e as Error).message.startsWith("no such") ? 404 : fallback);
+
+function setSessionCookie(req: Request, res: Response, handle: string) {
+  const { id, expiresAt } = store.createSession(handle);
+  const secure = req.secure || PUBLIC_URL.startsWith("https:");
+  res.setHeader(
+    "Set-Cookie",
+    `${COOKIE}=${id}; Path=/; HttpOnly; SameSite=Lax; Expires=${expiresAt.toUTCString()}${secure ? "; Secure" : ""}`,
+  );
+  return id;
+}
+
+function clearSessionCookie(res: Response) {
+  res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+}
+
+/** Simple fixed-window limiter for sign-in style endpoints. */
+function limiter(max: number, windowMs: number) {
+  const hits = new Map<string, number[]>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    const key = `${req.path}|${req.headers["cf-connecting-ip"] ?? req.ip}`;
+    const now = Date.now();
+    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) return void res.status(429).json({ error: "too many attempts, try again in a few minutes" });
+    recent.push(now);
+    hits.set(key, recent);
+    if (hits.size > 10_000) hits.clear();
+    next();
+  };
+}
+const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 10), 15 * 60_000);
+
+/** What a person sees about themselves: their member record with email. */
+const self = (m: store.Member) => ({ ...store.publicMember(m), email: m.email });
 
 // --- MCP (stateless: fresh server + transport per request) -----------------
 app.post("/mcp", async (req, res) => {
@@ -83,55 +184,432 @@ app.post("/mcp", async (req, res) => {
 });
 app.get("/mcp", (_req, res) => void res.status(405).end());
 
-// --- REST: identity ----------------------------------------------------------
+// --- instance and accounts ---------------------------------------------------
 
-// Demo login for the dashboard: pick a human by handle, get their token.
-// No passwords: hackathon scope, see README limits.
+app.get("/api/config", (_req, res) =>
+  void res.json({
+    dashboard: DASHBOARD_OPEN,
+    demo: OPEN_DOORS,
+    needsSetup: !DEMO && !store.isSetUp(),
+    setupToken: !!SETUP_TOKEN,
+    instanceName: store.instanceName(),
+    email: canEmail(),
+    version: VERSION,
+  }),
+);
+
+// First run: whoever opens the hub first creates the owner account (as in n8n
+// or Coolify). Set WARREN_SETUP_TOKEN to require a secret for it.
+app.post("/api/setup", signInLimit, (req, res) => {
+  if (DEMO) return void res.status(404).json({ error: "a demo hub has no owner" });
+  if (store.isSetUp()) return void res.status(409).json({ error: "this hub already has an owner; sign in instead" });
+  const b = req.body ?? {};
+  if (SETUP_TOKEN && !sameSecret(String(b.setupToken ?? ""), SETUP_TOKEN))
+    return void res.status(403).json({ error: "wrong setup token (see WARREN_SETUP_TOKEN in the hub's environment)" });
+  try {
+    if (!b.email) throw new Error("email is required");
+    const passwordHash = hashPassword(checkPassword(b.password));
+    const owner = store.addMember({
+      handle: b.handle || undefined,
+      name: b.name,
+      kind: "human",
+      org: b.org,
+      scopeRoomId: null,
+      role: "owner",
+      email: b.email,
+      passwordHash,
+    });
+    store.setInstanceName(String(b.instanceName ?? b.org));
+    const firstRoom = String(b.room ?? "").trim();
+    if (firstRoom) store.createRoom(firstRoom, null, "", owner.handle);
+    setSessionCookie(req, res, owner.handle);
+    console.log(`owner @${owner.handle} created`);
+    res.status(201).json(self(owner));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+app.post("/api/auth/login", signInLimit, (req, res) => {
+  const email = String(req.body?.email ?? "");
+  const password = String(req.body?.password ?? "");
+  const m = store.memberByEmail(email);
+  // Always verify, so a wrong email takes as long as a wrong password.
+  const ok = verifyPassword(password, m ? store.passwordHashOf(m.handle) : null);
+  if (!m || !ok) return void res.status(401).json({ error: "wrong email or password" });
+  setSessionCookie(req, res, m.handle);
+  res.json(self(m));
+});
+
+app.post("/api/auth/logout", (req, res) => {
+  const id = sessionId(req);
+  if (id) store.endSession(id);
+  clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+// Demo sign-in: pick a person by handle. Only in demo mode.
 app.post("/api/login", (req, res) => {
   if (!OPEN_DOORS) return void res.status(404).json({ error: "login by handle is only available in demo mode" });
   const m = store.getMember(String(req.body?.handle ?? ""));
-  if (!m || m.kind !== "human") return void res.status(404).json({ error: "no such person" });
-  res.json(m);
+  if (!m || m.kind !== "human" || m.disabled) return void res.status(404).json({ error: "no such person" });
+  const token = setSessionCookie(req, res, m.handle);
+  res.json({ ...self(m), token });
 });
 
 app.get("/api/me", (req, res) => {
   const m = requireCaller(req, res);
-  if (m) res.json(store.publicMember(m));
+  if (m) res.json(self(m));
 });
 
-// Members, never with tokens. ?room=<id>: that room's members. With a token:
-// the members who share at least one room with the caller. Otherwise everyone.
+app.put("/api/me", (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  try {
+    res.json(self(store.updateMember(m.handle, { name: req.body?.name })));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+// Change your password: needs the current one; signs you out everywhere else.
+app.post("/api/me/password", signInLimit, (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (!verifyPassword(String(req.body?.current ?? ""), store.passwordHashOf(m.handle)))
+    return void res.status(403).json({ error: "your current password is wrong" });
+  try {
+    store.setPasswordHash(m.handle, hashPassword(checkPassword(req.body?.password)));
+    store.endSessions(m.handle, sessionId(req));
+    res.json({ ok: true });
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+// --- people: invites, joining, password resets, management ----------------------
+
+const linkUrl = (kind: "invite" | "reset", code: string) => `${PUBLIC_URL}/app?${kind}=${code}`;
+
+/** An invite as its creator and admins see it (never the code: that's shown once). */
+function inviteView(l: store.Link) {
+  return {
+    id: l.id,
+    email: l.email,
+    org: l.org,
+    room: l.scopeRoomId,
+    roomName: l.scopeRoomId ? store.getRoom(l.scopeRoomId)?.name ?? null : null,
+    role: l.role,
+    invitedBy: l.createdBy,
+    createdAt: l.createdAt,
+    expiresAt: l.expiresAt,
+  };
+}
+
+/**
+ * Invite a person: returns a one-time link (and emails it when SMTP is set up).
+ * Who may invite whom:
+ *  - any person, into a room they see, into their own company;
+ *  - owners and admins anywhere, any company, also as admins (who see every room).
+ * A guest can't invite someone "from" the host company: org is a trust boundary.
+ */
+async function invitePerson(req: Request, res: Response, inviter: store.Member | null) {
+  const b = req.body ?? {};
+  const admin = inviter === null || store.isAdmin(inviter);
+  const role: store.Role = b.role === "admin" ? "admin" : "member";
+  const room: string | null = role === "admin" ? null : b.room || inviter?.scopeRoomId || null;
+  const org = String(b.org ?? inviter?.org ?? "").trim();
+  if (!org) return void res.status(400).json({ error: "org is required" });
+  if (role === "admin" && !admin) return void res.status(403).json({ error: "only an owner or admin can invite admins" });
+  if (room === null && !admin) return void res.status(403).json({ error: "pick a room to invite into" });
+  if (room !== null && !store.getRoom(room)) return void res.status(404).json({ error: `no such room ${room}` });
+  if (room !== null && inviter && !store.canSee(inviter, room)) return void res.status(403).json({ error: `no access to room ${room}` });
+  if (!admin && org !== inviter!.org)
+    return void res.status(403).json({ error: `you can invite people of ${inviter!.org} only; ask an admin to invite another company` });
+  const email = String(b.email ?? "").trim().toLowerCase() || null;
+  if (email && store.memberByEmail(email)) return void res.status(409).json({ error: "someone with that email is already here" });
+  const { link, code } = store.createLink(
+    { purpose: "invite", email, org, scopeRoomId: room, role, handle: null, createdBy: inviter?.handle ?? null },
+    INVITE_DAYS,
+  );
+  const url = linkUrl("invite", code);
+  const emailed = email
+    ? await sendInvite(email, {
+        url,
+        instance: store.instanceName(),
+        invitedBy: inviter?.name ?? "An admin",
+        room: room ? store.getRoom(room)!.name : "every room",
+        expiresAt: link.expiresAt,
+      })
+    : false;
+  res.status(201).json({ ...inviteView(link), url, emailed });
+}
+
+// Invite a person (kind: "human"), or add an agent (any other kind: the older
+// shape of POST /api/agents, kept for scripts).
+app.post("/api/invites", async (req, res) => {
+  if (req.body?.kind === "human") {
+    if (isAdminToken(req)) return invitePerson(req, res, null);
+    const m = requirePerson(req, res);
+    if (m) await invitePerson(req, res, m);
+    return;
+  }
+  createAgent(req, res);
+});
+
+app.get("/api/invites", (req, res) => {
+  if (isAdminToken(req)) return void res.json(store.pendingInvites().map(inviteView));
+  const m = requirePerson(req, res);
+  if (m) res.json(store.pendingInvites(store.isAdmin(m) ? undefined : m.handle).map(inviteView));
+});
+
+app.delete("/api/invites/:id", (req, res) => {
+  const m = isAdminToken(req) ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  const link = store.getLink(req.params.id);
+  if (!link || link.purpose !== "invite") return void res.status(404).json({ error: "no such invite" });
+  if (m && !store.isAdmin(m) && link.createdBy !== m.handle) return void res.status(403).json({ error: "only who sent it or an admin can revoke an invite" });
+  store.deleteLink(link.id);
+  res.json({ ok: true });
+});
+
+// The invite behind a link, so the join page can say where it leads.
+app.get("/api/join/:code", (req, res) => {
+  const link = store.findLink(req.params.code, "invite");
+  if (!link) return void res.status(404).json({ error: "this invite link is used up, expired or revoked" });
+  const by = link.createdBy ? store.getMember(link.createdBy) : undefined;
+  res.json({
+    instanceName: store.instanceName(),
+    org: link.org,
+    room: link.scopeRoomId ? store.getRoom(link.scopeRoomId)?.name : null,
+    role: link.role,
+    email: link.email,
+    invitedBy: by?.name ?? null,
+    expiresAt: link.expiresAt,
+  });
+});
+
+app.post("/api/join/:code", signInLimit, (req, res) => {
+  const link = store.findLink(req.params.code, "invite");
+  if (!link) return void res.status(404).json({ error: "this invite link is used up, expired or revoked" });
+  const b = req.body ?? {};
+  try {
+    const passwordHash = hashPassword(checkPassword(b.password));
+    if (!link.email && !b.email) throw new Error("email is required");
+    const m = store.addMember({
+      handle: b.handle || undefined,
+      name: b.name,
+      kind: "human",
+      org: link.org!,
+      scopeRoomId: link.scopeRoomId,
+      role: link.role ?? "member",
+      email: link.email ?? b.email,
+      passwordHash,
+    });
+    if (!store.useLink(link.id, m.handle)) {
+      store.disableMember(m.handle, "hub");
+      throw new Error("this invite link was just used");
+    }
+    store.audit({ type: "member", roomId: m.scopeRoomId ?? "*", actor: m.handle, target: link.createdBy ?? undefined, detail: `@${m.handle} (${m.org}) joined` });
+    setSessionCookie(req, res, m.handle);
+    res.status(201).json(self(m));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+app.get("/api/reset/:code", (req, res) => {
+  const link = store.findLink(req.params.code, "reset");
+  const m = link?.handle ? store.getMember(link.handle) : undefined;
+  if (!link || !m || m.disabled) return void res.status(404).json({ error: "this reset link is used up or expired" });
+  res.json({ instanceName: store.instanceName(), email: m.email, name: m.name });
+});
+
+app.post("/api/reset/:code", signInLimit, (req, res) => {
+  const link = store.findLink(req.params.code, "reset");
+  const m = link?.handle ? store.getMember(link.handle) : undefined;
+  if (!link || !m || m.disabled) return void res.status(404).json({ error: "this reset link is used up or expired" });
+  try {
+    const hash = hashPassword(checkPassword(req.body?.password));
+    if (!store.useLink(link.id, m.handle)) throw new Error("this reset link was just used");
+    store.setPasswordHash(m.handle, hash);
+    store.endSessions(m.handle);
+    setSessionCookie(req, res, m.handle);
+    res.json(self(m));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+// Everyone with an account, for owners and admins.
+app.get("/api/users", (req, res) => {
+  if (requireAdmin(req, res) === undefined) return;
+  res.json(
+    store
+      .allMembers()
+      .filter((m) => m.kind === "human")
+      .map((m) => ({ ...self(m), agents: store.allMembers().filter((a) => a.owner === m.handle).length })),
+  );
+});
+
+// Change someone's role, company, access or name. Making someone owner hands
+// over ownership: only the owner can, and becomes an admin.
+app.put("/api/users/:handle", (req, res) => {
+  const actor = requireAdmin(req, res);
+  if (actor === undefined) return;
+  const target = store.getMember(req.params.handle);
+  if (!target || target.disabled || target.kind !== "human") return void res.status(404).json({ error: "no such person" });
+  const b = req.body ?? {};
+  const actorHandle = actor?.handle ?? "admin-token";
+  try {
+    if (target.role === "owner" && actor?.role !== "owner" && actor !== null) throw new Error("only the owner can change the owner's account");
+    if (b.role === "owner" && actor?.role !== "owner") throw new Error("only the owner can hand over ownership");
+    if (target.handle === actor?.handle && b.role && b.role !== target.role) throw new Error("you can't change your own role");
+    const patch: Parameters<typeof store.updateMember>[1] = {};
+    if (b.name !== undefined) patch.name = b.name;
+    if (b.org !== undefined) patch.org = b.org;
+    if (b.role !== undefined) patch.role = b.role;
+    if (b.room !== undefined) patch.scopeRoomId = b.room || null;
+    const nextRole = patch.role ?? target.role;
+    if (nextRole === "admin" || nextRole === "owner") patch.scopeRoomId = null; // admins see every room
+    else if ((patch.scopeRoomId ?? target.scopeRoomId) === null) throw new Error("a member needs a room; pick which part of the tree they see");
+    const updated = tx(() => {
+      if (b.role === "owner" && actor) store.updateMember(actor.handle, { role: "admin" });
+      return store.updateMember(target.handle, patch);
+    });
+    store.audit({ type: "member", roomId: "*", actor: actorHandle, target: target.handle, detail: `changed @${target.handle}: ${Object.keys(b).join(", ")}` });
+    res.json(self(updated));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+app.delete("/api/users/:handle", (req, res) => {
+  const actor = requireAdmin(req, res);
+  if (actor === undefined) return;
+  const target = store.getMember(req.params.handle);
+  if (!target || target.disabled || target.kind !== "human") return void res.status(404).json({ error: "no such person" });
+  if (target.role === "owner") return void res.status(403).json({ error: "the owner can't be removed; hand over ownership first" });
+  if (target.handle === actor?.handle) return void res.status(403).json({ error: "you can't remove yourself" });
+  store.disableMember(target.handle, actor?.handle ?? "admin-token");
+  res.json({ ok: true });
+});
+
+// A password reset link for someone: emailed when SMTP is set up, otherwise
+// handed to the admin to pass on (as in n8n without email).
+app.post("/api/users/:handle/reset", async (req, res) => {
+  const actor = requireAdmin(req, res);
+  if (actor === undefined) return;
+  const target = store.getMember(req.params.handle);
+  if (!target || target.disabled || target.kind !== "human") return void res.status(404).json({ error: "no such person" });
+  if (target.role === "owner" && actor && actor.role !== "owner") return void res.status(403).json({ error: "only the owner can reset the owner's password" });
+  const { link, code } = store.createLink(
+    { purpose: "reset", email: target.email, org: null, scopeRoomId: null, role: null, handle: target.handle, createdBy: actor?.handle ?? null },
+    RESET_HOURS / 24,
+  );
+  const url = linkUrl("reset", code);
+  const emailed = target.email ? await sendReset(target.email, { url, instance: store.instanceName(), expiresAt: link.expiresAt }) : false;
+  res.status(201).json({ url, emailed, expiresAt: link.expiresAt });
+});
+
+// --- agents --------------------------------------------------------------------
+
+/** People manage their own agents; owners and admins manage everyone's. */
+function manageableAgent(req: Request, res: Response): { actor: store.Member | null; agent: store.Member } | undefined {
+  const actor = isAdminToken(req) ? null : requirePerson(req, res);
+  if (actor === undefined) return;
+  const agent = store.getMember(req.params.handle as string);
+  if (!agent || agent.disabled || agent.kind !== "agent") return void res.status(404).json({ error: "no such agent" });
+  if (actor && !store.isAdmin(actor) && agent.owner !== actor.handle)
+    return void res.status(403).json({ error: `@${agent.handle} belongs to ${agent.owner ? "@" + agent.owner : "nobody"}; only they or an admin can change it` });
+  return { actor, agent };
+}
+
+/**
+ * Add an agent: a member with a bearer token, scoped to one room, owned by the
+ * person who added it and of their company. Returns the token once, with setup.
+ */
+function createAgent(req: Request, res: Response) {
+  const b = req.body ?? {};
+  const admin = isAdminToken(req);
+  const m = admin ? undefined : caller(req);
+  if (!admin && presentedToken(req) && !m) return void res.status(401).json({ error: "unknown token" });
+  if (!admin && !m && !OPEN_DOORS) return void res.status(401).json({ error: "sign in first" });
+  if (m && m.kind !== "human") return void res.status(403).json({ error: "agents can't add members; ask your person" });
+  if (!b.room) return void res.status(400).json({ error: "room is required: an agent sees one room and the rooms inside it" });
+  if (m && !store.canSee(m, b.room)) return void res.status(403).json({ error: `no access to room ${b.room}` });
+  if (m && !store.isAdmin(m) && b.org && b.org !== m.org)
+    return void res.status(403).json({ error: `your agents belong to ${m.org}; ask an admin to add another company's agent` });
+  try {
+    const token = newSecret("wr");
+    const agent = store.addMember({
+      handle: b.handle || undefined,
+      name: b.name ?? b.agentName ?? b.handle,
+      kind: "agent",
+      org: (store.isAdmin(m) || !m ? b.org : undefined) ?? m?.org,
+      scopeRoomId: b.room,
+      adapter: b.adapter,
+      token,
+      owner: m?.handle ?? null,
+    });
+    store.audit({ type: "member", roomId: agent.scopeRoomId!, actor: m?.handle ?? "hub", target: agent.handle, detail: `added agent @${agent.handle}` });
+    res.status(201).json({ ...store.publicMember(agent), token, invitedBy: m?.handle ?? null, setup: setupSnippets(agent, token) });
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+}
+
+app.post("/api/agents", createAgent);
+
+app.get("/api/agents", (req, res) => {
+  const all = isAdminToken(req);
+  const m = all ? undefined : requirePerson(req, res);
+  if (!all && !m) return;
+  res.json(
+    store
+      .allMembers()
+      .filter((a) => a.kind === "agent" && (all || store.isAdmin(m) || a.owner === m!.handle))
+      .map(store.publicMember),
+  );
+});
+
+app.put("/api/agents/:handle", (req, res) => {
+  const ok = manageableAgent(req, res);
+  if (!ok) return;
+  const b = req.body ?? {};
+  if (b.room !== undefined && ok.actor && !store.canSee(ok.actor, b.room)) return void res.status(403).json({ error: `no access to room ${b.room}` });
+  try {
+    res.json(store.publicMember(store.updateMember(ok.agent.handle, { name: b.name, adapter: b.adapter, scopeRoomId: b.room })));
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+// New token for an agent; the old one stops working at once (open streams are closed).
+app.post("/api/agents/:handle/token", (req, res) => {
+  const ok = manageableAgent(req, res);
+  if (!ok) return;
+  const token = store.rotateToken(ok.agent.handle);
+  store.audit({ type: "member", roomId: ok.agent.scopeRoomId!, actor: ok.actor?.handle ?? "admin-token", target: ok.agent.handle, detail: `new token for @${ok.agent.handle}` });
+  res.json({ ...store.publicMember(ok.agent), token, setup: setupSnippets(ok.agent, token) });
+});
+
+app.delete("/api/agents/:handle", (req, res) => {
+  const ok = manageableAgent(req, res);
+  if (!ok) return;
+  store.disableMember(ok.agent.handle, ok.actor?.handle ?? "admin-token");
+  res.json({ ok: true });
+});
+
+// Members, without credentials. ?room=<id>: that room's members. With a
+// token: the members who share at least one room with the caller. Otherwise everyone.
 app.get("/api/members", (req, res) => {
   const room = req.query.room as string | undefined;
   const m = reader(req, res);
   if (m === false) return;
-  if (room && m && !store.canSee(m, room)) return void res.status(404).json({ error: "no such room" });
+  if (room && (!store.getRoom(room) || (m && !store.canSee(m, room)))) return void res.status(404).json({ error: "no such room" });
   const list = room ? store.roomMembers(room) : m ? store.contactsOf(m) : store.allMembers();
   res.json(list.map(store.publicMember));
-});
-
-// Invite a person or an agent into one subroom. Returns the token plus
-// ready-to-paste setup. A member can invite into rooms they see themselves;
-// anonymous invites only in demo mode.
-app.post("/api/invites", (req, res) => {
-  const b = req.body ?? {};
-  const m = caller(req);
-  if (presentedToken(req) && !m && !isAdmin(req)) return void res.status(401).json({ error: "unknown token" });
-  const allowed = isAdmin(req) || (m ? store.canSee(m, b.room) : OPEN_DOORS);
-  if (!allowed) return void res.status(m ? 403 : 401).json({ error: `no access to room ${b.room}` });
-  try {
-    const invited = store.addMember({
-      handle: b.handle,
-      name: b.name ?? b.agentName ?? b.handle,
-      kind: b.kind ?? "agent",
-      org: b.org,
-      scopeRoomId: b.room,
-      adapter: b.adapter,
-    });
-    res.status(201).json({ ...invited, invitedBy: m?.handle ?? null, setup: setupSnippets(invited) });
-  } catch (e) {
-    httpError(res, 400, e);
-  }
 });
 
 // --- REST: rooms and messages ------------------------------------------------
@@ -140,7 +618,8 @@ app.post("/api/invites", (req, res) => {
 app.get("/api/rooms", (req, res) => {
   const m = reader(req, res);
   if (m === false) return;
-  res.json(m ? store.visibleRooms(m).map((r) => store.roomView(m, r)) : store.allRooms());
+  const limit = Math.min(Number(req.query.history ?? store.HISTORY) || store.HISTORY, store.HISTORY);
+  res.json((m ? store.visibleRooms(m) : store.allRooms()).map((r) => store.roomView(m, r, limit)));
 });
 
 app.get("/api/rooms/:id", (req, res) => {
@@ -151,19 +630,69 @@ app.get("/api/rooms/:id", (req, res) => {
   res.json({ ...store.roomView(m, room), members: store.roomMembers(room.id).map(store.publicMember) });
 });
 
-// New subroom under a room the caller can see. Root rooms: admin token only.
+// New room under a room the caller can see. Top-level rooms: owners and admins.
 app.post("/api/rooms", (req, res) => {
   const { name, parentId = null, context = "" } = req.body ?? {};
-  if (!isAdmin(req)) {
+  let by: string | null = null;
+  if (!isAdminToken(req)) {
     const m = requireCaller(req, res);
     if (!m) return;
-    if (!parentId || !store.canSee(m, parentId))
-      return void res.status(403).json({ error: `no access to room ${parentId}` });
+    by = store.responsible(m);
+    if (parentId ? !store.canSee(m, parentId) : !(store.isAdmin(m) && m.scopeRoomId === null))
+      return void res.status(403).json({ error: parentId ? `no access to room ${parentId}` : "only an owner or admin can add top-level rooms" });
   }
   try {
-    res.status(201).json(store.createRoom(name, parentId, context));
+    res.status(201).json(store.roomView(undefined, store.createRoom(name, parentId, context, by)));
   } catch (e) {
     httpError(res, 400, e);
+  }
+});
+
+/** May `m` restructure this room? It must be inside their access, not the room their access starts at. */
+function canRestructure(m: store.Member, roomId: string): boolean {
+  const room = store.getRoom(roomId);
+  if (!room || !store.canSee(m, roomId)) return false;
+  if (m.scopeRoomId === null) return true;
+  return room.id !== m.scopeRoomId;
+}
+
+// Rename and/or move a room: { name?, parentId? } (parentId null = top level, admins only).
+app.put("/api/rooms/:id", (req, res) => {
+  const admin = isAdminToken(req);
+  const m = admin ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  const id = req.params.id;
+  if (!store.getRoom(id) || (m && !store.canSee(m, id))) return void res.status(404).json({ error: "no such room" });
+  const b = req.body ?? {};
+  const actor = m?.handle ?? "admin-token";
+  try {
+    if (b.parentId !== undefined) {
+      if (m && !canRestructure(m, id)) throw new Error("you can't move the room your access starts at");
+      if (b.parentId === null && m && !(store.isAdmin(m) && m.scopeRoomId === null)) throw new Error("only an owner or admin can move a room to the top");
+      if (b.parentId !== null && m && !store.canSee(m, b.parentId)) throw new Error(`no access to room ${b.parentId}`);
+      if (b.parentId !== store.getRoom(id)!.parentId) store.moveRoom(id, b.parentId, actor);
+    }
+    if (b.name !== undefined && b.name !== store.getRoom(id)!.name) store.renameRoom(id, b.name, actor);
+    res.json(store.roomView(m ?? undefined, store.getRoom(id)!));
+  } catch (e) {
+    httpError(res, 403, e);
+  }
+});
+
+// Delete a room with everything inside it: owners and admins, or the person who created it.
+app.delete("/api/rooms/:id", (req, res) => {
+  const admin = isAdminToken(req);
+  const m = admin ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  const room = store.getRoom(req.params.id);
+  if (!room || (m && !store.canSee(m, room.id))) return void res.status(404).json({ error: "no such room" });
+  if (m && !canRestructure(m, room.id)) return void res.status(403).json({ error: "you can't delete the room your access starts at" });
+  if (m && !store.isAdmin(m) && room.createdBy !== m.handle)
+    return void res.status(403).json({ error: "only the person who created this room or an admin can delete it" });
+  try {
+    res.json({ deleted: store.deleteRoom(room.id, m?.handle ?? "admin-token") });
+  } catch (e) {
+    httpError(res, 409, e);
   }
 });
 
@@ -171,7 +700,7 @@ app.put("/api/rooms/:id/context", (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
   try {
-    res.json(store.updateContext(m, req.params.id, String(req.body?.context ?? "")));
+    res.json(store.roomView(m, store.updateContext(m, req.params.id, String(req.body?.context ?? ""))));
   } catch (e) {
     httpError(res, 403, e);
   }
@@ -182,7 +711,7 @@ app.get("/api/rooms/:id/messages", (req, res) => {
   if (m === false) return;
   const room = store.getRoom(req.params.id);
   if (!room || (m && !store.canSee(m, room.id))) return void res.status(404).json({ error: "no such room" });
-  res.json(room.messages.map((x) => store.viewFor(m, x)));
+  res.json(store.recentMessages(room.id).map((x) => store.viewFor(m, x)));
 });
 
 app.post("/api/rooms/:id/messages", (req, res) => {
@@ -244,7 +773,7 @@ app.post("/api/members/:handle/pause", (req, res) => {
   try {
     res.json(store.publicMember(store.setPaused(m, req.params.handle, req.body?.paused !== false)));
   } catch (e) {
-    httpError(res, (e as Error).message.startsWith("no such") ? 404 : 403, e);
+    httpError(res, statusFor(e, 403), e);
   }
 });
 
@@ -265,7 +794,7 @@ app.get("/api/audit", (req, res) => {
   res.json(store.auditFor(m));
 });
 
-// --- Waitlist ----------------------------------------------------------------
+// --- Waitlist (the hosted beta's landing page) ----------------------------------
 
 app.post("/api/waitlist", async (req, res) => {
   const b = req.body ?? {};
@@ -285,7 +814,7 @@ app.get("/api/waitlist/count", (_req, res) => void res.json({ count: waitlistCou
 
 // The list itself: admin token only, never in demo mode without one.
 app.get("/api/waitlist", (req, res) => {
-  if (!isAdmin(req)) return void res.status(401).json({ error: "admin token required" });
+  if (!isAdminToken(req)) return void res.status(401).json({ error: "admin token required" });
   res.json(waitlistEntries());
 });
 
@@ -296,37 +825,46 @@ app.get("/api/inbox", (req, res) => {
 });
 
 // --- SSE ---------------------------------------------------------------------
-// With a token: what that member may see, minus their own messages, each
-// message flagged `forYou` when it @mentions them. `?mentions=1` keeps only
+// With a token or session: what that member may see, minus their own messages,
+// each message flagged `forYou` when it @mentions them. `?mentions=1` keeps only
 // those (bridges use this: agents are pushed only what's addressed to them).
-// Without a token: everything (demo overview only).
+// Without: everything (demo overview and the admin token only).
 app.get("/api/events", (req: Request, res: Response) => {
   const m = reader(req, res);
   if (m === false) return;
   const mentionsOnly = req.query.mentions === "1";
-  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
+  res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
   res.write(": connected\n\n");
   const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  // Access is re-read on every event: a member moved, paused or removed sees the change at once.
+  const live = () => (m ? store.getMember(m.handle) : undefined);
 
   const onMessage = (msg: store.Message) => {
+    const me = live();
     if (!m) return send("message", msg);
-    if (!store.canSee(m, msg.roomId) || msg.from === m.handle) return;
-    const forYou = store.isFor(m, msg);
+    if (!me || !store.canSee(me, msg.roomId) || msg.from === me.handle) return;
+    const forYou = store.isFor(me, msg);
     if (mentionsOnly && !forYou) return;
-    send("message", { ...store.viewFor(m, msg), forYou });
+    send("message", { ...store.viewFor(me, msg), forYou });
   };
   // Safety status changed (a person released or rejected a held message).
   const onMessageUpdate = (msg: store.Message) => {
-    if (mentionsOnly || (m && !store.canSee(m, msg.roomId))) return;
-    send("message_update", m ? store.viewFor(m, msg) : msg);
+    const me = live();
+    if (mentionsOnly || (m && (!me || !store.canSee(me, msg.roomId)))) return;
+    send("message_update", me ? store.viewFor(me, msg) : msg);
   };
   const onRoom = (r: store.Room) => {
-    if (!mentionsOnly && (!m || store.canSee(m, r.id))) send("room", store.roomView(m, r));
+    const me = live();
+    if (!mentionsOnly && (!m || (me && store.canSee(me, r.id)))) send("room", r);
+  };
+  const onRoomDeleted = (r: { id: string }) => {
+    if (!mentionsOnly) send("room_deleted", r);
   };
   // Other members are only visible to those who share a room with them.
   const knows = (handle: string) => {
+    const me = live();
     const other = store.getMember(handle);
-    return !m || (!!other && store.sharesRoom(m, other));
+    return !m || (!!me && !!other && (other.handle === me.handle || other.disabled || store.sharesRoom(me, other)));
   };
   const onMember = (pm: store.PublicMember) => {
     if (!mentionsOnly && knows(pm.handle)) send("member", pm);
@@ -336,24 +874,30 @@ app.get("/api/events", (req: Request, res: Response) => {
   };
   // People (and the demo overview) see the audit trail of rooms they can see.
   const onAudit = (a: store.AuditEvent) => {
-    if (!mentionsOnly && (!m || (m.kind === "human" && store.canSee(m, a.roomId)))) send("audit", a);
+    const me = live();
+    if (!mentionsOnly && (!m || (me && me.kind === "human" && store.canSeeAudit(me, a)))) send("audit", a);
   };
+  // Credentials changed (removed, new token): end the stream; the client has to sign in again.
+  const onKick = (handle: string) => {
+    if (m && handle === m.handle) res.end();
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handlers: [string, (x: any) => void][] = [
+    ["message", onMessage],
+    ["message_update", onMessageUpdate],
+    ["room", onRoom],
+    ["room_deleted", onRoomDeleted],
+    ["member", onMember],
+    ["presence", onPresence],
+    ["audit", onAudit],
+    ["kick", onKick],
+  ];
   const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
-  store.events.on("message", onMessage);
-  store.events.on("message_update", onMessageUpdate);
-  store.events.on("room", onRoom);
-  store.events.on("member", onMember);
-  store.events.on("presence", onPresence);
-  store.events.on("audit", onAudit);
+  for (const [e, fn] of handlers) store.events.on(e, fn);
   if (m) store.trackConnection(m, 1);
   req.on("close", () => {
     clearInterval(ping);
-    store.events.off("message", onMessage);
-    store.events.off("message_update", onMessageUpdate);
-    store.events.off("room", onRoom);
-    store.events.off("member", onMember);
-    store.events.off("presence", onPresence);
-    store.events.off("audit", onAudit);
+    for (const [e, fn] of handlers) store.events.off(e, fn);
     if (m) store.trackConnection(m, -1);
   });
 });
@@ -364,11 +908,11 @@ app.get("/api/events", (req: Request, res: Response) => {
 app.get("/.well-known/agent-card.json", (_req, res) => {
   res.json({
     protocolVersion: "0.3.0",
-    name: "Warren hub",
+    name: `${store.instanceName()} (Warren hub)`,
     description: "Tree of rooms where coding agents and people of different companies coordinate.",
     url: `${PUBLIC_URL}/a2a`,
     preferredTransport: "JSONRPC",
-    version: "0.2.0",
+    version: VERSION,
     capabilities: { streaming: false, pushNotifications: false },
     securitySchemes: { bearer: { type: "http", scheme: "bearer" } },
     security: [{ bearer: [] }],
@@ -387,10 +931,12 @@ app.get("/.well-known/agent-card.json", (_req, res) => {
   });
 });
 
+app.get("/healthz", (_req, res) => void res.json({ ok: true, version: VERSION }));
+
 app.post("/a2a", (req, res) => {
   const { id = null, method, params } = req.body ?? {};
   const rpcError = (code: number, message: string) => res.json({ jsonrpc: "2.0", id, error: { code, message } });
-  const m = caller(req);
+  const m = presentedToken(req) ? caller(req) : undefined;
   if (!m) return void rpcError(-32001, "missing or unknown bearer token");
   if (method !== "message/send") return void rpcError(-32601, `method ${method} not supported`);
   const message = params?.message;
@@ -405,6 +951,7 @@ app.post("/a2a", (req, res) => {
   const room = message?.metadata?.room ?? params?.metadata?.room ?? m.scopeRoomId;
   const kind = message?.metadata?.kind ?? params?.metadata?.kind ?? "note";
   try {
+    if (!room) throw new Error("set metadata.room: your access isn't limited to one room");
     const posted = store.post(m, room, kind, text);
     res.json({
       jsonrpc: "2.0",
@@ -434,11 +981,11 @@ const WEB = fileURLToPath(new URL("../../web/dist", import.meta.url));
 app.get(["/app", "/app/", "/app.html"], (_req, res) =>
   DASHBOARD_OPEN ? res.sendFile("app.html", { root: WEB }) : res.redirect(302, "/?waitlist=1#waitlist"),
 );
-app.get("/api/config", (_req, res) => void res.json({ dashboard: DASHBOARD_OPEN }));
+// A self-hosted hub has no use for the marketing landing page: / opens the dashboard.
+app.get("/", (req, res, next) => (DEMO || process.env.WARREN_LANDING === "1" ? next() : res.redirect(302, "/app")));
 app.use(express.static(WEB));
 
-function setupSnippets(m: store.Member) {
-  if (m.kind === "human") return { dashboard: `${PUBLIC_URL}/app?token=${m.token}` };
+function setupSnippets(m: store.Member, token: string) {
   return {
     claudeCode: {
       mcpJson: {
@@ -446,25 +993,27 @@ function setupSnippets(m: store.Member) {
           warren: {
             command: "npx",
             args: ["tsx", "bridge/src/index.ts"],
-            env: { WARREN_HUB: PUBLIC_URL, WARREN_TOKEN: m.token, WARREN_ADAPTER: "channel" },
+            env: { WARREN_HUB: PUBLIC_URL, WARREN_TOKEN: token, WARREN_ADAPTER: "channel" },
           },
         },
       },
       launch: "claude --dangerously-load-development-channels server:warren",
     },
     codex: {
-      mcp: `WARREN_TOKEN=${m.token} codex mcp add warren --url ${PUBLIC_URL}/mcp --bearer-token-env-var WARREN_TOKEN`,
-      wake: `WARREN_HUB=${PUBLIC_URL} WARREN_TOKEN=${m.token} WARREN_ADAPTER=exec WARREN_EXEC_SESSION=<session-id> npx tsx bridge/src/index.ts`,
+      mcp: `WARREN_TOKEN=${token} codex mcp add warren --url ${PUBLIC_URL}/mcp --bearer-token-env-var WARREN_TOKEN`,
+      wake: `WARREN_HUB=${PUBLIC_URL} WARREN_TOKEN=${token} WARREN_ADAPTER=exec WARREN_EXEC_SESSION=<session-id> npx tsx bridge/src/index.ts`,
     },
     cursor: {
-      mcpJson: { mcpServers: { warren: { url: `${PUBLIC_URL}/mcp`, headers: { Authorization: `Bearer ${m.token}` } } } },
-      wake: `WARREN_HUB=${PUBLIC_URL} WARREN_TOKEN=${m.token} WARREN_ADAPTER=exec WARREN_EXEC_CLIENT=cursor WARREN_EXEC_SESSION=$(cursor-agent create-chat) npx tsx bridge/src/index.ts`,
+      mcpJson: { mcpServers: { warren: { url: `${PUBLIC_URL}/mcp`, headers: { Authorization: `Bearer ${token}` } } } },
+      wake: `WARREN_HUB=${PUBLIC_URL} WARREN_TOKEN=${token} WARREN_ADAPTER=exec WARREN_EXEC_CLIENT=cursor WARREN_EXEC_SESSION=$(cursor-agent create-chat) npx tsx bridge/src/index.ts`,
     },
-    a2a: { card: `${PUBLIC_URL}/.well-known/agent-card.json`, auth: `Authorization: Bearer ${m.token}` },
+    a2a: { card: `${PUBLIC_URL}/.well-known/agent-card.json`, auth: `Authorization: Bearer ${token}` },
+    handle: m.handle,
   };
 }
 
 if (DEMO && process.env.WARREN_SEED !== "0") seedDemo(PUBLIC_URL);
-if (!DEMO && !ADMIN_TOKEN) console.warn("WARREN_DEMO=0 without WARREN_ADMIN_TOKEN: nobody can create root rooms or invite");
+if (!DEMO && !store.isSetUp())
+  console.log(`no owner yet: open ${PUBLIC_URL}/app to create the owner account${SETUP_TOKEN ? " (needs WARREN_SETUP_TOKEN)" : ""}`);
 
-app.listen(PORT, () => console.log(`warren hub on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app)`));
+app.listen(PORT, () => console.log(`warren hub ${VERSION} on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app)`));

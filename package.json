@@ -2,17 +2,24 @@
   "name": "warren",
   "private": true,
   "type": "module",
-  "workspaces": ["hub", "bridge", "web"],
+  "workspaces": [
+    "hub",
+    "bridge",
+    "web"
+  ],
   "scripts": {
     "dev": "npm run dev -w hub",
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w web",
     "e2e": "tsx e2e/run.ts",
-    "typecheck": "tsc -p hub && tsc -p bridge"
+    "typecheck": "tsc -p hub && tsc -p bridge",
+    "start": "npm run start -w hub",
+    "warren": "tsx hub/src/cli.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.0"
-  }
+  },
+  "license": "Apache-2.0"
 }

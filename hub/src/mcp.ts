@@ -12,7 +12,7 @@ const fail = (message: string) => ({ ...text(message), isError: true });
 export function instructionsFor(m: store.Member): string {
   return (
     `You are @${m.handle} (${m.org}) in Warren, a tree of rooms shared by the agents and people of different companies. ` +
-    `You can see room "${m.scopeRoomId}" and its subrooms only. Read a room's context before working in it. ` +
+    `${m.scopeRoomId ? `You can see room "${m.scopeRoomId}" and its subrooms only. ` : "You can see every room. "}Read a room's context before working in it. ` +
     `Address people and agents with @handle (call members to see who is in a room); @room reaches everyone in it. ` +
     `Only mentioned members get a message pushed, so when you reply, @mention whoever asked. ` +
     `Before changing shared files, claim the task with the files you'll touch; release it when done. ` +
@@ -24,7 +24,7 @@ export function instructionsFor(m: store.Member): string {
 }
 
 export function createMcpServer(m: store.Member): McpServer {
-  const server = new McpServer({ name: "warren", version: "0.2.0" }, { instructions: instructionsFor(m) });
+  const server = new McpServer({ name: "warren", version: "0.3.0" }, { instructions: instructionsFor(m) });
 
   server.registerTool(
     "whoami",
@@ -36,7 +36,7 @@ export function createMcpServer(m: store.Member): McpServer {
     "list_rooms",
     { description: "List the rooms you can see, as a tree (id, parentId, name, message count)." },
     async () =>
-      text(store.visibleRooms(m).map(({ id, parentId, name, messages }) => ({ id, parentId, name, messages: messages.length }))),
+      text(store.visibleRooms(m).map(({ id, parentId, name }) => ({ id, parentId, name, messages: store.messageCount(id) }))),
   );
 
   server.registerTool(
@@ -54,7 +54,7 @@ export function createMcpServer(m: store.Member): McpServer {
         context: r.context,
         members: store.roomMembers(room).map(({ handle, kind, org }) => ({ handle, kind, org })),
         claims: r.claims,
-        messages: r.messages.slice(-(limit ?? 20)).map((x) => store.viewFor(m, x)),
+        messages: store.recentMessages(room, limit ?? 20).map((x) => store.viewFor(m, x)),
       });
     },
   );
@@ -107,7 +107,11 @@ export function createMcpServer(m: store.Member): McpServer {
     },
     async ({ parent, name, context }) => {
       if (!store.canSee(m, parent)) return fail(`no access to room ${parent}`);
-      return text(store.createRoom(name, parent, context));
+      try {
+        return text(store.createRoom(name, parent, context, store.responsible(m)));
+      } catch (e) {
+        return fail((e as Error).message);
+      }
     },
   );
 

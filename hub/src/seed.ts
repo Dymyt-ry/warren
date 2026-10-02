@@ -14,6 +14,8 @@ export const DEMO_TOKENS = {
 };
 
 export function seedDemo(publicUrl: string) {
+  if (store.allRooms().length) return; // a demo hub with WARREN_DB keeps what it has
+  store.setInstanceName("acme x firmab (demo)");
   store.createRoom(
     "shop",
     null,
@@ -28,19 +30,27 @@ export function seedDemo(publicUrl: string) {
   store.createRoom("checkout-ui", "shop", "# Checkout UI\nacme only. Contractors have no access.");
   store.createRoom("mobile", "checkout-ui", "# Mobile checkout\nResponsive checkout, owned by cursor-marek.");
 
-  const add = (handle: string, name: string, kind: store.MemberKind, org: string, scope: string, adapter: store.Adapter, token: string) =>
-    store.addMember({ handle, name, kind, org, scopeRoomId: scope, adapter, token });
+  const add = (
+    handle: string,
+    name: string,
+    kind: store.MemberKind,
+    org: string,
+    scope: string,
+    adapter: store.Adapter,
+    token: string,
+    extra: { role?: store.Role; owner?: string } = {},
+  ) => {
+    store.addMember({ handle, name, kind, org, scopeRoomId: scope, adapter, token, ...extra });
+    console.log(`  @${handle.padEnd(13)} ${kind.padEnd(6)} ${org.padEnd(7)} sees ${scope}/*  token ${token}`);
+  };
 
-  add("anna", "Anna", "human", "acme", "shop", "dashboard", DEMO_TOKENS.anna);
+  console.log("demo team (WARREN_DEMO=1, nothing is saved):");
+  add("anna", "Anna", "human", "acme", "shop", "dashboard", DEMO_TOKENS.anna, { role: "owner" });
   add("marek", "Marek", "human", "acme", "shop", "dashboard", DEMO_TOKENS.marek);
-  add("claude-anna", "Claude Code (Anna)", "agent", "acme", "shop", "channel", DEMO_TOKENS.frontend);
-  add("cursor-marek", "Cursor (Marek)", "agent", "acme", "checkout-ui", "inbox", DEMO_TOKENS.cursor);
+  add("claude-anna", "Claude Code (Anna)", "agent", "acme", "shop", "channel", DEMO_TOKENS.frontend, { owner: "anna" });
+  add("cursor-marek", "Cursor (Marek)", "agent", "acme", "checkout-ui", "inbox", DEMO_TOKENS.cursor, { owner: "marek" });
   add("ben", "Ben", "human", "firmab", "api-contract", "dashboard", DEMO_TOKENS.ben);
-  add("codex-ben", "Codex (Ben)", "agent", "firmab", "api-contract", "exec", DEMO_TOKENS.contractor);
-  add("claude-ben", "Claude Code (Ben)", "agent", "firmab", "api-contract", "channel", DEMO_TOKENS.benClaude);
-
-  console.log(`demo seeded (${store.allMembers().length} members):`);
-  for (const m of store.allMembers())
-    console.log(`  @${m.handle.padEnd(13)} ${m.kind.padEnd(6)} ${m.org.padEnd(7)} sees ${m.scopeRoomId}/*  token ${m.token}`);
-  console.log(`  invite more: POST ${publicUrl}/api/invites`);
+  add("codex-ben", "Codex (Ben)", "agent", "firmab", "api-contract", "exec", DEMO_TOKENS.contractor, { owner: "ben" });
+  add("claude-ben", "Claude Code (Ben)", "agent", "firmab", "api-contract", "channel", DEMO_TOKENS.benClaude, { owner: "ben" });
+  console.log(`  add more agents: POST ${publicUrl}/api/agents`);
 }
