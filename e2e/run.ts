@@ -429,11 +429,44 @@ try {
   const ginaSub = await as(gina, "/api/rooms", { body: { name: "Gina's sub", parentId: clientRoom.id } }).then((r) => r.json());
   const ginaRename = await as(gina, `/api/rooms/${ginaSub.id}`, { method: "PUT", body: { name: "Specs" } }).then((r) => r.json());
   const ginaMoveOut = await as(gina, `/api/rooms/${ginaSub.id}`, { method: "PUT", body: { parentId: "internal" } });
-  check(ginaTop.status === 403 && ginaDelScope.status === 403 && ginaRename.name === "Specs" && ginaMoveOut.status === 403, "a guest restructures only inside her room");
+  const ginaRenameScope = await as(gina, `/api/rooms/${clientRoom.id}`, { method: "PUT", body: { name: "Mine now" } });
+  check(ginaTop.status === 403 && ginaDelScope.status === 403 && ginaRename.name === "Specs" && ginaMoveOut.status === 403 && ginaRenameScope.status === 403, "a guest restructures only inside her room");
   const ginaUsers = await as(gina, "/api/users");
   const ginaAgent = await as(gina, "/api/agents", { body: { name: "Claude Code (Gina)", room: clientRoom.id, adapter: "channel" } }).then((r) => r.json());
   const ownerAgents = await as(owner, "/api/agents").then((r) => r.json());
   check(ginaUsers.status === 403 && ginaAgent.org === "clientco" && ginaAgent.owner === "gina" && ownerAgents.length === 1, "people add their own agents; admins see all of them");
+  // review fixes: scope invariants, malformed credentials, revoked sessions, agents follow their person
+  const noRoom = await as(owner, "/api/invites", { body: { kind: "human", role: "member" } });
+  const twoTokens = await as({}, "/api/me?token=a&token=b");
+  const badCookie = await as({ cookie: "warren_session=%" }, "/api/me");
+  const negative = await as(owner, "/api/rooms?history=-1");
+  check(noRoom.status === 400 && twoTokens.status === 401 && badCookie.status === 401 && negative.status === 200, "member invites need a room; malformed credentials get 401, not 500");
+  const ownerAgent = await as(owner, "/api/agents", { body: { name: "Codex (Olga)", room: clientRoom.id, adapter: "exec" } }).then((r) => r.json());
+  const ivoInvite = await as(owner, "/api/invites", { body: { kind: "human", room: "internal" } }).then((r) => r.json());
+  const ivo: Session = {};
+  await as(ivo, `/api/join/${new URL(ivoInvite.url).searchParams.get("invite")}`, { body: { name: "Ivo", email: "ivo@example.com", password: PASS } });
+  const ivoPause = await as(ivo, `/api/members/${ownerAgent.handle}/pause`, { body: { paused: true } });
+  check(ivoPause.status === 404, "a person can't pause an agent of their company in a room they don't see");
+  const ivoAgent = await as(ivo, "/api/agents", { body: { name: "Claude (Ivo)", room: "internal", adapter: "channel" } }).then((r) => r.json());
+  const ivoMe0 = await as(ivo, "/api/me").then((r) => r.json());
+  await as(owner, `/api/users/${ivoMe0.handle}`, { method: "PUT", body: { room: clientRoom.id, org: "Agency 2" } });
+  const ivoAgentAfter = await as({}, "/api/me", { token: ivoAgent.token });
+  check(ivoAgentAfter.status === 401, "moving a person out of a room removes their agents there");
+  const sessionToken = relogin.cookie!.split("=")[1];
+  const streamed: string[] = [];
+  const stream = new AbortController();
+  cleanup.push(() => stream.abort());
+  void fetch(`${OWN}/api/events`, { headers: { Cookie: relogin.cookie! }, signal: stream.signal })
+    .then(async (res) => {
+      for await (const chunk of res.body!) streamed.push(new TextDecoder().decode(chunk as Uint8Array));
+    })
+    .catch(() => {});
+  await sleep(300);
+  const bearerOut = await as({}, "/api/auth/logout", { body: {}, token: sessionToken });
+  const afterOut = await as({}, "/api/me", { token: sessionToken });
+  await as(owner, "/api/rooms/agency/messages", { body: { text: "after sign-out" } });
+  await sleep(500);
+  check(bearerOut.status === 200 && afterOut.status === 401 && !streamed.join("").includes("after sign-out"), "signing out revokes the session, also for an open event stream");
   const occupied = await as(owner, `/api/rooms/${clientRoom.id}`, { method: "DELETE" });
   check(occupied.status === 409, "a room someone's access starts at can't be deleted");
 
@@ -452,6 +485,8 @@ try {
   check(!!adaNew.cookie && oldPass.status === 401 && oldSession.status === 401, "a reset link sets a new password and signs out old sessions");
   const removed = await as(owner, `/api/users/${ginaMe.handle}`, { method: "DELETE" });
   const [ginaAfter, agentAfter] = await Promise.all([as(gina, "/api/me"), as({}, "/api/me", { token: ginaAgent.token })]);
+  await as(owner, `/api/users/${ivoMe0.handle}`, { method: "DELETE" });
+  await as(owner, `/api/agents/${ownerAgent.handle}`, { method: "DELETE" });
   const deleted = await as(owner, `/api/rooms/${clientRoom.id}`, { method: "DELETE" }).then((r) => r.json());
   check(removed.status === 200 && ginaAfter.status === 401 && agentAfter.status === 401, "removing a person signs them out and revokes their agents");
   check(deleted.deleted?.length === 2, `deleting a room deletes the rooms inside it (${deleted.deleted})`);

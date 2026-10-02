@@ -1,5 +1,6 @@
-# Warren hub + built web (landing and dashboard) in one container.
-# Coolify: build pack "dockerfile", port 3000, health check /.well-known/agent-card.json.
+# Warren hub + built web (dashboard, and the landing for demo hubs) in one container.
+# Data (SQLite database) lives in /data: mount a volume there. See docker-compose.yml.
+# Coolify: build pack "dockerfile", port 3000, health check /healthz, persistent storage on /data.
 FROM node:24-alpine
 WORKDIR /app
 
@@ -14,9 +15,10 @@ COPY bridge bridge
 COPY web web
 RUN npm run build
 
-# Waitlist sign-ups live here; mount a persistent volume on /data.
 RUN mkdir -p /data && chown node:node /data
 ENV NODE_ENV=production PORT=3000 WARREN_DATA_DIR=/data
 EXPOSE 3000
+VOLUME /data
 USER node
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s CMD wget -qO- http://127.0.0.1:3000/healthz >/dev/null || exit 1
 CMD ["node_modules/.bin/tsx", "hub/src/server.ts"]

@@ -1,9 +1,10 @@
 // Dashboard (Operate mode): the room tree, one room's thread with a composer, and who is in the room.
-// Built from shadcn primitives mapped onto the brand tokens (index.css). People sign in by picking
-// who they are (demo login, see README limits). Design rules: web/DESIGN.md.
+// Built from shadcn primitives mapped onto the brand tokens (index.css). People sign in with their
+// account (first run: owner setup); a demo hub lets you pick who you are. Design rules: web/DESIGN.md.
 import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  GearSixIcon,
   LockSimpleIcon,
   PaperPlaneRightIcon,
   PauseIcon,
@@ -13,6 +14,8 @@ import {
   ProhibitIcon,
   ShieldCheckIcon,
   ShieldWarningIcon,
+  SignOutIcon,
+  UserPlusIcon,
 } from "@phosphor-icons/react";
 import "@fontsource-variable/outfit";
 import "@fontsource-variable/inter";
@@ -41,39 +44,68 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Logo } from "./Logo";
-import {
-  api,
-  ownerOf,
-  storedToken,
-  storeToken,
-  useHub,
-  type AuditEvent,
-  type Member,
-  type Message as Msg,
-  type MessageKind,
-  type Room,
-} from "./api";
+import { api, ownerOf, useHub, type AuditEvent, type HubConfig, type Member, type Message as Msg, type MessageKind, type Room } from "./api";
 import { Avatar, KindTag, MentionText } from "./ui";
+import { JoinScreen, ResetScreen, SetupScreen, SignInScreen } from "./account";
+import { AgentDialog, InviteDialog, NewRoomDialog, RoomSettingsDialog } from "./dialogs";
+import { Settings } from "./settings";
 
 const OVERVIEW = "__overview";
+const SETTINGS = "__settings";
 
 const isForMe = (m: Msg, handle: string) => m.from !== handle && (m.forYou || m.mentions.includes(handle) || m.mentionsRoom);
+const isAdmin = (m: Member | null) => m?.role === "owner" || m?.role === "admin";
 
-function Dashboard() {
-  const [token, setToken] = useState<string | null>(() => new URLSearchParams(location.search).get("token") ?? storedToken());
-  const [me, setMe] = useState<Member | null>(null);
-  const { rooms, members, audit, status, error, addMessage, updateMessage, setRooms } = useHub(token);
-  const [selected, setSelected] = useState<string | null>(null);
+/** Decides what to show before the dashboard: a link being opened, first-run setup, or sign-in. */
+function App() {
+  const params = new URLSearchParams(location.search);
+  const [link, setLink] = useState(() => ({ invite: params.get("invite"), reset: params.get("reset") }));
+  const [config, setConfig] = useState<HubConfig | null>(null);
+  const [me, setMe] = useState<Member | null | undefined>(undefined); // undefined while loading
+  const [offline, setOffline] = useState<string | null>(null);
 
   useEffect(() => {
-    storeToken(token);
-    if (!token) return void setMe(null);
-    api.me(token).then(setMe, () => setToken(null));
-  }, [token]);
+    api.config().then(setConfig, (e) => setOffline((e as Error).message));
+    api.me().then(setMe, () => setMe(null));
+  }, []);
+
+  /** Signed in (or out): drop the one-time link from the address bar. */
+  const enter = (m: Member | null) => {
+    if (link.invite || link.reset) history.replaceState(null, "", "/app");
+    setLink({ invite: null, reset: null });
+    setConfig((c) => (c ? { ...c, needsSetup: false } : c));
+    setMe(m);
+  };
+
+  if (offline)
+    return (
+      <Empty className="h-dvh">
+        <EmptyHeader>
+          <EmptyTitle>The hub isn't answering</EmptyTitle>
+          <EmptyDescription>
+            Start it with <Kbd>npm run dev</Kbd> in the repo, then reload. ({offline})
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  if (!config || me === undefined) return null;
+  if (link.invite) return <JoinScreen code={link.invite} onDone={enter} />;
+  if (link.reset) return <ResetScreen code={link.reset} onDone={enter} />;
+  if (config.needsSetup) return <SetupScreen config={config} onDone={enter} />;
+  if (!me && !config.demo) return <SignInScreen config={config} onDone={enter} />;
+  return <Dashboard config={config} me={me} onMe={enter} />;
+}
+
+function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null; onMe: (m: Member | null) => void }) {
+  const { rooms, members, audit, status, error, addMessage, updateMessage, upsertRoom, removeRooms } = useHub(me?.handle ?? null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [newTop, setNewTop] = useState(false);
+  const accounts = !config.demo;
+  const canAddTop = !!me && isAdmin(me) && me.scopeRoomId === null;
 
   // Open where you're needed: a room that mentions you, else the latest activity, else the top room.
   useEffect(() => {
-    if (selected && rooms[selected]) return;
+    if (selected === SETTINGS || (selected && rooms[selected])) return;
     const all = Object.values(rooms);
     const handle = me?.handle;
     const mentioning = handle && all.find((r) => r.messages.some((m) => isForMe(m, handle)));
@@ -82,58 +114,125 @@ function Dashboard() {
     setSelected((mentioning || (latest?.messages.length ? latest : top))?.id ?? null);
   }, [rooms, selected, me]);
 
-  const people = Object.values(members).filter((m) => m.kind === "human");
-  const room = selected ? rooms[selected] : undefined;
+  // Someone else changed your account (removed you, or your session ended): back to sign-in.
+  useEffect(() => {
+    if (me && status === "offline") api.me().catch(() => onMe(null));
+  }, [status]);
 
-  const signIn = async (handle: string) => {
+  const people = Object.values(members).filter((m) => m.kind === "human");
+  const room = selected && selected !== SETTINGS ? rooms[selected] : undefined;
+
+  const pickPerson = async (handle: string) => {
     setSelected(null);
-    if (handle === OVERVIEW) return setToken(null);
-    const m = await api.login(handle);
-    setToken(m.token);
+    if (handle === OVERVIEW) {
+      await api.signOut();
+      return onMe(null);
+    }
+    onMe(await api.demoLogin(handle));
+  };
+  const signOut = async () => {
+    await api.signOut();
+    onMe(null);
   };
 
   return (
     <TooltipProvider delayDuration={600}>
       <div className="grid h-dvh grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[264px_minmax(0,1fr)] md:grid-rows-1">
         <aside className="flex max-h-[42dvh] min-h-0 flex-col gap-3 overflow-y-auto border-b border-border bg-card px-3 py-3 md:max-h-none md:gap-6 md:overflow-visible md:border-r md:border-b-0 md:py-5">
-          <a href="/" className="px-2 no-underline">
-            <Logo />
-          </a>
-
-          <div className="flex flex-col gap-1.5 px-1">
-            <span className="px-1 text-xs font-medium text-muted-foreground">You are</span>
-            <Select value={me?.handle ?? OVERVIEW} onValueChange={signIn}>
-              <SelectTrigger className="w-full" aria-label="You are">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectLabel>People</SelectLabel>
-                  {people.map((p) => (
-                    <SelectItem key={p.handle} value={p.handle}>
-                      {p.name} <span className="text-muted-foreground">{p.org}</span>
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-                <SelectGroup>
-                  <SelectItem value={OVERVIEW}>Nobody, just looking</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
+          <div className="flex flex-col gap-1 px-2">
+            <a href="/app" className="no-underline">
+              <Logo />
+            </a>
+            {accounts && <span className="truncate text-xs text-muted-foreground">{config.instanceName}</span>}
           </div>
 
+          {!accounts && (
+            <div className="flex flex-col gap-1.5 px-1">
+              <span className="px-1 text-xs font-medium text-muted-foreground">You are</span>
+              <Select value={me?.handle ?? OVERVIEW} onValueChange={pickPerson}>
+                <SelectTrigger className="w-full" aria-label="You are">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectLabel>People</SelectLabel>
+                    {people.map((p) => (
+                      <SelectItem key={p.handle} value={p.handle}>
+                        {p.name} <span className="text-muted-foreground">{p.org}</span>
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectItem value={OVERVIEW}>Nobody, just looking</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           <nav aria-label="Rooms" className="min-h-0 md:flex-1 md:overflow-y-auto">
-            <p className="mb-1 px-3 text-xs font-medium text-muted-foreground">Rooms</p>
+            <div className="mb-1 flex h-7 items-center justify-between pr-1 pl-3">
+              <p className="m-0 text-xs font-medium text-muted-foreground">Rooms</p>
+              {canAddTop && (
+                <Button variant="ghost" size="icon-xs" aria-label="New top-level room" title="New top-level room" onClick={() => setNewTop(true)}>
+                  <PlusIcon weight="bold" />
+                </Button>
+              )}
+            </div>
             <RoomTree rooms={rooms} selected={selected} onSelect={setSelected} me={me?.handle} />
           </nav>
 
-          <p role="status" className={cn("hidden px-3 text-xs text-muted-foreground md:block", status === "offline" && "text-coral")}>
-            {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
-          </p>
+          {me && accounts && (
+            <div className="hidden flex-col gap-1 md:flex">
+              <button
+                onClick={() => setSelected(SETTINGS)}
+                aria-current={selected === SETTINGS ? "page" : undefined}
+                className={cn(
+                  "flex h-11 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-accent",
+                  selected === SETTINGS && "bg-accent",
+                )}
+              >
+                <Avatar kind="human" name={me.name} size={26} />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{me.name}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{me.org}</span>
+                </span>
+                <GearSixIcon aria-hidden className="text-muted-foreground" />
+              </button>
+              <div className="flex items-center justify-between px-2">
+                <p role="status" className={cn("m-0 text-xs text-muted-foreground", status === "offline" && "text-coral")}>
+                  {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
+                </p>
+                <Button variant="ghost" size="xs" onClick={signOut}>
+                  <SignOutIcon data-icon="inline-start" />
+                  Sign out
+                </Button>
+              </div>
+            </div>
+          )}
+          {me && accounts && (
+            <div className="flex gap-2 px-1 md:hidden">
+              <Button variant="ghost" size="sm" onClick={() => setSelected(SETTINGS)}>
+                <GearSixIcon data-icon="inline-start" />
+                Settings
+              </Button>
+              <Button variant="ghost" size="sm" onClick={signOut}>
+                <SignOutIcon data-icon="inline-start" />
+                Sign out
+              </Button>
+            </div>
+          )}
+          {!accounts && (
+            <p role="status" className={cn("hidden px-3 text-xs text-muted-foreground md:block", status === "offline" && "text-coral")}>
+              {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
+            </p>
+          )}
         </aside>
 
         <main className="min-h-0 min-w-0">
-          {status === "offline" && Object.keys(rooms).length === 0 ? (
+          {selected === SETTINGS && me ? (
+            <Settings me={me} config={config} rooms={rooms} members={members} onMe={onMe} />
+          ) : status === "offline" && Object.keys(rooms).length === 0 ? (
             <Empty className="h-full">
               <EmptyHeader>
                 <EmptyTitle>The hub isn't answering</EmptyTitle>
@@ -149,25 +248,51 @@ function Dashboard() {
               rooms={rooms}
               members={members}
               me={me}
-              token={token}
+              config={config}
               audit={audit}
               onPosted={addMessage}
               onUpdated={updateMessage}
-              onContext={(r) => setRooms((prev) => ({ ...prev, [r.id]: { ...prev[r.id], context: r.context } }))}
+              onContext={(r) => upsertRoom({ id: r.id, context: r.context })}
               onNewRoom={(r) => {
-                setRooms((prev) => ({ ...prev, [r.id]: r }));
+                upsertRoom(r);
                 setSelected(r.id);
+              }}
+              onDeleted={(ids) => {
+                removeRooms(ids);
+                setSelected(room.parentId);
               }}
             />
           ) : (
             <Empty className="h-full">
               <EmptyHeader>
-                <EmptyTitle>{status === "loading" ? "Loading rooms" : "No rooms you can see"}</EmptyTitle>
+                <EmptyTitle>{status === "loading" ? "Loading rooms" : canAddTop ? "Start your tree" : "No rooms you can see"}</EmptyTitle>
+                {status !== "loading" && (
+                  <EmptyDescription>
+                    {canAddTop
+                      ? "A top-level room is usually a product or a client. Rooms inside it are for tasks, and each one can have different people and agents."
+                      : "Ask whoever invited you to give you access to a room."}
+                  </EmptyDescription>
+                )}
               </EmptyHeader>
+              {canAddTop && status !== "loading" && (
+                <Button onClick={() => setNewTop(true)}>
+                  <PlusIcon data-icon="inline-start" weight="bold" />
+                  New room
+                </Button>
+              )}
             </Empty>
           )}
         </main>
       </div>
+      <NewRoomDialog
+        open={newTop}
+        onOpenChange={setNewTop}
+        parent={null}
+        onCreated={(r) => {
+          upsertRoom(r);
+          setSelected(r.id);
+        }}
+      />
     </TooltipProvider>
   );
 }
@@ -234,30 +359,34 @@ function RoomView({
   rooms,
   members,
   me,
-  token,
+  config,
   audit,
   onPosted,
   onUpdated,
   onContext,
   onNewRoom,
+  onDeleted,
 }: {
   room: Room;
   rooms: Record<string, Room>;
   members: Record<string, Member>;
   me: Member | null;
-  token: string | null;
+  config: HubConfig;
   audit: AuditEvent[];
   onPosted: (m: Msg) => void;
   onUpdated: (m: Msg) => void;
   onContext: (r: Room) => void;
   onNewRoom: (r: Room) => void;
+  onDeleted: (ids: string[]) => void;
 }) {
   const [inRoom, setInRoom] = useState<Member[]>([]);
+  const [dialog, setDialog] = useState<"room" | "settings" | "invite" | "agent" | null>(null);
   const memberCount = Object.keys(members).length;
+  const person = me?.kind === "human" ? me : null;
 
   // Refetch when someone joins, pauses or comes online, so the panel stays current.
   const memberState = Object.values(members)
-    .map((m) => `${m.handle}:${m.paused ? 1 : 0}${m.online ? 1 : 0}`)
+    .map((m) => `${m.handle}:${m.paused ? 1 : 0}${m.online ? 1 : 0}${m.scopeRoomId}`)
     .join(",");
   useEffect(() => {
     api.roomMembers(room.id).then(setInRoom, () => setInRoom([]));
@@ -265,11 +394,8 @@ function RoomView({
 
   const path: Room[] = [];
   for (let r: Room | undefined = room; r; r = r.parentId ? rooms[r.parentId] : undefined) path.unshift(r);
-
-  const addSubroom = async () => {
-    const name = prompt(`Name the new room inside ${room.name}`);
-    if (name?.trim() && token) onNewRoom(await api.createRoom(token, room.id, name.trim()));
-  };
+  const open = (d: typeof dialog) => () => setDialog(d);
+  const shut = (o: boolean) => !o && setDialog(null);
 
   return (
     <div className="grid h-full grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px]">
@@ -284,29 +410,55 @@ function RoomView({
             ))}
           </h1>
           <div className="-ml-2 flex min-w-0 flex-wrap items-center gap-x-1 md:ml-0 md:shrink-0">
-            <PolicyToggle room={room} me={me} token={token} />
+            <PolicyToggle room={room} me={me} />
             {me && (
-              <Button variant="ghost" size="sm" onClick={addSubroom}>
+              <Button variant="ghost" size="sm" onClick={open("room")}>
                 <PlusIcon data-icon="inline-start" weight="bold" />
                 New room inside
+              </Button>
+            )}
+            {person && (
+              <Button variant="ghost" size="sm" onClick={open("invite")}>
+                <UserPlusIcon data-icon="inline-start" />
+                Invite
+              </Button>
+            )}
+            {person && (person.scopeRoomId === null || person.scopeRoomId !== room.id) && (
+              <Button variant="ghost" size="icon-sm" aria-label={`${room.name} settings`} title="Room settings" onClick={open("settings")}>
+                <GearSixIcon />
               </Button>
             )}
           </div>
         </header>
 
-        <RoomContext room={room} token={me ? token : null} onSaved={onContext} />
+        <RoomContext room={room} canEdit={!!me} onSaved={onContext} />
 
-        <Thread room={room} members={members} me={me} token={token} onUpdated={onUpdated} />
+        <Thread room={room} members={members} me={me} onUpdated={onUpdated} />
 
-        <Composer room={room} me={me} token={token} inRoom={inRoom} onPosted={onPosted} />
+        <Composer room={room} me={me} inRoom={inRoom} onPosted={onPosted} />
       </section>
 
-      <MembersPanel inRoom={inRoom} members={members} me={me} token={token} audit={audit.filter((a) => a.roomId === room.id)} />
+      <MembersPanel
+        inRoom={inRoom}
+        members={members}
+        me={me}
+        audit={audit.filter((a) => a.roomId === room.id)}
+        onAddAgent={person ? open("agent") : undefined}
+      />
+
+      {me && <NewRoomDialog open={dialog === "room"} onOpenChange={shut} parent={room} onCreated={onNewRoom} />}
+      {person && (
+        <>
+          <RoomSettingsDialog key={`${room.id}${room.name}${room.parentId}`} open={dialog === "settings"} onOpenChange={shut} room={room} rooms={rooms} me={person} onDeleted={onDeleted} />
+          <InviteDialog open={dialog === "invite"} onOpenChange={shut} me={person} rooms={rooms} room={room.id} emailOn={config.email} />
+          <AgentDialog open={dialog === "agent"} onOpenChange={shut} me={person} rooms={rooms} room={room.id} />
+        </>
+      )}
     </div>
   );
 }
 
-function RoomContext({ room, token, onSaved }: { room: Room; token: string | null; onSaved: (r: Room) => void }) {
+function RoomContext({ room, canEdit, onSaved }: { room: Room; canEdit: boolean; onSaved: (r: Room) => void }) {
   // On a phone the context starts folded so the thread gets the screen.
   const [open, setOpen] = useState(() => window.matchMedia("(min-width: 768px)").matches);
   const [editing, setEditing] = useState(false);
@@ -315,7 +467,7 @@ function RoomContext({ room, token, onSaved }: { room: Room; token: string | nul
 
   const save = async () => {
     try {
-      onSaved(await api.setContext(token!, room.id, draft));
+      onSaved(await api.setContext(room.id, draft));
       setEditing(false);
       setError(null);
     } catch (e) {
@@ -331,7 +483,7 @@ function RoomContext({ room, token, onSaved }: { room: Room; token: string | nul
             {open ? "Hide" : "Show"} room context
           </button>
         </CollapsibleTrigger>
-        {open && token && !editing && (
+        {open && canEdit && !editing && (
           <Button variant="ghost" size="sm" onClick={() => (setDraft(room.context), setEditing(true))}>
             <PencilSimpleIcon data-icon="inline-start" />
             Edit
@@ -372,13 +524,11 @@ function Thread({
   room,
   members,
   me,
-  token,
   onUpdated,
 }: {
   room: Room;
   members: Record<string, Member>;
   me: Member | null;
-  token: string | null;
   onUpdated: (m: Msg) => void;
 }) {
   // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
@@ -436,7 +586,7 @@ function Thread({
                       >
                         <MentionText text={m.text} me={me?.handle} />
                       </p>
-                      <SafetyLine m={m} me={me} token={token} onUpdated={onUpdated} />
+                      <SafetyLine m={m} me={me} onUpdated={onUpdated} />
                     </MessageContent>
                   </Message>
                 </MessageScrollerItem>
@@ -464,12 +614,10 @@ const FLAG_LABEL: Record<string, string> = {
 function SafetyLine({
   m,
   me,
-  token,
   onUpdated,
 }: {
   m: Msg;
   me: Member | null;
-  token: string | null;
   onUpdated: (m: Msg) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -483,7 +631,6 @@ function SafetyLine({
   const canReview =
     s.status === "held" &&
     !!me &&
-    !!token &&
     me.kind === "human" &&
     me.handle !== m.from &&
     (approval ? me.org === m.org : !suspicious || me.org !== m.org);
@@ -491,7 +638,7 @@ function SafetyLine({
   const decide = async (decision: "release" | "reject") => {
     setBusy(true);
     try {
-      onUpdated(await api.review(token!, m.id, decision));
+      onUpdated(await api.review(m.id, decision));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -557,9 +704,9 @@ function SafetyLine({
 }
 
 /** Per-room rule: agents' contract changes wait for a person of their own company. */
-function PolicyToggle({ room, me, token }: { room: Room; me: Member | null; token: string | null }) {
+function PolicyToggle({ room, me }: { room: Room; me: Member | null }) {
   const on = !!room.policy?.approveContractChanges;
-  const canSet = !!me && me.kind === "human" && !!token;
+  const canSet = !!me && me.kind === "human";
   const label = on ? "Contract changes need approval" : "Contract changes go out directly";
   const glyph = <span aria-hidden className={cn("size-2.5 rounded-[30%] border-[1.5px] border-foreground", on && "bg-foreground")} />;
   if (!canSet)
@@ -571,7 +718,7 @@ function PolicyToggle({ room, me, token }: { room: Room; me: Member | null; toke
           variant="ghost"
           size="sm"
           aria-pressed={on}
-          onClick={() => api.setPolicy(token!, room.id, { approveContractChanges: !on }).catch(() => {})}
+          onClick={() => api.setPolicy(room.id, { approveContractChanges: !on }).catch(() => {})}
         >
           {glyph}
           {label}
@@ -594,13 +741,11 @@ const KINDS: { kind: MessageKind; label: string }[] = [
 function Composer({
   room,
   me,
-  token,
   inRoom,
   onPosted,
 }: {
   room: Room;
   me: Member | null;
-  token: string | null;
   inRoom: Member[];
   onPosted: (m: Msg) => void;
 }) {
@@ -630,10 +775,10 @@ function Composer({
   };
 
   const send = async () => {
-    if (!token || !text.trim() || sending) return;
+    if (!me || !text.trim() || sending) return;
     setSending(true);
     try {
-      onPosted(await api.post(token, room.id, kind, text.trim()));
+      onPosted(await api.post(room.id, kind, text.trim()));
       setText("");
       setKind("note");
       setError(null);
@@ -755,14 +900,14 @@ function MembersPanel({
   inRoom,
   members,
   me,
-  token,
   audit,
+  onAddAgent,
 }: {
   inRoom: Member[];
   members: Record<string, Member>;
   me: Member | null;
-  token: string | null;
   audit: AuditEvent[];
+  onAddAgent?: () => void;
 }) {
   // People first, each with their agents under them; agents whose person isn't in the room at the end.
   const humans = inRoom.filter((m) => m.kind === "human");
@@ -785,10 +930,10 @@ function MembersPanel({
                 .filter((h) => h.org === org)
                 .map((h) => (
                   <li key={h.handle} className="flex flex-col gap-2">
-                    <MemberRow m={h} me={me} token={token} />
+                    <MemberRow m={h} me={me} />
                     {agentsOf(h).map((a) => (
                       <div key={a.handle} className="ml-3 border-l border-border pl-4">
-                        <MemberRow m={a} me={me} token={token} />
+                        <MemberRow m={a} me={me} />
                       </div>
                     ))}
                   </li>
@@ -800,9 +945,15 @@ function MembersPanel({
           <section className="flex flex-col gap-3">
             <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">Other agents</h3>
             {orphans.map((a) => (
-              <MemberRow key={a.handle} m={a} me={me} token={token} />
+              <MemberRow key={a.handle} m={a} me={me} />
             ))}
           </section>
+        )}
+        {onAddAgent && (
+          <Button variant="ghost" size="sm" className="self-start" onClick={onAddAgent}>
+            <PlusIcon data-icon="inline-start" weight="bold" />
+            Add your agent here
+          </Button>
         )}
         <SafetyLog audit={audit} />
       </div>
@@ -837,9 +988,9 @@ function SafetyLog({ audit }: { audit: AuditEvent[] }) {
   );
 }
 
-function MemberRow({ m, me, token }: { m: Member; me: Member | null; token: string | null }) {
+function MemberRow({ m, me }: { m: Member; me: Member | null }) {
   // Stop button: a person can pause an agent of their own company.
-  const canPause = m.kind === "agent" && !!me && !!token && me.kind === "human" && me.org === m.org;
+  const canPause = m.kind === "agent" && !!me && me.kind === "human" && me.org === m.org;
   const row = (
     <div className={cn("flex items-center gap-3", m.paused && "opacity-60")}>
       <Avatar kind={m.kind} name={m.name} size={28} />
@@ -872,7 +1023,7 @@ function MemberRow({ m, me, token }: { m: Member; me: Member | null; token: stri
           size="icon-sm"
           aria-label={m.paused ? `Resume ${m.name}` : `Pause ${m.name}`}
           title={m.paused ? "Resume" : "Pause"}
-          onClick={() => api.pause(token!, m.handle, !m.paused).catch(() => {})}
+          onClick={() => api.pause(m.handle, !m.paused).catch(() => {})}
         >
           {m.paused ? <PlayIcon weight="fill" /> : <PauseIcon weight="fill" />}
         </Button>
@@ -883,6 +1034,6 @@ function MemberRow({ m, me, token }: { m: Member; me: Member | null; token: stri
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <Dashboard />
+    <App />
   </StrictMode>,
 );

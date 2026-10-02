@@ -412,6 +412,19 @@ export function disableMember(handle: string, actor: string): Member {
   return m;
 }
 
+/**
+ * After a person's company or access changed, their agents follow: they take the
+ * person's company, and agents in rooms the person no longer sees are removed.
+ */
+export function reconcileAgents(handle: string, actor: string) {
+  const person = members.get(handle);
+  if (!person) return;
+  for (const a of allMembers().filter((x) => x.kind === "agent" && x.owner === handle)) {
+    if (!canSee(person, a.scopeRoomId!)) disableMember(a.handle, actor);
+    else if (a.org !== person.org) updateMember(a.handle, { org: person.org });
+  }
+}
+
 /** A fresh bearer token for a member; the old one stops working. Returned once, stored hashed. */
 export function rotateToken(handle: string): string {
   const token = newSecret("wr");
@@ -574,9 +587,14 @@ export function findLink(code: unknown, purpose: Link["purpose"]): Link | undefi
   return row ? toLink(row) : undefined;
 }
 
-/** Marks a link used; false when someone else used it first. */
-export function useLink(id: string, by: string): boolean {
-  return db.prepare("UPDATE links SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL").run(new Date().toISOString(), by, id).changes === 1;
+/** Marks a link used; false when it was used, revoked or expired in the meantime. */
+export function useLink(id: string, by: string | null): boolean {
+  const now = new Date().toISOString();
+  return db.prepare("UPDATE links SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?").run(now, by, id, now).changes === 1;
+}
+
+export function markLinkUser(id: string, by: string) {
+  db.prepare("UPDATE links SET used_by = ? WHERE id = ?").run(by, id);
 }
 
 /** Pending invites, newest first; only `createdBy`'s unless omitted. */
@@ -638,6 +656,7 @@ const toMessage = (r: Row): Message => ({
 
 /** The room's last `limit` messages, oldest first. */
 export function recentMessages(roomId: string, limit = HISTORY): Message[] {
+  limit = Math.max(1, Math.min(Math.floor(limit) || HISTORY, 1000));
   const rows = db.prepare("SELECT * FROM messages WHERE room_id = ? ORDER BY seq DESC LIMIT ?").all(roomId, limit) as Row[];
   return rows.reverse().map(toMessage);
 }
@@ -813,6 +832,7 @@ export function setPaused(actor: Member, handle: string, paused: boolean): Membe
   if (actor.kind !== "human") throw new Error("only a person can pause an agent");
   if (target.kind !== "agent") throw new Error(`@${handle} is a person, not an agent`);
   if (target.org !== actor.org) throw new Error(`only people of ${target.org} can pause @${handle}`);
+  if (!canSee(actor, target.scopeRoomId!)) throw new Error(`no such member @${handle}`);
   target.paused = paused;
   db.prepare("UPDATE members SET paused = ? WHERE handle = ?").run(paused ? 1 : 0, target.handle);
   events.emit("member", publicMember(target));

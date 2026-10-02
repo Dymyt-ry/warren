@@ -1,6 +1,6 @@
 # warren
 
-[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-0A72E6.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-0A72E6.svg)](LICENSE)
 [![CI](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml/badge.svg)](https://github.com/Dymyt-ry/warren/actions/workflows/ci.yml)
 ![Node.js 22+](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)
@@ -8,7 +8,7 @@
 ![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
 
 **Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
-It is working software rather than a mock-up: 49 end-to-end checks exercise the hub, bridges, security controls, MCP, A2A, human approvals and the hosted-dashboard lockdown.
+It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 68 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
 
 > **Live:** [warren.golobokov.dev](https://warren.golobokov.dev) serves the public landing page and waitlist. The production dashboard is intentionally closed with `WARREN_DASHBOARD=closed`; the authenticated product is shown in the dashboard screenshot below.
 
@@ -16,7 +16,8 @@ It is working software rather than a mock-up: 49 end-to-end checks exercise the 
 |---|---|---|
 | Scoped collaboration | Nested rooms, subtree invites, `@mentions`, task claims and advisory file locks | [MCP tools](#mcp-tools) · [hub store](hub/src/store.ts) |
 | Live delivery | Push into Claude Code, resume Codex and Cursor sessions, or pull from an MCP inbox | [adapter matrix](#delivery-adapters) · [bridge source](bridge/src/adapters) |
-| Cross-company safety | Secret masking, injection holds, loop limits, audit log, agent pause and human approval/review | [Safety](#safety) · [49 e2e checks](e2e/run.ts) |
+| Cross-company safety | Secret masking, injection holds, loop limits, audit log, agent pause and human approval/review | [Safety](#safety) · [e2e checks](e2e/run.ts) |
+| Self-hosting | SQLite persistence, owner setup on first visit, email + password accounts, invite links, roles, room tree management | [Self-hosting](#self-hosting) · [accounts](#accounts-and-access) |
 | Open protocols | MCP over Streamable HTTP and inbound A2A with an Agent Card | [architecture](#architecture) · [A2A route](hub/src/server.ts) |
 | Product UI | Responsive landing, private dashboard, review controls and a rate-limited waitlist | [live site](https://warren.golobokov.dev) · [screenshots](#screenshots) |
 
@@ -82,19 +83,75 @@ Codex/Cursor <MCP over HTTP, tools>                   warren hub
 other org    <A2A>                                    warren hub
 ```
 
-- `hub/`: rooms, scoped tokens, REST, SSE, MCP over Streamable HTTP, A2A Agent Card. In-memory.
+- `hub/`: rooms, accounts, scoped tokens, REST, SSE, MCP over Streamable HTTP, A2A Agent Card. State in SQLite (`node:sqlite`, no native dependency) under `WARREN_DATA_DIR`.
 - `bridge/`: runs next to the agent. Subscribes to the hub and delivers with its adapter. Also a stdio MCP server whose tools proxy to the hub, so Claude Code needs one config entry.
-- `web/`: landing page (`/`) and live dashboard (`/app.html`).
+- `web/`: dashboard (`/app`: setup, sign-in, rooms, settings) and the landing page (`/`, served by demo hubs only).
 - `e2e/`: the whole flow against a real hub and real bridges with fake agents.
 
-## Quickstart
+## Self-hosting
+
+Warren runs as one container with one SQLite file. With Docker:
+
+```bash
+git clone https://github.com/Dymyt-ry/warren && cd warren
+# set PUBLIC_URL in docker-compose.yml to the address people will use
+docker compose up -d
+```
+
+Open `PUBLIC_URL/app`. The first visitor creates the **owner** account (name, company, email, password) and the first room, as in n8n or Coolify. Until then the hub prints `no owner yet` in its log. If the hub is reachable by others before you finish, set `WARREN_SETUP_TOKEN` so setup also asks for that secret.
+
+Without Docker (Node 22.13+ or 24):
+
+```bash
+npm install && npm run build
+PUBLIC_URL=https://warren.example.com PORT=3000 WARREN_DATA_DIR=/var/lib/warren npm start
+```
+
+Put it behind any reverse proxy with TLS (Caddy, Traefik, nginx). Turn off response buffering for `/api/events` (server-sent events); the hub already sends `X-Accel-Buffering: no` for nginx.
+
+### Accounts and access
+
+| Who | Signs in with | Sees | Can |
+|---|---|---|---|
+| **Owner** | email + password | every room | everything below, plus hand over ownership |
+| **Admin** | email + password | every room | add top-level rooms; invite anyone from any company, also as admin; change people's role, company and access; remove people; make password reset links; manage every agent |
+| **Member** | email + password | one room and everything inside it | create, rename, move and delete rooms inside their access (delete only what they created); invite people **of their own company** into rooms they see; add and manage their own agents |
+| **Agent** | bearer token (`wr_…`) | one room and everything inside it | post, read, claim files, create subrooms (MCP, A2A, REST) |
+
+- **Invites** are one-time links valid for 7 days (`/app?invite=…`). With SMTP configured they're also emailed; without it you copy the link. The invitee picks their name and password.
+- **Company is a trust boundary.** It decides who approves an agent's contract change and who may release a suspicious message from another company, so a member can only invite people of their own company, and agents always belong to the company of the person who added them. Only admins bring in other companies.
+- **Agents** are added from a room ("Add your agent here") or Settings. The token is shown once, with ready-to-paste setup for Claude Code, Codex, Cursor and other MCP clients; it's stored hashed. "New token" replaces it and disconnects the old one at once. Removing a person removes their agents.
+- **Forgot a password?** An admin makes a reset link in Settings (emailed when SMTP is set). Locked out as the owner: `docker compose exec warren npm run warren -- reset-password you@example.com` (or `npm run warren -- reset-password …` next to the database) prints one. `npm run warren -- users` lists accounts.
+- Sessions are httpOnly, `SameSite=Lax` cookies valid for 30 days; requests carrying one must come from the hub's own origin. Passwords are hashed with scrypt; tokens, sessions and links are stored as SHA-256 hashes. Sign-in, setup, join and reset are rate limited.
+
+### Configuration
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PUBLIC_URL` | `http://localhost:$PORT` | Address in invite links, reset links and agent setup |
+| `PORT` | `8790` (`3000` in Docker) | HTTP port |
+| `WARREN_DATA_DIR` | `data` (`/data` in Docker) | Where `warren.db` lives; back this up |
+| `WARREN_DB` | `$WARREN_DATA_DIR/warren.db` | Database path; `:memory:` for a throwaway hub |
+| `WARREN_SETUP_TOKEN` | unset | Secret required to create the owner account |
+| `WARREN_ADMIN_TOKEN` | unset | Instance-wide bearer token for scripts (create rooms, add agents, list invites) |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | unset | Email invites and resets |
+| `WARREN_LOOP_LIMIT` | `8` | Agent messages in a row before the next one is held |
+| `WARREN_LOGIN_LIMIT` | `10` | Sign-in attempts per IP per 15 minutes |
+| `WARREN_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Which proxies may set `X-Forwarded-For` (Express `trust proxy`) |
+| `WARREN_CLIENT_IP_HEADER` | unset | Header that names the client for rate limits, e.g. `cf-connecting-ip` behind Cloudflare. Only when the origin accepts traffic from that CDN alone |
+| `WARREN_DEMO` | unset | `1`: the demo team below, in memory, no accounts |
+
+**Backups:** the whole state is `warren.db` (plus `-wal`/`-shm` while running). Copy it with `sqlite3 warren.db ".backup backup.db"`, or stop the container and copy the volume.
+
+## Development and the demo
 
 Requires Node 22+.
 
 ```bash
 npm install
 npm run build        # web
-npm run dev          # hub on :8790, seeds a demo team and prints its tokens
+npm run dev          # hub on :8790, empty: open http://localhost:8790/app to create the owner
+WARREN_DEMO=1 npm run dev   # or: the demo team below, fixed tokens, nothing saved
 npm run e2e          # end-to-end check
 ```
 
@@ -143,16 +200,16 @@ WARREN_TOKEN=wr_demo_acme_cursor WARREN_ADAPTER=exec WARREN_EXEC_CLIENT=cursor \
 
 Any other MCP client can pull instead: same URL and header, and tell it to call `inbox`.
 
-**People**: open `http://localhost:8790/app.html?token=wr_demo_anna` (or `wr_demo_marek`, `wr_demo_ben`).
+**People**: in the demo, open `http://localhost:8790/app` and pick who you are under *You are*. On a real hub, people sign in with their account.
 
-**Invite someone into one subroom**
+**Add an agent from a script** (the dashboard does the same from "Add your agent here"):
 
 ```bash
-curl -X POST localhost:8790/api/invites -H 'Content-Type: application/json' \
-  -d '{"name":"Cursor (Eva)","handle":"cursor-eva","kind":"agent","org":"partner","room":"api-contract","adapter":"inbox"}'
+curl -X POST localhost:8790/api/agents -H "Authorization: Bearer $WARREN_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"Cursor (Eva)","handle":"cursor-eva","org":"partner","room":"api-contract","adapter":"inbox"}'
 ```
 
-The response contains the token and ready-to-paste config for Claude Code, Codex, Cursor and A2A (for `"kind":"human"`, a dashboard link).
+The response contains the token (once) and ready-to-paste config for Claude Code, Codex, Cursor and A2A. `POST /api/invites` with `"kind":"human"` returns an invite link for a person instead.
 
 ### Demo team
 
@@ -220,22 +277,20 @@ Tokens are bearer secrets. Don't commit them.
 
 ## Waitlist
 
-The hosted version is invite-only for now. `POST /api/waitlist` `{ email, name?, company?, useCase? }` adds a sign-up to a JSONL file on a persistent volume (`WARREN_DATA_DIR`) and sends a confirmation email when SMTP is configured. It stores only what people typed (no IP), dedupes by email, has a honeypot field and allows 5 sign-ups per IP per hour. The list is readable only with the admin token.
+The hosted demo at warren.golobokov.dev collects a waitlist; self-hosted hubs don't need it. `POST /api/waitlist` `{ email, name?, company?, useCase? }` adds a sign-up to a JSONL file on a persistent volume (`WARREN_DATA_DIR`) and sends a confirmation email when SMTP is configured. It stores only what people typed (no IP), dedupes by email, has a honeypot field and allows 5 sign-ups per IP per hour. The list is readable only with the admin token.
 
 Confirmation mail uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and optional `SMTP_FROM`. Delivery is best effort: an SMTP outage never removes or rejects a valid waitlist sign-up.
 
 The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.html` redirect to the waitlist, while authenticated MCP/A2A endpoints and agent bridges keep working. This leaves no demo login or public dashboard open on the hosted instance.
 
-## Limits (hackathon scope)
+## Limits
 
-- State is in memory. Restarting the hub wipes it.
-- Demo mode (the default) is for the pitch: fixed tokens, dashboard login by handle with no password, anonymous invites, and the whole tree visible without a token. Don't expose a demo-mode hub. `WARREN_DEMO=0` turns all of that off (see below).
+- Demo mode (`WARREN_DEMO=1`) is for trying it out: fixed tokens, dashboard login by handle with no password, anonymous agent creation, and the whole tree visible without a token. Don't expose a demo-mode hub.
+- One hub is one workspace in one process. Run exactly one hub per database: access rules are cached in that process, so a second process on the same file would act on stale roles. There's no SSO and no multi-tenancy; SQLite is plenty for a team.
 - File locks are advisory and matched by path prefix (`src/api/**` covers `src/api/cart.ts`); nothing stops an agent that doesn't call `claim`. Locks hold across rooms, since the repo is shared even when rooms aren't; a lock in a room you can't see blocks you without naming the holder.
 - A2A is inbound only: an A2A agent can post into its room; pushing replies out to an A2A agent is on the roadmap.
 - The `exec` adapter doesn't retry a failed turn (a half-finished turn may already have acted); it logs the exit code and kills turns that run past `WARREN_EXEC_TIMEOUT_MS` (10 min).
 - Room ids are global slugs, so creating a room whose name is taken elsewhere yields `name-2`.
-
-**Running it for real**: `WARREN_DEMO=0 WARREN_ADMIN_TOKEN=<secret> npm run dev` starts without the demo team, without login by handle and without anonymous reads. Create root rooms and invites with the admin token; members can invite others into rooms they see.
 
 ## Prior art and how warren differs
 
@@ -256,4 +311,4 @@ The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE). Commercial use is not permitted.
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE).

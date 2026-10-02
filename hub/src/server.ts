@@ -37,7 +37,12 @@ const INVITE_DAYS = 7;
 const RESET_HOURS = 24;
 
 const app = express();
-app.set("trust proxy", process.env.WARREN_TRUST_PROXY ?? true); // behind Cloudflare + Traefik, or Caddy
+// Which proxies may set X-Forwarded-For: by default only ones on private networks (Docker, Traefik, Caddy).
+app.set("trust proxy", process.env.WARREN_TRUST_PROXY ?? "loopback, linklocal, uniquelocal");
+// Behind a CDN that names the client in its own header (Cloudflare: cf-connecting-ip), set
+// WARREN_CLIENT_IP_HEADER, and only when the origin accepts traffic from that CDN alone.
+const CLIENT_IP_HEADER = process.env.WARREN_CLIENT_IP_HEADER?.toLowerCase();
+const clientIp = (req: Request) => String((CLIENT_IP_HEADER && req.headers[CLIENT_IP_HEADER]) || req.ip || "unknown");
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
@@ -59,20 +64,28 @@ function cookies(req: Request): Record<string, string> {
   const out: Record<string, string> = {};
   for (const part of (req.headers.cookie ?? "").split(";")) {
     const i = part.indexOf("=");
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i <= 0) continue;
+    try {
+      out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    } catch {} // malformed encoding: ignore that cookie
   }
   return out;
 }
 
 /** `Authorization: Bearer <token>`, or `?token=` (EventSource can't set headers). */
 function presentedToken(req: Request): string | undefined {
-  return req.headers.authorization?.replace(/^Bearer\s+/i, "") || (req.query.token as string | undefined) || undefined;
+  const q = req.query.token;
+  return req.headers.authorization?.replace(/^Bearer\s+/i, "") || (typeof q === "string" ? q : undefined) || undefined;
 }
 
 const sessionId = (req: Request) => cookies(req)[COOKIE];
 
-const sameSecret = (a: string | undefined, b: string | undefined) =>
-  !!a && !!b && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+function sameSecret(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false;
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 const isAdminToken = (req: Request) => sameSecret(presentedToken(req), ADMIN_TOKEN);
 
@@ -154,7 +167,7 @@ function clearSessionCookie(res: Response) {
 function limiter(max: number, windowMs: number) {
   const hits = new Map<string, number[]>();
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = `${req.path}|${req.headers["cf-connecting-ip"] ?? req.ip}`;
+    const key = `${req.route?.path ?? req.path}|${clientIp(req)}`;
     const now = Date.now();
     const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
     if (recent.length >= max) return void res.status(429).json({ error: "too many attempts, try again in a few minutes" });
@@ -242,7 +255,8 @@ app.post("/api/auth/login", signInLimit, (req, res) => {
 });
 
 app.post("/api/auth/logout", (req, res) => {
-  const id = sessionId(req);
+  const bearer = presentedToken(req);
+  const id = bearer?.startsWith("ws_") ? bearer : sessionId(req);
   if (id) store.endSession(id);
   clearSessionCookie(res);
   res.json({ ok: true });
@@ -321,7 +335,7 @@ async function invitePerson(req: Request, res: Response, inviter: store.Member |
   const org = String(b.org ?? inviter?.org ?? "").trim();
   if (!org) return void res.status(400).json({ error: "org is required" });
   if (role === "admin" && !admin) return void res.status(403).json({ error: "only an owner or admin can invite admins" });
-  if (room === null && !admin) return void res.status(403).json({ error: "pick a room to invite into" });
+  if (room === null && role === "member") return void res.status(400).json({ error: "pick a room to invite into; only admins see every room" });
   if (room !== null && !store.getRoom(room)) return void res.status(404).json({ error: `no such room ${room}` });
   if (room !== null && inviter && !store.canSee(inviter, room)) return void res.status(403).json({ error: `no access to room ${room}` });
   if (!admin && org !== inviter!.org)
@@ -396,20 +410,22 @@ app.post("/api/join/:code", signInLimit, (req, res) => {
   try {
     const passwordHash = hashPassword(checkPassword(b.password));
     if (!link.email && !b.email) throw new Error("email is required");
-    const m = store.addMember({
-      handle: b.handle || undefined,
-      name: b.name,
-      kind: "human",
-      org: link.org!,
-      scopeRoomId: link.scopeRoomId,
-      role: link.role ?? "member",
-      email: link.email ?? b.email,
-      passwordHash,
+    // Claim the link and create the account together: if either fails, neither happens.
+    const m = tx(() => {
+      if (!store.useLink(link.id, null)) throw new Error("this invite link was just used, revoked or has expired");
+      const created = store.addMember({
+        handle: b.handle || undefined,
+        name: b.name,
+        kind: "human",
+        org: link.org!,
+        scopeRoomId: link.scopeRoomId,
+        role: link.role ?? "member",
+        email: link.email ?? b.email,
+        passwordHash,
+      });
+      store.markLinkUser(link.id, created.handle);
+      return created;
     });
-    if (!store.useLink(link.id, m.handle)) {
-      store.disableMember(m.handle, "hub");
-      throw new Error("this invite link was just used");
-    }
     store.audit({ type: "member", roomId: m.scopeRoomId ?? "*", actor: m.handle, target: link.createdBy ?? undefined, detail: `@${m.handle} (${m.org}) joined` });
     setSessionCookie(req, res, m.handle);
     res.status(201).json(self(m));
@@ -431,7 +447,7 @@ app.post("/api/reset/:code", signInLimit, (req, res) => {
   if (!link || !m || m.disabled) return void res.status(404).json({ error: "this reset link is used up or expired" });
   try {
     const hash = hashPassword(checkPassword(req.body?.password));
-    if (!store.useLink(link.id, m.handle)) throw new Error("this reset link was just used");
+    if (!store.useLink(link.id, m.handle)) throw new Error("this reset link was just used or has expired");
     store.setPasswordHash(m.handle, hash);
     store.endSessions(m.handle);
     setSessionCookie(req, res, m.handle);
@@ -473,10 +489,10 @@ app.put("/api/users/:handle", (req, res) => {
     const nextRole = patch.role ?? target.role;
     if (nextRole === "admin" || nextRole === "owner") patch.scopeRoomId = null; // admins see every room
     else if ((patch.scopeRoomId ?? target.scopeRoomId) === null) throw new Error("a member needs a room; pick which part of the tree they see");
-    const updated = tx(() => {
-      if (b.role === "owner" && actor) store.updateMember(actor.handle, { role: "admin" });
-      return store.updateMember(target.handle, patch);
-    });
+    // Target first: if the patch is invalid nothing changed; demoting the old owner can't fail after it.
+    const updated = store.updateMember(target.handle, patch);
+    if (b.role === "owner" && actor) store.updateMember(actor.handle, { role: "admin" });
+    store.reconcileAgents(updated.handle, actorHandle);
     store.audit({ type: "member", roomId: "*", actor: actorHandle, target: target.handle, detail: `changed @${target.handle}: ${Object.keys(b).join(", ")}` });
     res.json(self(updated));
   } catch (e) {
@@ -520,7 +536,7 @@ function manageableAgent(req: Request, res: Response): { actor: store.Member | n
   if (actor === undefined) return;
   const agent = store.getMember(req.params.handle as string);
   if (!agent || agent.disabled || agent.kind !== "agent") return void res.status(404).json({ error: "no such agent" });
-  if (actor && !store.isAdmin(actor) && agent.owner !== actor.handle)
+  if (actor && !store.isAdmin(actor) && (agent.owner !== actor.handle || !store.canSee(actor, agent.scopeRoomId!) || agent.org !== actor.org))
     return void res.status(403).json({ error: `@${agent.handle} belongs to ${agent.owner ? "@" + agent.owner : "nobody"}; only they or an admin can change it` });
   return { actor, agent };
 }
@@ -618,7 +634,8 @@ app.get("/api/members", (req, res) => {
 app.get("/api/rooms", (req, res) => {
   const m = reader(req, res);
   if (m === false) return;
-  const limit = Math.min(Number(req.query.history ?? store.HISTORY) || store.HISTORY, store.HISTORY);
+  const asked = Math.floor(Number(req.query.history ?? store.HISTORY));
+  const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, store.HISTORY) : store.HISTORY;
   res.json((m ? store.visibleRooms(m) : store.allRooms()).map((r) => store.roomView(m, r, limit)));
 });
 
@@ -666,8 +683,8 @@ app.put("/api/rooms/:id", (req, res) => {
   const b = req.body ?? {};
   const actor = m?.handle ?? "admin-token";
   try {
+    if (m && !canRestructure(m, id)) throw new Error("the room your access starts at belongs to whoever invited you; ask them to rename or move it");
     if (b.parentId !== undefined) {
-      if (m && !canRestructure(m, id)) throw new Error("you can't move the room your access starts at");
       if (b.parentId === null && m && !(store.isAdmin(m) && m.scopeRoomId === null)) throw new Error("only an owner or admin can move a room to the top");
       if (b.parentId !== null && m && !store.canSee(m, b.parentId)) throw new Error(`no access to room ${b.parentId}`);
       if (b.parentId !== store.getRoom(id)!.parentId) store.moveRoom(id, b.parentId, actor);
@@ -800,7 +817,7 @@ app.post("/api/waitlist", async (req, res) => {
   const b = req.body ?? {};
   // Honeypot: a field people never see. Bots fill it; pretend it worked.
   if (b.website) return void res.status(201).json({ ok: true, position: waitlistCount() + 1 });
-  const ip = String(req.headers["cf-connecting-ip"] ?? req.ip ?? "unknown");
+  const ip = clientIp(req);
   try {
     const { position, already, entry } = joinWaitlist(b, ip);
     const confirmationSent = await sendWaitlistConfirmation(entry, position);
@@ -836,8 +853,15 @@ app.get("/api/events", (req: Request, res: Response) => {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
   res.write(": connected\n\n");
   const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-  // Access is re-read on every event: a member moved, paused or removed sees the change at once.
-  const live = () => (m ? store.getMember(m.handle) : undefined);
+  // Access is re-read on every event: a member moved, paused or removed, a session signed out
+  // or expired, a token replaced: the stream sees it at once (and closes on the next ping).
+  const token = presentedToken(req);
+  const credential = () => (token ? (token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token)) : store.sessionMember(sessionId(req)));
+  const live = () => {
+    if (!m) return undefined;
+    const me = credential();
+    return me?.handle === m.handle ? me : undefined;
+  };
 
   const onMessage = (msg: store.Message) => {
     const me = live();
@@ -857,14 +881,20 @@ app.get("/api/events", (req: Request, res: Response) => {
     const me = live();
     if (!mentionsOnly && (!m || (me && store.canSee(me, r.id)))) send("room", r);
   };
-  const onRoomDeleted = (r: { id: string }) => {
-    if (!mentionsOnly) send("room_deleted", r);
+  // The room is gone, so check what was above it: only those who saw it hear that it went.
+  const onRoomDeleted = (r: { id: string; parentId: string | null }) => {
+    const me = live();
+    if (mentionsOnly || (m && !(me && (me.scopeRoomId === null || (r.parentId && store.canSee(me, r.parentId)))))) return;
+    send("room_deleted", { id: r.id });
   };
   // Other members are only visible to those who share a room with them.
   const knows = (handle: string) => {
     const me = live();
     const other = store.getMember(handle);
-    return !m || (!!me && !!other && (other.handle === me.handle || other.disabled || store.sharesRoom(me, other)));
+    if (!m) return true;
+    if (!me || !other) return false;
+    // A removed member is announced to those who shared a room with them while they were active.
+    return other.handle === me.handle || store.sharesRoom(me, other.disabled ? { ...other, disabled: false } : other);
   };
   const onMember = (pm: store.PublicMember) => {
     if (!mentionsOnly && knows(pm.handle)) send("member", pm);
@@ -892,7 +922,7 @@ app.get("/api/events", (req: Request, res: Response) => {
     ["audit", onAudit],
     ["kick", onKick],
   ];
-  const ping = setInterval(() => res.write(": ping\n\n"), 15_000);
+  const ping = setInterval(() => (m && !live() ? res.end() : res.write(": ping\n\n")), 15_000);
   for (const [e, fn] of handlers) store.events.on(e, fn);
   if (m) store.trackConnection(m, 1);
   req.on("close", () => {

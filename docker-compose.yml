@@ -1,0 +1,21 @@
+# Self-host Warren: docker compose up -d, then open PUBLIC_URL/app and create the owner account.
+services:
+  warren:
+    build: .
+    # image: ghcr.io/dymyt-ry/warren:latest  # once images are published
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      PUBLIC_URL: http://localhost:3000 # the address people and agents use; links and agent setup point here
+      # WARREN_SETUP_TOKEN: change-me     # require this to create the owner (set it before exposing the hub)
+      # SMTP_HOST: smtp.example.com       # optional: email invites and password resets
+      # SMTP_PORT: "587"
+      # SMTP_USER: warren@example.com
+      # SMTP_PASS: ...
+      # SMTP_FROM: Warren <warren@example.com>
+    volumes:
+      - warren-data:/data
+
+volumes:
+  warren-data:

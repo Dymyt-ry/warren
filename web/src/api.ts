@@ -1,19 +1,25 @@
-// Client for the hub's REST + SSE API. Contract: collab.md (types mirror hub/src/store.ts).
-import { useEffect, useRef, useState } from "react";
+// Client for the hub's REST + SSE API (types mirror hub/src/store.ts).
+// People are signed in by an httpOnly session cookie, so nothing secret lives in the page.
+import { useEffect, useState } from "react";
 
 export type MemberKind = "human" | "agent";
 export type MessageKind = "note" | "contract_change" | "question" | "done";
 export type Adapter = "channel" | "exec" | "inbox" | "a2a" | "dashboard";
+export type Role = "owner" | "admin" | "member";
 
 export interface Member {
   handle: string;
   name: string;
   kind: MemberKind;
   org: string;
-  scopeRoomId: string;
+  scopeRoomId: string | null; // null: every room
   adapter: Adapter;
+  role?: Role | null;
+  owner?: string | null; // agents: the person who added them
+  email?: string | null; // only about yourself, or for admins
   online?: boolean;
   paused?: boolean;
+  disabled?: boolean;
 }
 export type SafetyStatus = "delivered" | "held" | "released" | "rejected";
 export interface Safety {
@@ -28,7 +34,7 @@ export interface RoomPolicy {
 export interface AuditEvent {
   id: string;
   at: string;
-  type: "held" | "released" | "rejected" | "redacted" | "paused" | "resumed" | "policy";
+  type: "held" | "released" | "rejected" | "redacted" | "paused" | "resumed" | "policy" | "room" | "member";
   roomId: string;
   actor: string;
   target?: string;
@@ -55,78 +61,125 @@ export interface Room {
   context: string;
   messages: Message[];
   policy?: RoomPolicy;
+  createdBy?: string | null;
 }
-
-const TOKEN_KEY = "warren.token";
-
-export function storedToken(): string | null {
-  try {
-    return localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+export interface HubConfig {
+  dashboard: boolean;
+  demo: boolean;
+  needsSetup: boolean;
+  setupToken: boolean;
+  instanceName: string;
+  email: boolean;
+  version: string;
 }
-export function storeToken(token: string | null) {
-  try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
-    else localStorage.removeItem(TOKEN_KEY);
-  } catch {
-    /* private mode: identity lasts for this tab only */
-  }
+export interface Invite {
+  id: string;
+  email: string | null;
+  org: string | null;
+  room: string | null;
+  roomName: string | null;
+  role: Role | null;
+  invitedBy: string | null;
+  createdAt: string;
+  expiresAt: string;
+  url?: string; // only right after creating it
+  emailed?: boolean;
 }
+export interface Setup {
+  claudeCode: { mcpJson: unknown; launch: string };
+  codex: { mcp: string; wake: string };
+  cursor: { mcpJson: unknown; wake: string };
+  a2a: { card: string; auth: string };
+}
+export type NewAgent = Member & { token: string; setup: Setup };
+export type User = Member & { agents: number };
 
-async function call<T>(path: string, token: string | null, init: RequestInit = {}): Promise<T> {
+async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(path, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...init.headers,
-    },
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...init.headers },
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error ?? `hub answered ${res.status}`);
+  if (!res.ok) throw new ApiError(body.error ?? `hub answered ${res.status}`, res.status);
   return body as T;
 }
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+const send = (method: string, body?: unknown): RequestInit => ({ method, body: body === undefined ? undefined : JSON.stringify(body) });
+const enc = encodeURIComponent;
+
 export const api = {
-  login: (handle: string) => call<Member & { token: string }>("/api/login", null, { method: "POST", body: JSON.stringify({ handle }) }),
-  me: (token: string) => call<Member>("/api/me", token),
-  members: () => call<Member[]>("/api/members", null),
-  roomMembers: (room: string) => call<Member[]>(`/api/members?room=${encodeURIComponent(room)}`, null),
-  rooms: (token: string | null) => call<Room[]>("/api/rooms", token),
-  post: (token: string, room: string, kind: MessageKind, text: string) =>
-    call<Message>(`/api/rooms/${encodeURIComponent(room)}/messages`, token, { method: "POST", body: JSON.stringify({ kind, text }) }),
-  setContext: (token: string, room: string, context: string) =>
-    call<Room>(`/api/rooms/${encodeURIComponent(room)}/context`, token, { method: "PUT", body: JSON.stringify({ context }) }),
-  createRoom: (token: string, parentId: string, name: string) =>
-    call<Room>("/api/rooms", token, { method: "POST", body: JSON.stringify({ parentId, name }) }),
-  review: (token: string, messageId: string, decision: "release" | "reject") =>
-    call<Message>(`/api/messages/${encodeURIComponent(messageId)}/review`, token, { method: "POST", body: JSON.stringify({ decision }) }),
-  pause: (token: string, handle: string, paused: boolean) =>
-    call<Member>(`/api/members/${encodeURIComponent(handle)}/pause`, token, { method: "POST", body: JSON.stringify({ paused }) }),
-  setPolicy: (token: string, room: string, policy: RoomPolicy) =>
-    call<RoomPolicy>(`/api/rooms/${encodeURIComponent(room)}/policy`, token, { method: "PUT", body: JSON.stringify(policy) }),
-  audit: (token: string | null) => call<AuditEvent[]>("/api/audit", token),
+  config: () => call<HubConfig>("/api/config"),
+  setup: (body: { name: string; org: string; email: string; password: string; room?: string; handle?: string; instanceName?: string; setupToken?: string }) =>
+    call<Member>("/api/setup", send("POST", body)),
+  signIn: (email: string, password: string) => call<Member>("/api/auth/login", send("POST", { email, password })),
+  signOut: () => call<{ ok: true }>("/api/auth/logout", send("POST", {})),
+  demoLogin: (handle: string) => call<Member>("/api/login", send("POST", { handle })),
+  me: () => call<Member>("/api/me"),
+  updateMe: (name: string) => call<Member>("/api/me", send("PUT", { name })),
+  changePassword: (current: string, password: string) => call<{ ok: true }>("/api/me/password", send("POST", { current, password })),
+
+  joinInfo: (code: string) =>
+    call<{ instanceName: string; org: string; room: string | null; role: Role; email: string | null; invitedBy: string | null; expiresAt: string }>(`/api/join/${enc(code)}`),
+  join: (code: string, body: { name: string; email?: string; handle?: string; password: string }) => call<Member>(`/api/join/${enc(code)}`, send("POST", body)),
+  resetInfo: (code: string) => call<{ instanceName: string; email: string; name: string }>(`/api/reset/${enc(code)}`),
+  reset: (code: string, password: string) => call<Member>(`/api/reset/${enc(code)}`, send("POST", { password })),
+
+  users: () => call<User[]>("/api/users"),
+  updateUser: (handle: string, patch: { role?: Role; room?: string | null; org?: string; name?: string }) =>
+    call<Member>(`/api/users/${enc(handle)}`, send("PUT", patch)),
+  removeUser: (handle: string) => call<{ ok: true }>(`/api/users/${enc(handle)}`, send("DELETE")),
+  resetLink: (handle: string) => call<{ url: string; emailed: boolean; expiresAt: string }>(`/api/users/${enc(handle)}/reset`, send("POST", {})),
+
+  invites: () => call<Invite[]>("/api/invites"),
+  invite: (body: { email?: string; org?: string; room?: string | null; role?: Role }) => call<Invite>("/api/invites", send("POST", { kind: "human", ...body })),
+  revokeInvite: (id: string) => call<{ ok: true }>(`/api/invites/${enc(id)}`, send("DELETE")),
+
+  agents: () => call<Member[]>("/api/agents"),
+  addAgent: (body: { name: string; handle?: string; room: string; adapter: Adapter; org?: string }) => call<NewAgent>("/api/agents", send("POST", body)),
+  rotateAgent: (handle: string) => call<NewAgent>(`/api/agents/${enc(handle)}/token`, send("POST", {})),
+  updateAgent: (handle: string, patch: { name?: string; room?: string; adapter?: Adapter }) => call<Member>(`/api/agents/${enc(handle)}`, send("PUT", patch)),
+  removeAgent: (handle: string) => call<{ ok: true }>(`/api/agents/${enc(handle)}`, send("DELETE")),
+
+  members: () => call<Member[]>("/api/members"),
+  roomMembers: (room: string) => call<Member[]>(`/api/members?room=${enc(room)}`),
+  rooms: () => call<Room[]>("/api/rooms"),
+  createRoom: (parentId: string | null, name: string, context = "") => call<Room>("/api/rooms", send("POST", { parentId, name, context })),
+  updateRoom: (room: string, patch: { name?: string; parentId?: string | null }) => call<Room>(`/api/rooms/${enc(room)}`, send("PUT", patch)),
+  deleteRoom: (room: string) => call<{ deleted: string[] }>(`/api/rooms/${enc(room)}`, send("DELETE")),
+  post: (room: string, kind: MessageKind, text: string) => call<Message>(`/api/rooms/${enc(room)}/messages`, send("POST", { kind, text })),
+  setContext: (room: string, context: string) => call<Room>(`/api/rooms/${enc(room)}/context`, send("PUT", { context })),
+  review: (messageId: string, decision: "release" | "reject") => call<Message>(`/api/messages/${enc(messageId)}/review`, send("POST", { decision })),
+  pause: (handle: string, paused: boolean) => call<Member>(`/api/members/${enc(handle)}/pause`, send("POST", { paused })),
+  setPolicy: (room: string, policy: RoomPolicy) => call<RoomPolicy>(`/api/rooms/${enc(room)}/policy`, send("PUT", policy)),
+  audit: () => call<AuditEvent[]>("/api/audit"),
   joinWaitlist: (body: { email: string; name?: string; company?: string; useCase?: string; website?: string }) =>
-    call<{ ok: boolean; position: number; already?: boolean; confirmationSent?: boolean }>("/api/waitlist", null, { method: "POST", body: JSON.stringify(body) }),
-  waitlistCount: () => call<{ count: number }>("/api/waitlist/count", null),
+    call<{ ok: boolean; position: number; already?: boolean; confirmationSent?: boolean }>("/api/waitlist", send("POST", body)),
+  waitlistCount: () => call<{ count: number }>("/api/waitlist/count"),
 };
 
 export type HubStatus = "loading" | "live" | "offline";
 
 /**
- * Rooms and members for the current viewer, kept live over SSE.
+ * Rooms and members for the current viewer, kept live over SSE. `who` is the
+ * signed-in handle (null: demo overview); changing it reloads everything.
  * The hub never echoes a member's own messages, so posts are added from the POST response.
  */
-export function useHub(token: string | null) {
+export function useHub(who: string | null, enabled = true) {
   const [rooms, setRooms] = useState<Record<string, Room>>({});
   const [members, setMembers] = useState<Record<string, Member>>({});
   const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [status, setStatus] = useState<HubStatus>("loading");
   const [error, setError] = useState<string | null>(null);
-  const tokenRef = useRef(token);
-  tokenRef.current = token;
 
   const addMessage = (m: Message) =>
     setRooms((prev) => {
@@ -145,14 +198,28 @@ export function useHub(token: string | null) {
       return { ...prev, [m.roomId]: { ...room, messages } };
     });
 
+  /** Merge a room (new, renamed, moved, new context or claims) without dropping its messages. */
+  const upsertRoom = (r: Partial<Room> & { id: string }) =>
+    setRooms((prev) => ({ ...prev, [r.id]: { ...prev[r.id], ...r, messages: prev[r.id]?.messages ?? r.messages ?? [] } as Room }));
+
+  const removeRooms = (ids: string[]) =>
+    setRooms((prev) => {
+      const next = { ...prev };
+      for (const id of ids) delete next[id];
+      return next;
+    });
+
   useEffect(() => {
+    if (!enabled) return;
     let closed = false;
     setStatus("loading");
+    setRooms({});
+    setAudit([]);
     api
-      .audit(token)
+      .audit()
       .then((a) => !closed && setAudit(a))
       .catch(() => {});
-    Promise.all([api.rooms(token), api.members()])
+    Promise.all([api.rooms(), api.members()])
       .then(([rs, ms]) => {
         if (closed) return;
         setRooms(Object.fromEntries(rs.map((r) => [r.id, r])));
@@ -161,17 +228,22 @@ export function useHub(token: string | null) {
       })
       .catch((e) => !closed && (setStatus("offline"), setError((e as Error).message)));
 
-    const es = new EventSource(`/api/events${token ? `?token=${encodeURIComponent(token)}` : ""}`);
+    const es = new EventSource("/api/events");
     es.onopen = () => !closed && setStatus("live");
     es.onerror = () => !closed && setStatus("offline");
     es.addEventListener("message", (e) => addMessage(JSON.parse((e as MessageEvent).data)));
-    es.addEventListener("room", (e) => {
-      const r: Room = JSON.parse((e as MessageEvent).data);
-      setRooms((prev) => ({ ...prev, [r.id]: { ...r, messages: prev[r.id]?.messages ?? r.messages } }));
-    });
+    es.addEventListener("room", (e) => upsertRoom(JSON.parse((e as MessageEvent).data)));
+    es.addEventListener("room_deleted", (e) => removeRooms([JSON.parse((e as MessageEvent).data).id]));
     es.addEventListener("member", (e) => {
       const m: Member = JSON.parse((e as MessageEvent).data);
-      setMembers((prev) => ({ ...prev, [m.handle]: { ...prev[m.handle], ...m } }));
+      setMembers((prev) => {
+        if (m.disabled) {
+          const next = { ...prev };
+          delete next[m.handle];
+          return next;
+        }
+        return { ...prev, [m.handle]: { ...prev[m.handle], ...m } };
+      });
     });
     es.addEventListener("message_update", (e) => updateMessage(JSON.parse((e as MessageEvent).data)));
     es.addEventListener("presence", (e) => {
@@ -186,14 +258,36 @@ export function useHub(token: string | null) {
       closed = true;
       es.close();
     };
-  }, [token]);
+  }, [who, enabled]);
 
-  return { rooms, members, audit, status, error, addMessage, updateMessage, setMembers, setRooms };
+  return { rooms, members, audit, status, error, addMessage, updateMessage, upsertRoom, removeRooms, setMembers };
 }
 
-/** The human who runs an agent, by handle suffix: claude-anna belongs to anna. */
+/** The person who runs an agent. */
 export function ownerOf(agent: Member, members: Record<string, Member>): Member | undefined {
-  const suffix = agent.handle.split("-").at(-1);
-  const owner = suffix ? members[suffix] : undefined;
+  const owner = agent.owner ? members[agent.owner] : undefined;
   return owner?.kind === "human" ? owner : undefined;
+}
+
+/** "a / b / c": where a room sits in the tree. */
+export function roomPath(id: string | null, rooms: Record<string, Room>): string {
+  if (id === null) return "every room";
+  const names: string[] = [];
+  for (let r: Room | undefined = rooms[id]; r; r = r.parentId ? rooms[r.parentId] : undefined) names.unshift(r.name);
+  return names.join(" / ") || id;
+}
+
+/** Rooms in tree order with their depth, for pickers. */
+export function roomOptions(rooms: Record<string, Room>): { room: Room; depth: number }[] {
+  const children: Record<string, Room[]> = {};
+  for (const r of Object.values(rooms)) (children[r.parentId && rooms[r.parentId] ? r.parentId : "root"] ??= []).push(r);
+  const out: { room: Room; depth: number }[] = [];
+  const walk = (parent: string, depth: number) => {
+    for (const r of children[parent] ?? []) {
+      out.push({ room: r, depth });
+      walk(r.id, depth + 1);
+    }
+  };
+  walk("root", 0);
+  return out;
 }
