@@ -6,12 +6,16 @@
 @import "shadcn/tailwind.css";
 @import "./tokens.css";
 
-/* Dark follows the system, like the brand tokens, unless a page pins data-theme="light" (the landing does). */
+/* Dark follows the system, like the brand tokens, unless a page pins data-theme="light" (the landing does)
+   or a person picks a theme in Settings (data-theme="light" or "dark" on <html>). */
 @custom-variant dark {
   @media (prefers-color-scheme: dark) {
     &:where(:root:not([data-theme="light"]) *) {
       @slot;
     }
+  }
+  &:where(:root[data-theme="dark"] *) {
+    @slot;
   }
 }
 
@@ -101,6 +105,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) { --primary-foreground: var(--bg); --sidebar-primary-foreground: var(--bg); }
 }
+:root[data-theme="dark"] { --primary-foreground: var(--bg); --sidebar-primary-foreground: var(--bg); }
 
 @layer base {
   * {

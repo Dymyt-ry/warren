@@ -5,7 +5,8 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Logo } from "./Logo";
-import { api, type HubConfig, type Member } from "./api";
+import { t } from "./i18n";
+import { api, ApiError, type HubConfig, type Member } from "./api";
 
 export function Field({
   label,
@@ -69,27 +70,27 @@ export function SetupScreen({ config, onDone }: { config: HubConfig; onDone: (m:
   );
   return (
     <Screen
-      title="Set up your hub"
-      lead="You're the first one here, so you become its owner. You'll invite your team, other companies and their agents next."
+      title={t("Set up your hub")}
+      lead={t("You're the first one here, so you become its owner. You'll invite your team, other companies and their agents next.")}
     >
       <form className="flex flex-col gap-5" onSubmit={onSubmit}>
-        <Field label="Your name">
+        <Field label={t("Your name")}>
           <Input className="h-10" required autoFocus autoComplete="name" value={f.name} onChange={set("name")} />
         </Field>
-        <Field label="Your company" hint="People and agents of other companies show up as guests next to this name.">
+        <Field label={t("Your company")} hint={t("People and agents of other companies show up as guests next to this name.")}>
           <Input className="h-10" required autoComplete="organization" value={f.org} onChange={set("org")} />
         </Field>
-        <Field label="Email">
+        <Field label={t("Email")}>
           <Input className="h-10" required type="email" autoComplete="email" value={f.email} onChange={set("email")} />
         </Field>
-        <Field label="Password" hint={PASSWORD_HINT}>
+        <Field label={t("Password")} hint={PASSWORD_HINT}>
           <Input className="h-10" required type="password" minLength={10} autoComplete="new-password" value={f.password} onChange={set("password")} />
         </Field>
-        <Field label="First room" hint="The top of your tree, usually a product or a client. Leave empty to name it after your company.">
+        <Field label={t("First room")} hint={t("The top of your tree, usually a product or a client. Leave empty to name it after your company.")}>
           <Input className="h-10" placeholder={f.org || "shop"} value={f.room} onChange={set("room")} />
         </Field>
         {config.setupToken && (
-          <Field label="Setup token" hint="Set in the hub's environment as WARREN_SETUP_TOKEN.">
+          <Field label={t("Setup token")} hint={t("Set in the hub's environment as WARREN_SETUP_TOKEN.")}>
             <Input className="h-10" required type="password" value={f.setupToken} onChange={set("setupToken")} />
           </Field>
         )}
@@ -105,16 +106,30 @@ export function SetupScreen({ config, onDone }: { config: HubConfig; onDone: (m:
 export function SignInScreen({ config, onDone }: { config: HubConfig; onDone: (m: Member) => void }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const { busy, error, onSubmit } = useSubmit(async () => onDone(await api.signIn(email, password)));
+  const [code, setCode] = useState("");
+  const [needCode, setNeedCode] = useState(false);
+  const { busy, error, onSubmit } = useSubmit(async () => {
+    try {
+      onDone(await api.signIn(email, password, code || undefined));
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401 && /code/i.test(e.message)) setNeedCode(true);
+      throw e;
+    }
+  });
   return (
     <Screen title={`Sign in to ${config.instanceName}`}>
       <form className="flex flex-col gap-5" onSubmit={onSubmit}>
-        <Field label="Email">
+        <Field label={t("Email")}>
           <Input className="h-10" required autoFocus type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         </Field>
-        <Field label="Password">
+        <Field label={t("Password")}>
           <Input className="h-10" required type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
+        {needCode && (
+          <Field label={t("Code from your authenticator app")} hint={t("Or one of your recovery codes.")}>
+            <Input className="h-10" required autoFocus autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
+          </Field>
+        )}
         {error && <p className="error">{error}</p>}
         <Button type="submit" size="lg" className="h-10" disabled={busy}>
           {busy ? "Signing in" : "Sign in"}
@@ -142,8 +157,8 @@ export function JoinScreen({ code, onDone }: { code: string; onDone: (m: Member)
     onDone(await api.join(code, { name: f.name, password: f.password, email: info?.email ? undefined : f.email })),
   );
 
-  if (gone) return <Screen title="This invite doesn't work anymore" lead={`${gone[0].toUpperCase()}${gone.slice(1)}. Ask whoever sent it for a new one.`}>{null}</Screen>;
-  if (!info) return <Screen title="Opening your invite">{null}</Screen>;
+  if (gone) return <Screen title={t("This invite doesn't work anymore")} lead={`${gone[0].toUpperCase()}${gone.slice(1)}. Ask whoever sent it for a new one.`}>{null}</Screen>;
+  if (!info) return <Screen title={t("Opening your invite")}>{null}</Screen>;
   const where = info.role === "admin" ? "as an admin, with access to every room" : info.room ? `to ${info.room}` : "";
   return (
     <Screen
@@ -156,17 +171,17 @@ export function JoinScreen({ code, onDone }: { code: string; onDone: (m: Member)
       }
     >
       <form className="flex flex-col gap-5" onSubmit={onSubmit}>
-        <Field label="Your name">
+        <Field label={t("Your name")}>
           <Input className="h-10" required autoFocus autoComplete="name" value={f.name} onChange={set("name")} />
         </Field>
-        <Field label="Email">
+        <Field label={t("Email")}>
           {info.email ? (
             <Input className="h-10" disabled value={info.email} />
           ) : (
             <Input className="h-10" required type="email" autoComplete="email" value={f.email} onChange={set("email")} />
           )}
         </Field>
-        <Field label="Password" hint={PASSWORD_HINT}>
+        <Field label={t("Password")} hint={PASSWORD_HINT}>
           <Input className="h-10" required type="password" minLength={10} autoComplete="new-password" value={f.password} onChange={set("password")} />
         </Field>
         {error && <p className="error">{error}</p>}
@@ -187,13 +202,13 @@ export function ResetScreen({ code, onDone }: { code: string; onDone: (m: Member
   }, [code]);
   const { busy, error, onSubmit } = useSubmit(async () => onDone(await api.reset(code, password)));
 
-  if (gone) return <Screen title="This link doesn't work anymore" lead="Reset links work once and for a day. Ask an admin for a new one.">{null}</Screen>;
-  if (!info) return <Screen title="Opening your link">{null}</Screen>;
+  if (gone) return <Screen title={t("This link doesn't work anymore")} lead={t("Reset links work once and for a day. Ask an admin for a new one.")}>{null}</Screen>;
+  if (!info) return <Screen title={t("Opening your link")}>{null}</Screen>;
   return (
-    <Screen title="Set a new password" lead={`For ${info.email} on ${info.instanceName}. You'll be signed out everywhere else.`}>
+    <Screen title={t("Set a new password")} lead={`For ${info.email} on ${info.instanceName}. You'll be signed out everywhere else.`}>
       <form className="flex flex-col gap-5" onSubmit={onSubmit}>
         <input type="email" hidden readOnly autoComplete="username" value={info.email} />
-        <Field label="New password" hint={PASSWORD_HINT}>
+        <Field label={t("New password")} hint={PASSWORD_HINT}>
           <Input className="h-10" required autoFocus type="password" minLength={10} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} />
         </Field>
         {error && <p className="error">{error}</p>}

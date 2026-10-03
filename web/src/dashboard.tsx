@@ -1,9 +1,10 @@
 // Dashboard (Operate mode): the room tree, one room's thread with a composer, and who is in the room.
 // Built from shadcn primitives mapped onto the brand tokens (index.css). People sign in with their
 // account (first run: owner setup); a demo hub lets you pick who you are. Design rules: web/DESIGN.md.
-import { StrictMode, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { createRoot } from "react-dom/client";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
+  CheckIcon,
+  ClockIcon,
   GearSixIcon,
   LockSimpleIcon,
   PaperPlaneRightIcon,
@@ -49,6 +50,7 @@ import { Avatar, KindTag, MentionText } from "./ui";
 import { JoinScreen, ResetScreen, SetupScreen, SignInScreen } from "./account";
 import { AgentDialog, InviteDialog, NewRoomDialog, RoomSettingsDialog } from "./dialogs";
 import { Settings } from "./settings";
+import { applyTheme, plural, savedTheme, setLanguage, t, useLanguage } from "./i18n";
 
 const OVERVIEW = "__overview";
 const SETTINGS = "__settings";
@@ -57,9 +59,12 @@ const isForMe = (m: Msg, handle: string) => m.from !== handle && (m.forYou || m.
 const isAdmin = (m: Member | null) => m?.role === "owner" || m?.role === "admin";
 
 /** Decides what to show before the dashboard: a link being opened, first-run setup, or sign-in. */
-function App() {
+export function App() {
   const params = new URLSearchParams(location.search);
   const [link, setLink] = useState(() => ({ invite: params.get("invite"), reset: params.get("reset") }));
+  const [review] = useState(() => params.get("review"));
+  useLanguage();
+  useEffect(() => applyTheme(savedTheme()), []);
   const [config, setConfig] = useState<HubConfig | null>(null);
   const [me, setMe] = useState<Member | null | undefined>(undefined); // undefined while loading
   const [offline, setOffline] = useState<string | null>(null);
@@ -69,9 +74,16 @@ function App() {
     api.me().then(setMe, () => setMe(null));
   }, []);
 
+  // Your saved settings follow you to every device.
+  useEffect(() => {
+    if (!me?.prefs) return;
+    setLanguage(me.prefs.language);
+    applyTheme(me.prefs.theme);
+  }, [me?.prefs?.language, me?.prefs?.theme]);
+
   /** Signed in (or out): drop the one-time link from the address bar. */
   const enter = (m: Member | null) => {
-    if (link.invite || link.reset) history.replaceState(null, "", "/app");
+    if (link.invite || link.reset) history.replaceState(null, "", review ? `/app?review=${review}` : "/app");
     setLink({ invite: null, reset: null });
     setConfig((c) => (c ? { ...c, needsSetup: false } : c));
     setMe(m);
@@ -81,9 +93,9 @@ function App() {
     return (
       <Empty className="h-dvh">
         <EmptyHeader>
-          <EmptyTitle>The hub isn't answering</EmptyTitle>
+          <EmptyTitle>{t("The hub isn't answering")}</EmptyTitle>
           <EmptyDescription>
-            Start it with <Kbd>npm run dev</Kbd> in the repo, then reload. ({offline})
+            {t("Start it with")} <Kbd>npm run dev</Kbd> {t("in the repo, then reload.")} ({offline})
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -93,15 +105,35 @@ function App() {
   if (link.reset) return <ResetScreen code={link.reset} onDone={enter} />;
   if (config.needsSetup) return <SetupScreen config={config} onDone={enter} />;
   if (!me && !config.demo) return <SignInScreen config={config} onDone={enter} />;
-  return <Dashboard config={config} me={me} onMe={enter} />;
+  return <Dashboard config={config} me={me} onMe={enter} review={review} onConfig={(c) => setConfig((x) => (x ? { ...x, ...c } : x))} />;
 }
 
-function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null; onMe: (m: Member | null) => void }) {
+function Dashboard({
+  config,
+  me,
+  onMe,
+  review,
+  onConfig,
+}: {
+  config: HubConfig;
+  me: Member | null;
+  onMe: (m: Member | null) => void;
+  review: string | null;
+  onConfig: (c: Partial<HubConfig>) => void;
+}) {
   const { rooms, members, audit, status, error, addMessage, updateMessage, upsertRoom, removeRooms } = useHub(me?.handle ?? null);
   const [selected, setSelected] = useState<string | null>(null);
   const [newTop, setNewTop] = useState(false);
   const accounts = !config.demo;
   const canAddTop = !!me && isAdmin(me) && me.scopeRoomId === null;
+
+  // A review link opens the room of that message.
+  const [focus, setFocus] = useState<string | null>(review);
+  useEffect(() => {
+    if (!focus) return;
+    const room = Object.values(rooms).find((r) => r.messages.some((x) => x.id === focus));
+    if (room) setSelected(room.id);
+  }, [rooms, focus]);
 
   // Open where you're needed: a room that mentions you, else the latest activity, else the top room.
   useEffect(() => {
@@ -148,14 +180,14 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
 
           {!accounts && (
             <div className="flex flex-col gap-1.5 px-1">
-              <span className="px-1 text-xs font-medium text-muted-foreground">You are</span>
+              <span className="px-1 text-xs font-medium text-muted-foreground">{t("You are")}</span>
               <Select value={me?.handle ?? OVERVIEW} onValueChange={pickPerson}>
-                <SelectTrigger className="w-full" aria-label="You are">
+                <SelectTrigger className="w-full" aria-label={t("You are")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectLabel>People</SelectLabel>
+                    <SelectLabel>{t("People")}</SelectLabel>
                     {people.map((p) => (
                       <SelectItem key={p.handle} value={p.handle}>
                         {p.name} <span className="text-muted-foreground">{p.org}</span>
@@ -163,18 +195,18 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
                     ))}
                   </SelectGroup>
                   <SelectGroup>
-                    <SelectItem value={OVERVIEW}>Nobody, just looking</SelectItem>
+                    <SelectItem value={OVERVIEW}>{t("Nobody, just looking")}</SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>
             </div>
           )}
 
-          <nav aria-label="Rooms" className="min-h-0 md:flex-1 md:overflow-y-auto">
+          <nav aria-label={t("Rooms")} className="min-h-0 md:flex-1 md:overflow-y-auto">
             <div className="mb-1 flex h-7 items-center justify-between pr-1 pl-3">
-              <p className="m-0 text-xs font-medium text-muted-foreground">Rooms</p>
+              <p className="m-0 text-xs font-medium text-muted-foreground">{t("Rooms")}</p>
               {canAddTop && (
-                <Button variant="ghost" size="icon-xs" aria-label="New top-level room" title="New top-level room" onClick={() => setNewTop(true)}>
+                <Button variant="ghost" size="icon-xs" aria-label={t("New top-level room")} title={t("New top-level room")} onClick={() => setNewTop(true)}>
                   <PlusIcon weight="bold" />
                 </Button>
               )}
@@ -185,7 +217,7 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
           {me && accounts && (
             <div className="hidden flex-col gap-1 md:flex">
               <button
-                onClick={() => setSelected(SETTINGS)}
+                onClick={() => (setSelected(SETTINGS), setFocus(null))}
                 aria-current={selected === SETTINGS ? "page" : undefined}
                 className={cn(
                   "flex h-11 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-accent",
@@ -201,11 +233,11 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
               </button>
               <div className="flex items-center justify-between px-2">
                 <p role="status" className={cn("m-0 text-xs text-muted-foreground", status === "offline" && "text-coral")}>
-                  {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
+                  {status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
                 </p>
                 <Button variant="ghost" size="xs" onClick={signOut}>
                   <SignOutIcon data-icon="inline-start" />
-                  Sign out
+                  {t("Sign out")}
                 </Button>
               </div>
             </div>
@@ -214,36 +246,37 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
             <div className="flex gap-2 px-1 md:hidden">
               <Button variant="ghost" size="sm" onClick={() => setSelected(SETTINGS)}>
                 <GearSixIcon data-icon="inline-start" />
-                Settings
+                {t("Settings")}
               </Button>
               <Button variant="ghost" size="sm" onClick={signOut}>
                 <SignOutIcon data-icon="inline-start" />
-                Sign out
+                {t("Sign out")}
               </Button>
             </div>
           )}
           {!accounts && (
             <p role="status" className={cn("hidden px-3 text-xs text-muted-foreground md:block", status === "offline" && "text-coral")}>
-              {status === "live" ? "Live" : status === "loading" ? "Connecting to the hub" : "Hub offline"}
+              {status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
             </p>
           )}
         </aside>
 
         <main className="min-h-0 min-w-0">
           {selected === SETTINGS && me ? (
-            <Settings me={me} config={config} rooms={rooms} members={members} onMe={onMe} />
+            <Settings me={me} config={config} rooms={rooms} members={members} onMe={onMe} onConfig={onConfig} />
           ) : status === "offline" && Object.keys(rooms).length === 0 ? (
             <Empty className="h-full">
               <EmptyHeader>
-                <EmptyTitle>The hub isn't answering</EmptyTitle>
+                <EmptyTitle>{t("The hub isn't answering")}</EmptyTitle>
                 <EmptyDescription>
-                  Start it with <Kbd>npm run dev</Kbd> in the repo, then reload.{error && ` (${error})`}
+                  {t("Start it with")} <Kbd>npm run dev</Kbd> {t("in the repo, then reload.")}{error && ` (${error})`}
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : room ? (
             <RoomView
               key={room.id}
+              focus={focus}
               room={room}
               rooms={rooms}
               members={members}
@@ -265,19 +298,19 @@ function Dashboard({ config, me, onMe }: { config: HubConfig; me: Member | null;
           ) : (
             <Empty className="h-full">
               <EmptyHeader>
-                <EmptyTitle>{status === "loading" ? "Loading rooms" : canAddTop ? "Start your tree" : "No rooms you can see"}</EmptyTitle>
+                <EmptyTitle>{status === "loading" ? t("Loading rooms") : canAddTop ? t("Start your tree") : t("No rooms you can see")}</EmptyTitle>
                 {status !== "loading" && (
                   <EmptyDescription>
                     {canAddTop
                       ? "A top-level room is usually a product or a client. Rooms inside it are for tasks, and each one can have different people and agents."
-                      : "Ask whoever invited you to give you access to a room."}
+                      : t("Ask whoever invited you to give you access to a room.")}
                   </EmptyDescription>
                 )}
               </EmptyHeader>
               {canAddTop && status !== "loading" && (
                 <Button onClick={() => setNewTop(true)}>
                   <PlusIcon data-icon="inline-start" weight="bold" />
-                  New room
+                  {t("New room")}
                 </Button>
               )}
             </Empty>
@@ -366,7 +399,9 @@ function RoomView({
   onContext,
   onNewRoom,
   onDeleted,
+  focus,
 }: {
+  focus?: string | null;
   room: Room;
   rooms: Record<string, Room>;
   members: Record<string, Member>;
@@ -414,17 +449,17 @@ function RoomView({
             {me && (
               <Button variant="ghost" size="sm" onClick={open("room")}>
                 <PlusIcon data-icon="inline-start" weight="bold" />
-                New room inside
+                {t("New room inside")}
               </Button>
             )}
             {person && (
               <Button variant="ghost" size="sm" onClick={open("invite")}>
                 <UserPlusIcon data-icon="inline-start" />
-                Invite
+                {t("Invite")}
               </Button>
             )}
             {person && (person.scopeRoomId === null || person.scopeRoomId !== room.id) && (
-              <Button variant="ghost" size="icon-sm" aria-label={`${room.name} settings`} title="Room settings" onClick={open("settings")}>
+              <Button variant="ghost" size="icon-sm" aria-label={t("{name} settings", { name: room.name })} title={t("Room settings")} onClick={open("settings")}>
                 <GearSixIcon />
               </Button>
             )}
@@ -433,7 +468,7 @@ function RoomView({
 
         <RoomContext room={room} canEdit={!!me} onSaved={onContext} />
 
-        <Thread room={room} members={members} me={me} onUpdated={onUpdated} />
+        <Thread room={room} members={members} me={me} inRoom={inRoom} focus={focus} onUpdated={onUpdated} />
 
         <Composer room={room} me={me} inRoom={inRoom} onPosted={onPosted} />
       </section>
@@ -480,13 +515,13 @@ function RoomContext({ room, canEdit, onSaved }: { room: Room; canEdit: boolean;
       <div className="flex items-center gap-3">
         <CollapsibleTrigger asChild>
           <button className="text-sm font-medium text-muted-foreground hover:text-foreground">
-            {open ? "Hide" : "Show"} room context
+            {open ? t("Hide room context") : t("Show room context")}
           </button>
         </CollapsibleTrigger>
         {open && canEdit && !editing && (
           <Button variant="ghost" size="sm" onClick={() => (setDraft(room.context), setEditing(true))}>
             <PencilSimpleIcon data-icon="inline-start" />
-            Edit
+            {t("Edit")}
           </Button>
         )}
       </div>
@@ -497,22 +532,22 @@ function RoomContext({ room, canEdit, onSaved }: { room: Room; canEdit: boolean;
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               rows={6}
-              aria-label="Room context, markdown"
+              aria-label={t("Room context, markdown")}
               className="font-mono text-[13px]"
             />
             {error && <p className="error">{error}</p>}
             <div className="flex gap-2">
               <Button size="sm" onClick={save}>
-                Save context
+                {t("Save context")}
               </Button>
               <Button size="sm" variant="ghost" onClick={() => (setEditing(false), setDraft(room.context))}>
-                Cancel
+                {t("Cancel")}
               </Button>
             </div>
           </div>
         ) : (
           <pre className="mt-2 max-h-40 overflow-y-auto font-mono text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-            {room.context || "No context yet. Write down what every agent in this room should know first."}
+            {room.context || t("No context yet. Write down what every agent in this room should know first.")}
           </pre>
         )}
       </CollapsibleContent>
@@ -524,20 +559,28 @@ function Thread({
   room,
   members,
   me,
+  inRoom,
+  focus,
   onUpdated,
 }: {
   room: Room;
   members: Record<string, Member>;
   me: Member | null;
+  inRoom: Member[];
+  focus?: string | null;
   onUpdated: (m: Msg) => void;
 }) {
   // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
   const [mountedAt] = useState(() => Date.now());
+  // Opened from a review link (email, agent session): bring that message into view.
+  useEffect(() => {
+    if (focus) setTimeout(() => document.getElementById(`msg-${focus}`)?.scrollIntoView({ block: "center" }), 300);
+  }, [focus]);
   if (room.messages.length === 0)
     return (
       <Empty className="flex-1">
         <EmptyHeader>
-          <EmptyTitle>Nothing here yet</EmptyTitle>
+          <EmptyTitle>{t("Nothing here yet")}</EmptyTitle>
           <EmptyDescription>Type @ in the box below to hand work to an agent or a person in {room.name}.</EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -550,7 +593,7 @@ function Thread({
           <MessageScrollerContent className="flex flex-col gap-1 px-2 py-4 md:px-5">
             <MessageScrollerItem messageId="day">
               <Marker variant="separator" className="py-2">
-                <MarkerContent>Today</MarkerContent>
+                <MarkerContent>{t("Today")}</MarkerContent>
               </Marker>
             </MessageScrollerItem>
             {room.messages.map((m) => {
@@ -560,9 +603,11 @@ function Thread({
               return (
                 <MessageScrollerItem key={m.id} messageId={m.id} scrollAnchor={m.from === me?.handle}>
                   <Message
+                    id={`msg-${m.id}`}
                     className={cn(
                       "items-start gap-3 rounded-xl px-3 py-2.5",
                       forMe && "bg-mention",
+                      focus === m.id && "ring-2 ring-primary/60",
                       Date.parse(m.at) > mountedAt && "msg-arrive",
                     )}
                   >
@@ -586,7 +631,8 @@ function Thread({
                       >
                         <MentionText text={m.text} me={me?.handle} />
                       </p>
-                      <SafetyLine m={m} me={me} onUpdated={onUpdated} />
+                      <SafetyLine m={m} me={me} members={members} onUpdated={onUpdated} />
+                      <DeliveryLine m={m} inRoom={inRoom} />
                     </MessageContent>
                   </Message>
                 </MessageScrollerItem>
@@ -600,45 +646,39 @@ function Thread({
   );
 }
 
-const FLAG_LABEL: Record<string, string> = {
-  "override-instructions": "tries to override the agent's instructions",
-  "role-hijack": "tries to change the agent's role",
-  "shell-payload": "contains a shell payload",
-  exfiltration: "asks for secrets",
-  destructive: "asks for a destructive command",
-  "hidden-text": "contains hidden characters",
-  "agent-loop": "agents have been talking without a person",
-};
+const flagLabel = (f: string) =>
+  ({
+    "override-instructions": t("tries to override the agent's instructions"),
+    "role-hijack": t("tries to change the agent's role"),
+    "shell-payload": t("contains a shell payload"),
+    exfiltration: t("asks for secrets"),
+    destructive: t("asks for a destructive command"),
+    "hidden-text": t("contains hidden characters"),
+    "agent-loop": t("agents have been talking without a person"),
+    strict: t("comes from another company and its recipient holds all of those"),
+  })[f] ?? f;
 
-/** What the hub did to keep this message safe, and the review buttons when a person has to decide. */
-function SafetyLine({
-  m,
-  me,
-  onUpdated,
-}: {
-  m: Msg;
-  me: Member | null;
-  onUpdated: (m: Msg) => void;
-}) {
+const keyLabel = (key: string, members: Record<string, Member>) =>
+  key.startsWith("org:") ? t("a person of {org}", { org: key.slice(4) }) : (members[key]?.name ?? "@" + key);
+
+/** What the hub did to keep this message safe, who decides, and the buttons when it's you. */
+function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; members: Record<string, Member>; onUpdated: (m: Msg) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const s = m.safety;
   if (!s) return null;
   const approval = s.flags.includes("needs-approval");
-  const reasons = s.flags.filter((f) => f !== "needs-approval").map((f) => FLAG_LABEL[f] ?? f);
-  const suspicious = reasons.length > 0 && !s.flags.includes("agent-loop");
-  // Approvals belong to the sender's company; suspected attacks to the people they target.
-  const canReview =
-    s.status === "held" &&
-    !!me &&
-    me.kind === "human" &&
-    me.handle !== m.from &&
-    (approval ? me.org === m.org : !suspicious || me.org !== m.org);
+  const reasons = s.flags.filter((f) => f !== "needs-approval").map(flagLabel);
+  const person = me?.kind === "human" && me.handle !== m.from ? me : null;
+  const mine = (key: string) => !!person && (key === person.handle || key === `org:${person.org}`);
+  const gateIsMine = s.gate === "pending" && !!person && (!approval || person.org === m.org);
+  const approvals = Object.entries(s.approvals ?? {});
+  const myPending = approvals.filter(([k, a]) => a.decision === "pending" && mine(k));
 
-  const decide = async (decision: "release" | "reject") => {
+  const decide = async (decision: "release" | "reject", scope: "gate" | "agents") => {
     setBusy(true);
     try {
-      onUpdated(await api.review(m.id, decision));
+      onUpdated(await api.review(m.id, decision, scope));
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -646,60 +686,131 @@ function SafetyLine({
       setBusy(false);
     }
   };
+  const buttons = (scope: "gate" | "agents", releaseLabel: string) => (
+    <span className="ml-auto flex gap-2">
+      <Button size="sm" disabled={busy} onClick={() => decide("release", scope)}>
+        <ShieldCheckIcon data-icon="inline-start" />
+        {releaseLabel}
+      </Button>
+      <Button size="sm" variant="ghost" disabled={busy} onClick={() => decide("reject", scope)}>
+        <ProhibitIcon data-icon="inline-start" />
+        {t("Reject")}
+      </Button>
+    </span>
+  );
 
   return (
     <div className="mt-1.5 flex flex-col gap-1.5 text-[13px]">
       {s.redactions.length > 0 && (
         <span className="flex items-center gap-1.5 text-muted-foreground">
           <LockSimpleIcon aria-hidden />
-          Secrets masked before anyone saw them ({s.redactions.join(", ")})
+          {t("Secrets masked before anyone saw them ({kinds})", { kinds: s.redactions.join(", ") })}
         </span>
       )}
-      {s.status === "held" && (
+
+      {s.gate === "pending" && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[10px] border border-dashed border-muted-foreground/50 px-3 py-2">
           <span className="flex items-center gap-1.5 font-semibold text-foreground">
             <ShieldWarningIcon aria-hidden weight="fill" />
-            {approval ? "Waiting for approval" : "Held for review"}
+            {approval ? t("Waiting for approval") : t("Held for review")}
           </span>
           <span className="text-muted-foreground">
             {approval
-              ? `Agents get this contract change once a person of ${m.org} approves it.`
-              : `No agent gets this until ${suspicious ? "a person outside " + m.org : "a person"} decides: ${reasons.join(", ")}.`}
+              ? t("Agents get this contract change once a person of {org} approves it.", { org: m.org })
+              : t("No agent gets this until a person decides: {why}.", { why: reasons.join(", ") })}
           </span>
-          {canReview && (
-            <span className="ml-auto flex gap-2">
-              <Button size="sm" disabled={busy} onClick={() => decide("release")}>
-                <ShieldCheckIcon data-icon="inline-start" />
-                {approval ? "Approve" : "Release"}
-              </Button>
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => decide("reject")}>
-                <ProhibitIcon data-icon="inline-start" />
-                Reject
-              </Button>
-            </span>
-          )}
-          {error && <p className="error w-full">{error}</p>}
+          {gateIsMine && buttons("gate", approval ? t("Approve") : t("Release"))}
         </div>
       )}
-      {s.status === "released" && (
-        <span className="flex items-center gap-1.5 text-muted-foreground">
-          <ShieldCheckIcon aria-hidden />
-          {approval ? "Approved" : "Released"} by @{s.reviewedBy}
-        </span>
+
+      {approvals.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-[10px] border border-dashed border-muted-foreground/50 px-3 py-2">
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="flex items-center gap-1.5 font-semibold text-foreground">
+              <ShieldWarningIcon aria-hidden weight="fill" />
+              {s.status === "held" ? t("Held from agents") : t("Reviewed")}
+            </span>
+            <span className="text-muted-foreground">
+              {t("From another company, and it {why}. Each owner decides for their own agents.", { why: reasons.join(", ") })}
+            </span>
+          </span>
+          <ul className="flex flex-col gap-1">
+            {approvals.map(([key, a]) => (
+              <li key={key} className="flex flex-wrap items-center gap-x-2 text-muted-foreground">
+                <span className={cn("font-medium", a.decision === "pending" ? "text-foreground" : "")}>
+                  {a.agents.map((x) => "@" + x).join(", ")}
+                </span>
+                <span>
+                  {a.decision === "pending"
+                    ? mine(key)
+                      ? t("wait for you")
+                      : t("wait for {who}", { who: keyLabel(key, members) })
+                    : a.decision === "released"
+                      ? t("released by @{who}", { who: a.by ?? "" })
+                      : t("rejected by @{who}: never saw it", { who: a.by ?? "" })}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {myPending.length > 0 && buttons("agents", t("Release to my agents"))}
+        </div>
       )}
-      {s.status === "rejected" && (
-        <span className="flex items-center gap-1.5 text-muted-foreground">
-          <ProhibitIcon aria-hidden />
-          Rejected by @{s.reviewedBy}. No agent ever saw it.
-        </span>
-      )}
-      {s.status === "delivered" && reasons.length > 0 && (
+      {error && <p className="error w-full">{error}</p>}
+
+      {!s.gate && !approvals.length && s.status === "delivered" && reasons.length > 0 && (
         <span className="flex items-center gap-1.5 text-muted-foreground">
           <ShieldWarningIcon aria-hidden />
-          Flagged ({reasons.join(", ")}), delivered because everyone here is from {m.org}
+          {t("Flagged ({why}), delivered: no other company's agent is in this room", { why: reasons.join(", ") })}
+        </span>
+      )}
+      {s.gate === "released" && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <ShieldCheckIcon aria-hidden />
+          {approval ? t("Approved by @{who}", { who: s.reviewedBy ?? "" }) : t("Released by @{who}", { who: s.reviewedBy ?? "" })}
+        </span>
+      )}
+      {s.gate === "rejected" && (
+        <span className="flex items-center gap-1.5 text-muted-foreground">
+          <ProhibitIcon aria-hidden />
+          {t("Rejected by @{who}. No agent ever saw it.", { who: s.reviewedBy ?? "" })}
         </span>
       )}
     </div>
+  );
+}
+
+/** Who a message reached: agents that got it, and the ones it waits for because they're offline. */
+function DeliveryLine({ m, inRoom }: { m: Msg; inRoom: Member[] }) {
+  if (m.safety?.status === "held" && m.safety.gate === "pending") return null;
+  const targets = inRoom.filter((x) => x.kind === "agent" && x.handle !== m.from && (m.mentionsRoom || m.mentions.includes(x.handle)));
+  if (!targets.length) return null;
+  const got = new Set(m.delivered ?? []);
+  const blocked = (a: Member) => {
+    const ap = Object.values(m.safety?.approvals ?? {}).find((x) => x.agents.includes(a.handle));
+    return ap && ap.decision !== "released";
+  };
+  const done = targets.filter((a) => got.has(a.handle));
+  const waiting = targets.filter((a) => !got.has(a.handle) && !blocked(a) && !a.paused);
+  if (!done.length && !waiting.length) return null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
+      {done.length > 0 && (
+        <span className="flex items-center gap-1">
+          <CheckIcon aria-hidden />
+          {t("Delivered to {who}", { who: done.map((a) => "@" + a.handle).join(", ") })}
+        </span>
+      )}
+      {waiting.map((a) => (
+        <span key={a.handle} className="flex items-center gap-1">
+          <ClockIcon aria-hidden />
+          {a.online
+            ? t("Sending to @{who}", { who: a.handle })
+            : a.adapter === "inbox"
+              ? t("@{who} reads it at its next check-in", { who: a.handle })
+              : t("@{who} is offline: gets it when it reconnects", { who: a.handle })}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -707,7 +818,7 @@ function SafetyLine({
 function PolicyToggle({ room, me }: { room: Room; me: Member | null }) {
   const on = !!room.policy?.approveContractChanges;
   const canSet = !!me && me.kind === "human";
-  const label = on ? "Contract changes need approval" : "Contract changes go out directly";
+  const label = on ? t("Contract changes need approval") : t("Contract changes go out directly");
   const glyph = <span aria-hidden className={cn("size-2.5 rounded-[30%] border-[1.5px] border-foreground", on && "bg-foreground")} />;
   if (!canSet)
     return <span className="flex items-center gap-2 px-2 text-xs text-muted-foreground">{glyph}{label}</span>;
@@ -725,17 +836,17 @@ function PolicyToggle({ room, me }: { room: Room; me: Member | null }) {
         </Button>
       </TooltipTrigger>
       <TooltipContent side="bottom">
-        {on ? "Click to let agents' contract changes go out directly" : "Click to make agents' contract changes wait for a person of their company"}
+        {on ? t("Click to let agents' contract changes go out directly") : t("Click to make agents' contract changes wait for a person of their company")}
       </TooltipContent>
     </Tooltip>
   );
 }
 
-const KINDS: { kind: MessageKind; label: string }[] = [
-  { kind: "note", label: "Note" },
-  { kind: "question", label: "Question" },
-  { kind: "contract_change", label: "Contract change" },
-  { kind: "done", label: "Done" },
+const kinds = (): { kind: MessageKind; label: string }[] => [
+  { kind: "note", label: t("Note") },
+  { kind: "question", label: t("Question") },
+  { kind: "contract_change", label: t("Contract change") },
+  { kind: "done", label: t("Done") },
 ];
 
 function Composer({
@@ -817,7 +928,7 @@ function Composer({
   if (!me)
     return (
       <p className="m-0 px-4 pt-3 pb-4 md:px-8 md:pb-6 text-sm text-muted-foreground">
-        Pick yourself under <span className="font-medium text-foreground">You are</span> to write in {room.name}.
+        {t("Pick yourself under")} <span className="font-medium text-foreground">{t("You are")}</span> {t("to write in {name}.", { name: room.name })}
       </p>
     );
 
@@ -831,8 +942,8 @@ function Composer({
             onChange={(e) => setText(e.target.value)}
             onKeyDown={onKey}
             rows={2}
-            placeholder={`Write to ${room.name}. Type @ to mention someone.`}
-            aria-label={`Message ${room.name}`}
+            placeholder={t("Write to {name}. Type @ to mention someone.", { name: room.name })}
+            aria-label={t("Message {name}", { name: room.name })}
             aria-autocomplete="list"
             className="min-h-16 resize-none text-[15px]"
           />
@@ -846,7 +957,7 @@ function Composer({
         >
           <Command value={active} onValueChange={setPick} shouldFilter={false}>
             <CommandList>
-              <CommandEmpty>Nobody by that name here.</CommandEmpty>
+              <CommandEmpty>{t("Nobody by that name here.")}</CommandEmpty>
               <CommandGroup heading={`In ${room.name}`}>
                 {suggestions.map((m) => (
                   <CommandItem key={m.handle} value={m.handle} onSelect={complete} className="gap-2.5">
@@ -867,9 +978,9 @@ function Composer({
           size="sm"
           value={kind}
           onValueChange={(v) => v && setKind(v as MessageKind)}
-          aria-label="What kind of message"
+          aria-label={t("What kind of message")}
         >
-          {KINDS.map((k) => (
+          {kinds().map((k) => (
             <ToggleGroupItem
               key={k.kind}
               value={k.kind}
@@ -881,20 +992,21 @@ function Composer({
         </ToggleGroup>
         <Button type="submit" disabled={!text.trim() || sending}>
           <PaperPlaneRightIcon data-icon="inline-start" weight="fill" />
-          {sending ? "Sending" : "Send"}
+          {sending ? t("Sending") : t("Send")}
         </Button>
       </div>
     </form>
   );
 }
 
-const DELIVERY: Record<Member["adapter"], string> = {
-  channel: "Messages are pushed into its running session",
-  exec: "Woken in its own thread when mentioned",
-  inbox: "Reads its inbox when it checks in",
-  a2a: "Reached over A2A",
-  dashboard: "Reads this dashboard",
-};
+const delivery = (a: Member["adapter"]) =>
+  ({
+    channel: t("Messages are pushed into its running session"),
+    exec: t("Woken in its own thread when mentioned"),
+    inbox: t("Reads its inbox when it checks in"),
+    a2a: t("Reached over A2A"),
+    dashboard: t("Reads this dashboard"),
+  })[a];
 
 function MembersPanel({
   inRoom,
@@ -916,14 +1028,14 @@ function MembersPanel({
   const orgs = [...new Set(humans.map((h) => h.org))];
 
   return (
-    <aside aria-label="Who is in this room" className="hidden min-h-0 overflow-y-auto border-l border-border px-5 py-6 xl:block">
-      <h2 className="mb-5 font-heading text-base">In this room</h2>
+    <aside aria-label={t("Who is in this room")} className="hidden min-h-0 overflow-y-auto border-l border-border px-5 py-6 xl:block">
+      <h2 className="mb-5 font-heading text-base">{t("In this room")}</h2>
       <div className="flex flex-col gap-6">
         {orgs.map((org) => (
           <section key={org} className="flex flex-col gap-3">
             <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">
               {org}
-              {me && org !== me.org && " (guest company)"}
+              {me && org !== me.org && ` (${t("guest company")})`}
             </h3>
             <ul className="flex flex-col gap-3">
               {humans
@@ -943,7 +1055,7 @@ function MembersPanel({
         ))}
         {orphans.length > 0 && (
           <section className="flex flex-col gap-3">
-            <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">Other agents</h3>
+            <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">{t("Other agents")}</h3>
             {orphans.map((a) => (
               <MemberRow key={a.handle} m={a} me={me} />
             ))}
@@ -952,7 +1064,7 @@ function MembersPanel({
         {onAddAgent && (
           <Button variant="ghost" size="sm" className="self-start" onClick={onAddAgent}>
             <PlusIcon data-icon="inline-start" weight="bold" />
-            Add your agent here
+            {t("Add your agent here")}
           </Button>
         )}
         <SafetyLog audit={audit} />
@@ -968,7 +1080,7 @@ function SafetyLog({ audit }: { audit: AuditEvent[] }) {
     <section className="flex flex-col gap-3">
       <h3 className="flex items-center gap-1.5 font-sans text-xs font-medium tracking-normal text-muted-foreground">
         <ShieldCheckIcon aria-hidden />
-        Safety log
+        {t("Safety log")}
       </h3>
       <ol className="flex flex-col gap-2.5">
         {[...audit]
@@ -978,7 +1090,7 @@ function SafetyLog({ audit }: { audit: AuditEvent[] }) {
             <li key={a.id} className="text-xs leading-snug">
               <span className="text-foreground">{a.detail}</span>
               <span className="block text-muted-foreground">
-                {a.actor === "hub" ? "automatic" : `@${a.actor}`} ·{" "}
+                {a.actor === "hub" ? t("automatic") : `@${a.actor}`} ·{" "}
                 {new Date(a.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
               </span>
             </li>
@@ -997,11 +1109,11 @@ function MemberRow({ m, me }: { m: Member; me: Member | null }) {
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">
           {m.name}
-          {me?.handle === m.handle && <span className="ml-1.5 text-xs font-medium text-primary">you</span>}
+          {me?.handle === m.handle && <span className="ml-1.5 text-xs font-medium text-primary">{t("you")}</span>}
         </div>
         <div className="truncate text-xs text-muted-foreground">
           @{m.handle}
-          {m.paused ? " · paused" : m.online ? " · online" : ""}
+          {m.paused ? ` · ${t("paused")}` : m.online ? ` · ${t("online")}` : ""}
         </div>
       </div>
     </div>
@@ -1015,14 +1127,14 @@ function MemberRow({ m, me }: { m: Member; me: Member | null }) {
             {row}
           </div>
         </TooltipTrigger>
-        <TooltipContent side="left">{m.paused ? "Paused by a person: it can't post and gets no messages" : DELIVERY[m.adapter]}</TooltipContent>
+        <TooltipContent side="left">{m.paused ? t("Paused by a person: it can't post and gets no messages") : delivery(m.adapter)}</TooltipContent>
       </Tooltip>
       {canPause && (
         <Button
           variant="ghost"
           size="icon-sm"
-          aria-label={m.paused ? `Resume ${m.name}` : `Pause ${m.name}`}
-          title={m.paused ? "Resume" : "Pause"}
+          aria-label={m.paused ? t("Resume {name}", { name: m.name }) : t("Pause {name}", { name: m.name })}
+          title={m.paused ? t("Resume") : t("Pause")}
           onClick={() => api.pause(m.handle, !m.paused).catch(() => {})}
         >
           {m.paused ? <PlayIcon weight="fill" /> : <PauseIcon weight="fill" />}
@@ -1031,9 +1143,3 @@ function MemberRow({ m, me }: { m: Member; me: Member | null }) {
     </div>
   );
 }
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);

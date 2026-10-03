@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Field } from "./account";
+import { t } from "./i18n";
 import { api, roomOptions, roomPath, type Adapter, type Invite, type Member, type NewAgent, type Room } from "./api";
 
 const isAdmin = (m: Member | null) => m?.role === "owner" || m?.role === "admin";
@@ -154,17 +155,15 @@ export function NewRoomDialog({
       }
     >
       <form className="flex flex-col gap-4" onSubmit={submit}>
-        <Field label="Name">
-          <Input required autoFocus maxLength={80} value={name} onChange={(e) => setName(e.target.value)} placeholder="basket-migration" />
+        <Field label={t("Name")}>
+          <Input required autoFocus maxLength={80} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("basket-migration")} />
         </Field>
-        <Field label="Context" hint="Markdown every agent reads before working here: the contract, decisions, conventions. You can change it later.">
+        <Field label={t("Context")} hint={t("Markdown every agent reads before working here: the contract, decisions, conventions. You can change it later.")}>
           <Textarea rows={4} value={context} onChange={(e) => setContext(e.target.value)} className="font-mono text-[13px]" />
         </Field>
         {error && <p className="error">{error}</p>}
         <DialogFooter>
-          <Button type="submit" disabled={busy || !name.trim()}>
-            Create room
-          </Button>
+          <Button type="submit" disabled={busy || !name.trim()}>{t("Create room")}</Button>
         </DialogFooter>
       </form>
     </Shell>
@@ -216,15 +215,15 @@ export function RoomSettingsDialog({
   return (
     <Shell open={open} onOpenChange={onOpenChange} title={`${room.name} settings`}>
       <form className="flex flex-col gap-4" onSubmit={save}>
-        <Field label="Name">
+        <Field label={t("Name")}>
           <Input required maxLength={80} value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
         {!isScopeRoom && (
           <Field
-            label="Inside"
-            hint="Moving a room changes who sees it: everyone with access to the new parent will, and people who only saw the old one won't."
+            label={t("Inside")}
+            hint={t("Moving a room changes who sees it: everyone with access to the new parent will, and people who only saw the old one won't.")}
           >
-            <RoomSelect rooms={rooms} value={parent} onChange={setParent} allowTop={unscopedAdmin ? "Top level" : undefined} exclude={inside} label="Parent room" />
+            <RoomSelect rooms={rooms} value={parent} onChange={setParent} allowTop={unscopedAdmin ? "Top level" : undefined} exclude={inside} label={t("Parent room")} />
           </Field>
         )}
         {canDelete && (
@@ -235,25 +234,17 @@ export function RoomSettingsDialog({
             </p>
             {confirm ? (
               <div className="flex gap-2">
-                <Button type="button" variant="destructive" disabled={busy} onClick={remove}>
-                  Delete for good
-                </Button>
-                <Button type="button" variant="ghost" onClick={() => setConfirm(false)}>
-                  Keep it
-                </Button>
+                <Button type="button" variant="destructive" disabled={busy} onClick={remove}>{t("Delete for good")}</Button>
+                <Button type="button" variant="ghost" onClick={() => setConfirm(false)}>{t("Keep it")}</Button>
               </div>
             ) : (
-              <Button type="button" variant="ghost" className="-ml-2.5 self-start text-destructive" onClick={() => setConfirm(true)}>
-                Delete room
-              </Button>
+              <Button type="button" variant="ghost" className="-ml-2.5 self-start text-destructive" onClick={() => setConfirm(true)}>{t("Delete room")}</Button>
             )}
           </div>
         )}
         {error && <p className="error">{error}</p>}
         <DialogFooter>
-          <Button type="submit" disabled={busy || !name.trim()}>
-            Save
-          </Button>
+          <Button type="submit" disabled={busy || !name.trim()}>{t("Save")}</Button>
         </DialogFooter>
       </form>
     </Shell>
@@ -311,16 +302,16 @@ export function InviteDialog({
       <Shell
         open={open}
         onOpenChange={close}
-        title="Invite ready"
+        title={t("Invite ready")}
         description={
           result.emailed
             ? `We emailed it to ${result.email}. You can also send the link yourself.`
             : "Send this link to them. It works once, for 7 days, and only you see it now."
         }
       >
-        <CopyField label="Invite link" value={result.url!} />
+        <CopyField label={t("Invite link")} value={result.url!} />
         <DialogFooter>
-          <Button onClick={() => close(false)}>Done</Button>
+          <Button onClick={() => close(false)}>{t("Done")}</Button>
         </DialogFooter>
       </Shell>
     );
@@ -329,15 +320,15 @@ export function InviteDialog({
     <Shell
       open={open}
       onOpenChange={close}
-      title="Invite a person"
-      description="They set their own password from the link, see the room you pick and everything inside it, and can add their own agents there."
+      title={t("Invite a person")}
+      description={t("They set their own password from the link, see the room you pick and everything inside it, and can add their own agents there.")}
     >
       <form className="flex flex-col gap-4" onSubmit={submit}>
-        <Field label="Email" hint={emailOn ? "Optional. We email the link when you fill it in." : "Optional. This hub can't send email, so you'll get a link to pass on."}>
-          <Input type="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ben@firmab.dev" />
+        <Field label={t("Email")} hint={emailOn ? "Optional. We email the link when you fill it in." : "Optional. This hub can't send email, so you'll get a link to pass on."}>
+          <Input type="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t("ben@firmab.dev")} />
         </Field>
         <Field
-          label="Company"
+          label={t("Company")}
           hint={
             admin
               ? guest
@@ -348,13 +339,13 @@ export function InviteDialog({
         >
           <Input required disabled={!admin} value={org} onChange={(e) => setOrg(e.target.value)} />
         </Field>
-        <Field label="Access" hint={where === EVERY ? "Admins see every room and manage people, agents and rooms." : `Sees ${roomPath(where, rooms)} and everything inside it.`}>
+        <Field label={t("Access")} hint={where === EVERY ? "Admins see every room and manage people, agents and rooms." : `Sees ${roomPath(where, rooms)} and everything inside it.`}>
           <Select value={where} onValueChange={setWhere}>
-            <SelectTrigger className="w-full" aria-label="Access">
+            <SelectTrigger className="w-full" aria-label={t("Access")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {admin && me.scopeRoomId === null && <SelectItem value={EVERY}>Every room, as an admin</SelectItem>}
+              {admin && me.scopeRoomId === null && <SelectItem value={EVERY}>{t("Every room, as an admin")}</SelectItem>}
               {roomOptions(rooms).map(({ room: r, depth }) => (
                 <SelectItem key={r.id} value={r.id}>
                   <span style={{ paddingLeft: depth * 14 }}>{r.name}</span>
@@ -365,9 +356,7 @@ export function InviteDialog({
         </Field>
         {error && <p className="error">{error}</p>}
         <DialogFooter>
-          <Button type="submit" disabled={busy}>
-            Create invite link
-          </Button>
+          <Button type="submit" disabled={busy}>{t("Create invite link")}</Button>
         </DialogFooter>
       </form>
     </Shell>
@@ -385,34 +374,32 @@ export function AgentSetup({ agent, client }: { agent: NewAgent; client: string 
   const s = agent.setup;
   return (
     <div className="flex flex-col gap-4">
-      <CopyField label="Token" value={agent.token} />
+      <CopyField label={t("Token")} value={agent.token} />
       {client === "claude" && (
         <>
-          <CopyField label="Add to .mcp.json in your repo" value={JSON.stringify(s.claudeCode.mcpJson, null, 2)} multiline />
-          <CopyField label="Then start Claude Code with" value={s.claudeCode.launch} />
+          <CopyField label={t("Add to .mcp.json in your repo")} value={JSON.stringify(s.claudeCode.mcpJson, null, 2)} multiline />
+          <CopyField label={t("Then start Claude Code with")} value={s.claudeCode.launch} />
         </>
       )}
       {client === "codex" && (
         <>
-          <CopyField label="Connect Codex" value={s.codex.mcp} multiline />
-          <CopyField label="Wake it on mentions (bridge, next to Codex)" value={s.codex.wake} multiline />
+          <CopyField label={t("Connect Codex")} value={s.codex.mcp} multiline />
+          <CopyField label={t("Wake it on mentions (bridge, next to Codex)")} value={s.codex.wake} multiline />
         </>
       )}
       {client === "cursor" && (
         <>
-          <CopyField label="Add to .cursor/mcp.json" value={JSON.stringify(s.cursor.mcpJson, null, 2)} multiline />
-          <CopyField label="Wake it on mentions (bridge, next to Cursor)" value={s.cursor.wake} multiline />
+          <CopyField label={t("Add to .cursor/mcp.json")} value={JSON.stringify(s.cursor.mcpJson, null, 2)} multiline />
+          <CopyField label={t("Wake it on mentions (bridge, next to Cursor)")} value={s.cursor.wake} multiline />
         </>
       )}
       {client === "other" && (
         <>
-          <CopyField label="MCP over HTTP" value={JSON.stringify(s.cursor.mcpJson, null, 2)} multiline />
-          <CopyField label="A2A agent card" value={`${s.a2a.card}\n${s.a2a.auth}`} multiline />
+          <CopyField label={t("MCP over HTTP")} value={JSON.stringify(s.cursor.mcpJson, null, 2)} multiline />
+          <CopyField label={t("A2A agent card")} value={`${s.a2a.card}\n${s.a2a.auth}`} multiline />
         </>
       )}
-      <p className="m-0 text-xs leading-relaxed text-muted-foreground">
-        The token is shown only now. Lost it? Make a new one in Settings; the old one stops working at once.
-      </p>
+      <p className="m-0 text-xs leading-relaxed text-muted-foreground">{t("The token is shown only now. Lost it? Make a new one in Settings; the old one stops working at once.")}</p>
     </div>
   );
 }
@@ -465,7 +452,7 @@ export function AgentDialog({
         description={`It sees ${roomPath(shown.scopeRoomId, rooms)} and everything inside it, and speaks for ${shown.org}.`}
       >
         {existing && (
-          <ToggleGroup type="single" size="sm" value={client} onValueChange={(v) => v && setClient(v)} aria-label="Client">
+          <ToggleGroup type="single" size="sm" value={client} onValueChange={(v) => v && setClient(v)} aria-label={t("Client")}>
             {CLIENTS.map((c) => (
               <ToggleGroupItem key={c.id} value={c.id}>
                 {c.label}
@@ -475,7 +462,7 @@ export function AgentDialog({
         )}
         <AgentSetup agent={shown} client={client} />
         <DialogFooter>
-          <Button onClick={() => close(false)}>Done</Button>
+          <Button onClick={() => close(false)}>{t("Done")}</Button>
         </DialogFooter>
       </Shell>
     );
@@ -484,12 +471,12 @@ export function AgentDialog({
     <Shell
       open={open}
       onOpenChange={close}
-      title="Add an agent"
+      title={t("Add an agent")}
       description={`Your agent joins as a member of ${me.org}. People pause it, and it reaches others only by @mention.`}
     >
       <form className="flex flex-col gap-4" onSubmit={submit}>
-        <Field label="Client" hint={picked.note}>
-          <ToggleGroup type="single" size="sm" value={client} onValueChange={(v) => v && setClient(v)} aria-label="Client" className="flex-wrap">
+        <Field label={t("Client")} hint={picked.note}>
+          <ToggleGroup type="single" size="sm" value={client} onValueChange={(v) => v && setClient(v)} aria-label={t("Client")} className="flex-wrap">
             {CLIENTS.map((c) => (
               <ToggleGroupItem key={c.id} value={c.id}>
                 {c.label}
@@ -497,17 +484,15 @@ export function AgentDialog({
             ))}
           </ToggleGroup>
         </Field>
-        <Field label="Name" hint="Its @handle is made from the name.">
+        <Field label={t("Name")} hint={t("Its @handle is made from the name.")}>
           <Input maxLength={80} value={name} onChange={(e) => setName(e.target.value)} placeholder={`${picked.label} (${me.name})`} />
         </Field>
-        <Field label="Room" hint="What it sees: this room and everything inside it.">
+        <Field label={t("Room")} hint={t("What it sees: this room and everything inside it.")}>
           <RoomSelect rooms={rooms} value={where} onChange={setWhere} />
         </Field>
         {error && <p className="error">{error}</p>}
         <DialogFooter>
-          <Button type="submit" disabled={busy || !where}>
-            Add agent
-          </Button>
+          <Button type="submit" disabled={busy || !where}>{t("Add agent")}</Button>
         </DialogFooter>
       </form>
     </Shell>

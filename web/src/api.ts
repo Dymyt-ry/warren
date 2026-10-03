@@ -1,6 +1,7 @@
 // Client for the hub's REST + SSE API (types mirror hub/src/store.ts).
 // People are signed in by an httpOnly session cookie, so nothing secret lives in the page.
 import { useEffect, useState } from "react";
+import { t } from "./i18n";
 
 export type MemberKind = "human" | "agent";
 export type MessageKind = "note" | "contract_change" | "question" | "done";
@@ -20,6 +21,22 @@ export interface Member {
   online?: boolean;
   paused?: boolean;
   disabled?: boolean;
+  twoFactor?: boolean;
+  prefs?: Prefs; // only about yourself
+  recoveryCodesLeft?: number;
+}
+export interface Prefs {
+  language: "en" | "cs";
+  theme: "system" | "light" | "dark";
+  holdAllForeign: boolean;
+  emailOnHold: boolean;
+}
+export type Decision = "pending" | "released" | "rejected";
+export interface Approval {
+  decision: Decision;
+  agents: string[];
+  by?: string;
+  at?: string;
 }
 export type SafetyStatus = "delivered" | "held" | "released" | "rejected";
 export interface Safety {
@@ -27,6 +44,8 @@ export interface Safety {
   flags: string[];
   redactions: string[];
   reviewedBy?: string;
+  gate?: Decision;
+  approvals?: Record<string, Approval>;
 }
 export interface RoomPolicy {
   approveContractChanges: boolean;
@@ -53,6 +72,7 @@ export interface Message {
   safety?: Safety;
   at: string;
   forYou?: boolean;
+  delivered?: string[];
 }
 export interface Room {
   id: string;
@@ -70,7 +90,15 @@ export interface HubConfig {
   setupToken: boolean;
   instanceName: string;
   email: boolean;
+  privacyContact: string;
+  retentionDays: number;
   version: string;
+}
+export interface ApproverKey {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
 }
 export interface Invite {
   id: string;
@@ -94,7 +122,28 @@ export interface Setup {
 export type NewAgent = Member & { token: string; setup: Setup };
 export type User = Member & { agents: number };
 
+/**
+ * Where requests go. The dashboard talks to the hub; the demo (/demo) plugs in
+ * a simulated hub that runs in the browser, so visitors never reach each other.
+ */
+export interface EventSourceLike {
+  onopen: ((e: Event) => void) | null;
+  onerror: ((e: Event) => void) | null;
+  addEventListener(type: string, listener: (e: MessageEvent) => void): void;
+  close(): void;
+}
+export interface Transport {
+  /** Resolves with the response body, or rejects with an ApiError. */
+  call(path: string, init: RequestInit): Promise<unknown>;
+  events(): EventSourceLike;
+}
+let transport: Transport | null = null;
+export const useTransport = (t: Transport) => {
+  transport = t;
+};
+
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
+  if (transport) return (await transport.call(path, init)) as T;
   const res = await fetch(path, {
     ...init,
     credentials: "same-origin",
@@ -121,12 +170,22 @@ export const api = {
   config: () => call<HubConfig>("/api/config"),
   setup: (body: { name: string; org: string; email: string; password: string; room?: string; handle?: string; instanceName?: string; setupToken?: string }) =>
     call<Member>("/api/setup", send("POST", body)),
-  signIn: (email: string, password: string) => call<Member>("/api/auth/login", send("POST", { email, password })),
+  signIn: (email: string, password: string, code?: string) => call<Member>("/api/auth/login", send("POST", { email, password, code })),
   signOut: () => call<{ ok: true }>("/api/auth/logout", send("POST", {})),
   demoLogin: (handle: string) => call<Member>("/api/login", send("POST", { handle })),
   me: () => call<Member>("/api/me"),
   updateMe: (name: string) => call<Member>("/api/me", send("PUT", { name })),
   changePassword: (current: string, password: string) => call<{ ok: true }>("/api/me/password", send("POST", { current, password })),
+  setPrefs: (prefs: Partial<Prefs>) => call<Member>("/api/me/prefs", send("PUT", prefs)),
+  totpSetup: () => call<{ secret: string; uri: string }>("/api/me/2fa/setup", send("POST", {})),
+  totpEnable: (code: string) => call<{ recoveryCodes: string[] }>("/api/me/2fa/enable", send("POST", { code })),
+  totpDisable: (password: string, code: string) => call<Member>("/api/me/2fa/disable", send("POST", { password, code })),
+  approverKeys: () => call<ApproverKey[]>("/api/me/approver-keys"),
+  addApproverKey: (label: string) => call<{ id: string; key: string }>("/api/me/approver-keys", send("POST", { label })),
+  removeApproverKey: (id: string) => call<{ ok: true }>(`/api/me/approver-keys/${enc(id)}`, send("DELETE")),
+  deleteMe: (password: string, deleteMessages: boolean) => call<{ ok: true }>("/api/me", send("DELETE", { password, deleteMessages })),
+  setInstance: (patch: { name?: string; retentionDays?: number; privacyContact?: string }) =>
+    call<{ instanceName: string; retentionDays: number; privacyContact: string }>("/api/instance", send("PUT", patch)),
 
   joinInfo: (code: string) =>
     call<{ instanceName: string; org: string; room: string | null; role: Role; email: string | null; invitedBy: string | null; expiresAt: string }>(`/api/join/${enc(code)}`),
@@ -158,7 +217,8 @@ export const api = {
   deleteRoom: (room: string) => call<{ deleted: string[] }>(`/api/rooms/${enc(room)}`, send("DELETE")),
   post: (room: string, kind: MessageKind, text: string) => call<Message>(`/api/rooms/${enc(room)}/messages`, send("POST", { kind, text })),
   setContext: (room: string, context: string) => call<Room>(`/api/rooms/${enc(room)}/context`, send("PUT", { context })),
-  review: (messageId: string, decision: "release" | "reject") => call<Message>(`/api/messages/${enc(messageId)}/review`, send("POST", { decision })),
+  review: (messageId: string, decision: "release" | "reject", scope?: "gate" | "agents") =>
+    call<Message>(`/api/messages/${enc(messageId)}/review`, send("POST", { decision, scope })),
   pause: (handle: string, paused: boolean) => call<Member>(`/api/members/${enc(handle)}/pause`, send("POST", { paused })),
   setPolicy: (room: string, policy: RoomPolicy) => call<RoomPolicy>(`/api/rooms/${enc(room)}/policy`, send("PUT", policy)),
   audit: () => call<AuditEvent[]>("/api/audit"),
@@ -194,7 +254,7 @@ export function useHub(who: string | null, enabled = true) {
       const room = prev[m.roomId];
       if (!room) return prev;
       const exists = room.messages.some((x) => x.id === m.id);
-      const messages = exists ? room.messages.map((x) => (x.id === m.id ? { ...x, ...m } : x)) : [...room.messages, m];
+      const messages = exists ? room.messages.map((x) => (x.id === m.id ? { ...x, ...m, delivered: m.delivered ?? x.delivered } : x)) : [...room.messages, m];
       return { ...prev, [m.roomId]: { ...room, messages } };
     });
 
@@ -228,7 +288,7 @@ export function useHub(who: string | null, enabled = true) {
       })
       .catch((e) => !closed && (setStatus("offline"), setError((e as Error).message)));
 
-    const es = new EventSource("/api/events");
+    const es: EventSourceLike = transport ? transport.events() : new EventSource("/api/events");
     es.onopen = () => !closed && setStatus("live");
     es.onerror = () => !closed && setStatus("offline");
     es.addEventListener("message", (e) => addMessage(JSON.parse((e as MessageEvent).data)));
@@ -246,6 +306,17 @@ export function useHub(who: string | null, enabled = true) {
       });
     });
     es.addEventListener("message_update", (e) => updateMessage(JSON.parse((e as MessageEvent).data)));
+    es.addEventListener("delivery", (e) => {
+      const d: { messageId: string; roomId: string; handle: string } = JSON.parse((e as MessageEvent).data);
+      setRooms((prev) => {
+        const room = prev[d.roomId];
+        if (!room) return prev;
+        const messages = room.messages.map((x) =>
+          x.id === d.messageId && !(x.delivered ?? []).includes(d.handle) ? { ...x, delivered: [...(x.delivered ?? []), d.handle] } : x,
+        );
+        return { ...prev, [d.roomId]: { ...room, messages } };
+      });
+    });
     es.addEventListener("presence", (e) => {
       const p: { handle: string; online: boolean } = JSON.parse((e as MessageEvent).data);
       setMembers((prev) => (prev[p.handle] ? { ...prev, [p.handle]: { ...prev[p.handle], online: p.online } } : prev));
@@ -271,7 +342,7 @@ export function ownerOf(agent: Member, members: Record<string, Member>): Member 
 
 /** "a / b / c": where a room sits in the tree. */
 export function roomPath(id: string | null, rooms: Record<string, Room>): string {
-  if (id === null) return "every room";
+  if (id === null) return t("every room");
   const names: string[] = [];
   for (let r: Room | undefined = rooms[id]; r; r = r.parentId ? rooms[r.parentId] : undefined) names.unshift(r.name);
   return names.join(" / ") || id;
