@@ -37,8 +37,11 @@ const INVITE_DAYS = 7;
 const RESET_HOURS = 24;
 
 const app = express();
-// Which proxies may set X-Forwarded-For: by default only ones on private networks (Docker, Traefik, Caddy).
-app.set("trust proxy", process.env.WARREN_TRUST_PROXY ?? "loopback, linklocal, uniquelocal");
+// Which proxies may set X-Forwarded-For. None by default: a client could otherwise
+// rotate the header to dodge rate limits. Behind a reverse proxy, set it to the
+// number of proxies in front of the hub (WARREN_TRUST_PROXY=1) or their addresses.
+const TRUST_PROXY = process.env.WARREN_TRUST_PROXY;
+app.set("trust proxy", TRUST_PROXY === undefined ? false : /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "true" ? true : TRUST_PROXY);
 // Behind a CDN that names the client in its own header (Cloudflare: cf-connecting-ip), set
 // WARREN_CLIENT_IP_HEADER, and only when the origin accepts traffic from that CDN alone.
 const CLIENT_IP_HEADER = process.env.WARREN_CLIENT_IP_HEADER?.toLowerCase();
@@ -163,21 +166,32 @@ function clearSessionCookie(res: Response) {
   res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
 }
 
-/** Simple fixed-window limiter for sign-in style endpoints. */
-function limiter(max: number, windowMs: number) {
-  const hits = new Map<string, number[]>();
+/**
+ * Limits failed attempts at sign-in style endpoints: per client address, and per
+ * account (the email tried), so rotating addresses doesn't buy more password
+ * guesses. Successful requests don't count, so people behind one proxy address
+ * don't lock each other out by signing in.
+ */
+function limiter(perIp: number, perAccount: number, windowMs: number) {
+  const fails = new Map<string, number[]>();
+  const recent = (key: string, now: number) => (fails.get(key) ?? []).filter((t) => now - t < windowMs);
   return (req: Request, res: Response, next: NextFunction) => {
-    const key = `${req.route?.path ?? req.path}|${clientIp(req)}`;
     const now = Date.now();
-    const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
-    if (recent.length >= max) return void res.status(429).json({ error: "too many attempts, try again in a few minutes" });
-    recent.push(now);
-    hits.set(key, recent);
-    if (hits.size > 10_000) hits.clear();
+    const route = req.route?.path ?? req.path;
+    const account = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const keys = [`${route}|ip|${clientIp(req)}`, ...(account ? [`${route}|acct|${account}`] : [])];
+    const limits = [perIp, perAccount];
+    if (keys.some((k, i) => recent(k, now).length >= limits[i]))
+      return void res.status(429).json({ error: "too many failed attempts, try again in 15 minutes" });
+    res.on("finish", () => {
+      if (res.statusCode < 400 || res.statusCode === 429) return;
+      for (const k of keys) fails.set(k, [...recent(k, Date.now()), Date.now()]);
+      if (fails.size > 50_000) fails.clear();
+    });
     next();
   };
 }
-const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 10), 15 * 60_000);
+const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 30), Number(process.env.WARREN_ACCOUNT_LIMIT ?? 10), 15 * 60_000);
 
 /** What a person sees about themselves: their member record with email and settings. */
 const self = (m: store.Member) => ({
@@ -258,7 +272,7 @@ app.post("/api/setup", signInLimit, (req, res) => {
     });
     store.setInstanceName(String(b.instanceName ?? b.org));
     const firstRoom = String(b.room ?? "").trim();
-    if (firstRoom) store.createRoom(firstRoom, null, "", owner.handle);
+    if (firstRoom) store.createRoom(firstRoom, null, "", owner.handle, true);
     setSessionCookie(req, res, owner.handle);
     console.log(`owner @${owner.handle} created`);
     res.status(201).json(self(owner));
@@ -913,7 +927,8 @@ app.get("/api/rooms/:id/messages", (req, res) => {
 app.post("/api/rooms/:id/messages", (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
-  if (!store.getRoom(req.params.id)) return void res.status(404).json({ error: "no such room" });
+  // Same answer for a room that doesn't exist and one you can't see: no telling them apart.
+  if (!store.canSee(m, req.params.id)) return void res.status(404).json({ error: "no such room" });
   try {
     res.status(201).json(store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text));
   } catch (e) {
@@ -1026,9 +1041,26 @@ app.get("/api/inbox", (req, res) => {
 // each message flagged `forYou` when it @mentions them. `?mentions=1` keeps only
 // those (bridges use this: agents are pushed only what's addressed to them).
 // Without: everything (demo overview and the admin token only).
+// Open event streams per member (or per address for the demo overview), and in total.
+const streams = new Map<string, number>();
+let totalStreams = 0;
+const STREAMS_PER_CALLER = Number(process.env.WARREN_STREAMS_PER_CALLER ?? 12);
+const STREAMS_TOTAL = Number(process.env.WARREN_STREAMS_TOTAL ?? 2000);
+
 app.get("/api/events", (req: Request, res: Response) => {
   const m = reader(req, res);
   if (m === false) return;
+  const who = m ? `m:${m.handle}` : `ip:${clientIp(req)}`;
+  if ((streams.get(who) ?? 0) >= STREAMS_PER_CALLER || totalStreams >= STREAMS_TOTAL)
+    return void res.status(429).json({ error: "too many open event streams; close some tabs or bridges" });
+  streams.set(who, (streams.get(who) ?? 0) + 1);
+  totalStreams++;
+  res.on("close", () => {
+    totalStreams--;
+    const n = (streams.get(who) ?? 1) - 1;
+    if (n > 0) streams.set(who, n);
+    else streams.delete(who);
+  });
   const mentionsOnly = req.query.mentions === "1";
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
   res.write(": connected\n\n");
@@ -1222,6 +1254,9 @@ const WEB = fileURLToPath(new URL("../../web/dist", import.meta.url));
 app.get(["/app", "/app/", "/app.html"], (_req, res) =>
   DASHBOARD_OPEN ? res.sendFile("app.html", { root: WEB }) : res.redirect(302, "/?waitlist=1#waitlist"),
 );
+// Privacy notice: always served (it reads the hub's name and contact from /api/config); the sandbox demo only on demo hubs.
+app.get("/privacy", (_req, res) => res.sendFile("privacy.html", { root: WEB }));
+app.get("/demo", (_req, res) => res.sendFile("demo.html", { root: WEB }));
 // A self-hosted hub has no use for the marketing landing page: / opens the dashboard.
 app.get("/", (req, res, next) => (DEMO || process.env.WARREN_LANDING === "1" ? next() : res.redirect(302, "/app")));
 app.use(express.static(WEB));

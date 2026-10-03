@@ -182,12 +182,20 @@ export const setInstanceName = (name: string) => setMeta("instance_name", name.t
 
 // --- rooms -------------------------------------------------------------------
 
-export function createRoom(name: string, parentId: string | null, context = "", createdBy: string | null = null): Room {
+/**
+ * Creates a room. Its id is the name as a slug plus a random suffix ("basket-migration-4f2a"):
+ * a plain slug would collide with rooms other people can't see and tell them those rooms
+ * exist. `exactId` keeps the plain slug, for the first room and the demo.
+ */
+export function createRoom(name: string, parentId: string | null, context = "", createdBy: string | null = null, exactId = false): Room {
   if (typeof name !== "string" || !name.trim()) throw new Error("room name is required");
   if (name.trim().length > 80) throw new Error("room names are at most 80 characters");
   if (parentId && !rooms.has(parentId)) throw new Error(`unknown parent room ${parentId}`);
+  const creator = createdBy ? (members.get(createdBy) ?? null) : null;
+  name = guardShared(creator, parentId, name, "room name");
+  context = guardShared(creator, parentId, String(context ?? ""), "room context");
   const room: Room = {
-    id: uniqueSlug(name, rooms),
+    id: exactId ? uniqueSlug(name, rooms) : randomSlug(name),
     parentId,
     name: name.trim(),
     context: String(context ?? ""),
@@ -209,12 +217,36 @@ export function createRoom(name: string, parentId: string | null, context = "", 
   return room;
 }
 
+/**
+ * Text that every agent in a room reads but nobody posts as a message (room
+ * context, room names, claim tasks) goes through the same guards: secrets are
+ * masked, and in a room shared with another company, text that looks like an
+ * attack is refused (post it as a message instead: messages can be held and
+ * reviewed, context can't). Returns the masked text.
+ */
+function guardShared(m: Member | null, roomId: string | null, text: string, what: string): string {
+  const clean = redactSecrets(text);
+  const flags = injectionFlags(clean.text);
+  if (flags.length && m && roomId && roomMembers(roomId).some((x) => x.org !== m.org))
+    throw new Error(
+      `this ${what} ${flags.join(", ")}: in a room shared with another company that is refused, because every agent here reads it as instructions. Post it as a message instead, where a person can review it`,
+    );
+  if (clean.redactions.length && roomId)
+    audit({ type: "redacted", roomId, actor: "hub", detail: `masked ${clean.redactions.join(", ")} in a ${what} from @${m?.handle ?? "admin"}` });
+  return clean.text;
+}
+
 export function updateContext(m: Member, roomId: string, context: string): Room {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
+  if (typeof context !== "string") throw new Error("context must be text");
+  if (context.length > 50_000) throw new Error("room context is at most 50 000 characters");
   const room = rooms.get(roomId)!;
-  room.context = context;
-  db.prepare("UPDATE rooms SET context = ? WHERE id = ?").run(context, roomId);
+  const clean = guardShared(m, roomId, context, "room context");
+  room.context = clean;
+  db.prepare("UPDATE rooms SET context = ? WHERE id = ?").run(clean, roomId);
   events.emit("room", room);
+  // Context is what agents trust most, so every change is on the record.
+  audit({ type: "room", roomId, actor: m.handle, detail: `@${m.handle} (${m.org}) changed the context of ${room.name}` });
   return room;
 }
 
@@ -224,7 +256,8 @@ export function renameRoom(roomId: string, name: string, actor: string): Room {
   if (typeof name !== "string" || !name.trim()) throw new Error("room name is required");
   if (name.trim().length > 80) throw new Error("room names are at most 80 characters");
   const before = room.name;
-  room.name = name.trim();
+  const by = members.get(actor) ?? null;
+  room.name = guardShared(by, roomId, name.trim(), "room name").trim();
   db.prepare("UPDATE rooms SET name = ? WHERE id = ?").run(room.name, roomId);
   events.emit("room", room);
   audit({ type: "room", roomId, actor, detail: `renamed ${before} to ${room.name}` });
@@ -1213,6 +1246,12 @@ function lockPrefix(pattern: string): string {
   return star === -1 ? p : p.slice(0, star);
 }
 
+/** A lock must name a directory or file: "*" or "/" would lock every path for every company. */
+function checkLockPattern(pattern: string) {
+  const prefix = lockPrefix(pattern).replace(/^\/+/, "");
+  if (!prefix || prefix === "." || prefix.length < 2) throw new Error(`"${pattern}" would lock every file; lock a directory or file, like src/api/**`);
+}
+
 function overlaps(a: string, b: string): boolean {
   const pa = lockPrefix(a);
   const pb = lockPrefix(b);
@@ -1238,11 +1277,15 @@ export function claim(m: Member, roomId: string, task: string, files: string[] =
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
   if (typeof task !== "string" || !task.trim()) throw new Error("task is required");
   if (!Array.isArray(files) || files.some((f) => typeof f !== "string" || !f.trim())) throw new Error("files must be paths");
+  if (files.length > 100) throw new Error("lock at most 100 paths at once");
+  files.forEach(checkLockPattern);
+  task = guardShared(m, roomId, task.slice(0, 500), "claim");
   const conflicts = lockConflicts(m, files);
   if (conflicts.length) {
     const c = conflicts[0];
-    const who = canSee(m, c.claim.roomId) ? `@${c.claim.by} (room ${c.claim.roomId}: "${c.claim.task}")` : "a member of another room";
-    throw new Error(`${c.file} is locked by ${who} via ${c.held}`);
+    // Someone in a room you can't see: say only that it's locked, not by whom or with which pattern.
+    if (!canSee(m, c.claim.roomId)) throw new Error(`${c.file} is locked by a member of another room`);
+    throw new Error(`${c.file} is locked by @${c.claim.by} (room ${c.claim.roomId}: "${c.claim.task}") via ${c.held}`);
   }
   const room = rooms.get(roomId)!;
   const created: Claim = { id: randomUUID(), roomId, by: m.handle, task: task.trim(), files, at: new Date().toISOString() };
@@ -1279,6 +1322,14 @@ export function release(m: Member, claimId: string, force = false): Claim {
 
 export function slug(name: string): string {
   return String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 40).replace(/-$/, "") || "room";
+}
+
+function randomSlug(name: string): string {
+  const base = slug(name).slice(0, 34).replace(/-$/, "");
+  for (;;) {
+    const id = `${base}-${randomUUID().slice(0, 4)}`;
+    if (!rooms.has(id)) return id;
+  }
 }
 
 function uniqueSlug(name: string, taken: Map<string, unknown>, reserved = new Set<string>()): string {

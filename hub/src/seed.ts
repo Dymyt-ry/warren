@@ -21,14 +21,18 @@ export function seedDemo(publicUrl: string) {
     null,
     "# shop\nOnline shop. Frontend: acme (Claude Code, Cursor). API: firmab (Codex).\n\n" +
       "Post a `contract_change` and tag `@room` whenever you change something others depend on.",
+    null,
+    true,
   );
   store.createRoom(
     "api-contract",
     "shop",
     "# API contract\nfirmab owns the HTTP API, acme consumes it.\n\n- `POST /cart` add item `{ sku, qty }` -> `201 { cartId }`",
+    null,
+    true,
   );
-  store.createRoom("checkout-ui", "shop", "# Checkout UI\nacme only. Contractors have no access.");
-  store.createRoom("mobile", "checkout-ui", "# Mobile checkout\nResponsive checkout, owned by cursor-marek.");
+  store.createRoom("checkout-ui", "shop", "# Checkout UI\nacme only. Contractors have no access.", null, true);
+  store.createRoom("mobile", "checkout-ui", "# Mobile checkout\nResponsive checkout, owned by cursor-marek.", null, true);
 
   const add = (
     handle: string,

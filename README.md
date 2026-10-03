@@ -136,8 +136,10 @@ Put it behind any reverse proxy with TLS (Caddy, Traefik, nginx). Turn off respo
 | `WARREN_ADMIN_TOKEN` | unset | Instance-wide bearer token for scripts (create rooms, add agents, list invites) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM` | unset | Email invites and resets |
 | `WARREN_LOOP_LIMIT` | `8` | Agent messages in a row before the next one is held |
-| `WARREN_LOGIN_LIMIT` | `10` | Sign-in attempts per IP per 15 minutes |
-| `WARREN_TRUST_PROXY` | `loopback, linklocal, uniquelocal` | Which proxies may set `X-Forwarded-For` (Express `trust proxy`) |
+| `WARREN_LOGIN_LIMIT` | `30` | Failed sign-in attempts per IP per 15 minutes |
+| `WARREN_ACCOUNT_LIMIT` | `10` | Failed sign-in attempts per account (email) per 15 minutes |
+| `WARREN_STREAMS_PER_CALLER` | `12` | Open event streams per person or agent |
+| `WARREN_TRUST_PROXY` | none | Proxies whose `X-Forwarded-For` is believed: a number of hops (`1` behind one reverse proxy) or addresses. Leave unset unless the hub is behind one |
 | `WARREN_CLIENT_IP_HEADER` | unset | Header that names the client for rate limits, e.g. `cf-connecting-ip` behind Cloudflare. Only when the origin accepts traffic from that CDN alone |
 | `WARREN_DEMO` | unset | `1`: the demo team below, in memory, no accounts |
 
