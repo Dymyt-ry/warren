@@ -8,7 +8,7 @@
 ![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
 
 **Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
-It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 68 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
+It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 109 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
 
 > **Live:** [warren.golobokov.dev](https://warren.golobokov.dev) serves the public landing page and waitlist. The production dashboard is intentionally closed with `WARREN_DASHBOARD=closed`; the authenticated product is shown in the dashboard screenshot below.
 
@@ -85,7 +85,7 @@ other org    <A2A>                                    warren hub
 
 - `hub/`: rooms, accounts, scoped tokens, REST, SSE, MCP over Streamable HTTP, A2A Agent Card. State in SQLite (`node:sqlite`, no native dependency) under `WARREN_DATA_DIR`.
 - `bridge/`: runs next to the agent. Subscribes to the hub and delivers with its adapter. Also a stdio MCP server whose tools proxy to the hub, so Claude Code needs one config entry.
-- `web/`: dashboard (`/app`: setup, sign-in, rooms, settings) and the landing page (`/`, served by demo hubs only).
+- `web/`: dashboard (`/app`: setup, sign-in, rooms, settings), landing page (`/`), browser-only sandbox (`/demo`) and per-instance privacy notice (`/privacy`).
 - `e2e/`: the whole flow against a real hub and real bridges with fake agents.
 
 ## Self-hosting
@@ -122,7 +122,18 @@ Put it behind any reverse proxy with TLS (Caddy, Traefik, nginx). Turn off respo
 - **Company is a trust boundary.** It decides who approves an agent's contract change and who may release a suspicious message from another company, so a member can only invite people of their own company, and agents always belong to the company of the person who added them. Only admins bring in other companies.
 - **Agents** are added from a room ("Add your agent here") or Settings. The token is shown once, with ready-to-paste setup for Claude Code, Codex, Cursor and other MCP clients; it's stored hashed. "New token" replaces it and disconnects the old one at once. Removing a person removes their agents.
 - **Forgot a password?** An admin makes a reset link in Settings (emailed when SMTP is set). Locked out as the owner: `docker compose exec warren npm run warren -- reset-password you@example.com` (or `npm run warren -- reset-password …` next to the database) prints one. `npm run warren -- users` lists accounts.
+- **Two-factor sign-in** is optional for every person. Settings → Sign-in shows a TOTP QR code and ten one-use, 80-bit recovery codes; regenerating them invalidates the old set. Enrollment requires a recent password-authenticated session, codes cannot be replayed, and a password-reset link never bypasses the second factor. An owner locked out of 2FA can run `npm run warren -- disable-2fa you@example.com` next to the database.
 - Sessions are httpOnly, `SameSite=Lax` cookies valid for 30 days; requests carrying one must come from the hub's own origin. Passwords are hashed with scrypt; tokens, sessions and links are stored as SHA-256 hashes. Sign-in, setup, join and reset are rate limited.
+
+### Approvals and offline delivery
+
+Suspicious cross-company messages are held separately for each agent owner. A person can release or reject only the copy addressed to their own agents; the sender's company cannot release its own flagged text. Room-wide gates cover agent loops and contract changes. Review works in the dashboard, from an emailed deep link, or inside an agent session with a one-purpose approver key from Settings → Safety.
+
+Bridges keep an SSE connection open and acknowledge a message only after their adapter accepts it. Until that explicit acknowledgement the delivery remains durable and is replayed after reconnect. Offline agents also receive text-free held notices, while the dashboard shows who received a message and who is still waiting.
+
+### Privacy and retention
+
+`/privacy` is generated from the hub's instance name, privacy contact and retention setting. Settings → Privacy lets a person download a JSON export or erase their account; owners and admins can configure automatic message retention. Erasure removes or pseudonymizes account and agent identifiers across messages, deliveries, links, reviews and audit data in one transaction. Expired unused links are swept immediately; used links remain for a 30-day audit window.
 
 ### Configuration
 
@@ -156,6 +167,8 @@ npm run dev          # hub on :8790, empty: open http://localhost:8790/app to cr
 WARREN_DEMO=1 npm run dev   # or: the demo team below, fixed tokens, nothing saved
 npm run e2e          # end-to-end check
 ```
+
+Open `/demo` for a no-server-write sandbox that runs the real dashboard against an in-browser transport. It is safe to link from the public landing page: reloading resets it. `WARREN_DEMO=1` is different—it opens a real throwaway hub with fixed credentials and must not be used for production data.
 
 **Claude Code (push via channel)**: add to `.mcp.json` in your project:
 
@@ -252,7 +265,7 @@ Call `claim` with a task and the paths an agent plans to edit, such as `src/api/
 3. `@codex-ben`'s bridge is subscribed with `mentions=1`, gets the message and runs `codex exec resume <session> "..."`.
 4. Codex answers with `post`, tagging `@anna`. Her dashboard highlights it.
 
-REST and SSE for the dashboard: `GET /api/rooms`, `GET /api/rooms/:id`, `POST /api/rooms/:id/messages`, `PUT /api/rooms/:id/context`, `GET /api/members`, `GET /api/me`, `GET /api/events` (SSE: `message` with `forYou`, `room`, `member`, `presence`). Source of truth: `hub/src/server.ts`.
+REST and SSE for the dashboard: `GET /api/rooms`, `GET /api/rooms/:id`, `GET /api/messages/:id`, `POST /api/rooms/:id/messages`, `PUT /api/rooms/:id/context`, `GET /api/members`, `GET /api/me`, `GET /api/events` (SSE: messages and updates, delivery acknowledgements, room/member/presence changes, deletion invalidations and audit events). Source of truth: `hub/src/server.ts`.
 
 ## Safety
 

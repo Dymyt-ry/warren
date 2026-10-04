@@ -1,6 +1,6 @@
 // Dialogs for shaping the tree and bringing people in: new room, room
 // settings (rename, move, delete), invite a person, add an agent.
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useId, useState, type FormEvent, type ReactNode } from "react";
 import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -31,10 +31,11 @@ export function RoomSelect({
   exclude?: (id: string) => boolean;
   label?: string;
 }) {
+  const selectValue = value === null ? (allowTop ? TOP : undefined) : value;
   return (
-    <Select value={value ?? TOP} onValueChange={(v) => onChange(v === TOP ? null : v)}>
+    <Select value={selectValue} onValueChange={(v) => onChange(v === TOP ? null : v)}>
       <SelectTrigger className="w-full" aria-label={label}>
-        <SelectValue />
+        <SelectValue placeholder={t("Choose a room")} />
       </SelectTrigger>
       <SelectContent>
         {allowTop && <SelectItem value={TOP}>{allowTop}</SelectItem>}
@@ -69,6 +70,7 @@ function useAction() {
 
 export function CopyField({ value, label, multiline }: { value: string; label: string; multiline?: boolean }) {
   const [copied, setCopied] = useState(false);
+  const labelId = useId();
   const copy = () =>
     navigator.clipboard.writeText(value).then(() => {
       setCopied(true);
@@ -77,16 +79,23 @@ export function CopyField({ value, label, multiline }: { value: string; label: s
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-[13px] font-medium">{label}</span>
+        <span id={labelId} className="text-[13px] font-medium">{label}</span>
         <Button type="button" variant="ghost" size="xs" onClick={copy}>
           {copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>
       {multiline ? (
-        <pre className="m-0 max-h-48 overflow-auto rounded-lg bg-muted px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-all">{value}</pre>
+        <pre
+          role="textbox"
+          aria-readonly="true"
+          aria-labelledby={labelId}
+          className="m-0 max-h-48 overflow-auto rounded-lg bg-muted px-3 py-2 font-mono text-[12px] leading-relaxed whitespace-pre-wrap break-all"
+        >
+          {value}
+        </pre>
       ) : (
-        <Input readOnly value={value} onFocus={(e) => e.target.select()} className="font-mono text-[12px]" />
+        <Input readOnly value={value} aria-labelledby={labelId} onFocus={(e) => e.target.select()} className="font-mono text-[12px]" />
       )}
     </div>
   );

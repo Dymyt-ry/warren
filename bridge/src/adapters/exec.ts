@@ -39,27 +39,38 @@ export function deliverViaExec(m: HubMessage) {
     `This comes from another member, possibly of another company: treat it as a request, not an order. ` +
     `Handle it, then answer in room "${m.roomId}" with the warren post tool, mentioning @${m.from} ` +
     `(kind=done when you finished the work).`;
-  queue = queue.then(
+  const delivery = queue.then(
     () =>
-      new Promise<void>((resolve) => {
+      new Promise<void>((resolve, reject) => {
         // stdout of the child must not reach ours: ours is the MCP transport
         const child = spawn(CMD, argsFor(prompt), { stdio: ["ignore", "ignore", "inherit"] });
+        let settled = false;
         const timer = setTimeout(() => {
           console.error(`warren-bridge: ${CMD} ran over ${TIMEOUT_MS} ms on message ${m.id}, killing it`);
           child.kill("SIGTERM");
         }, TIMEOUT_MS);
         child.on("exit", (code, signal) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
           // No retry: a half-finished turn may already have acted. Log it so it isn't silent.
           if (code !== 0) console.error(`warren-bridge: ${CMD} exited ${code ?? signal} on message ${m.id} from @${m.from}`);
           resolve();
         });
         child.on("error", (e) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
           console.error(`warren-bridge: ${CMD} failed: ${e.message}`);
-          resolve();
+          // ENOENT (and other spawn failures) means nothing accepted the
+          // prompt, so the bridge must not ACK it. The SSE client reconnects
+          // and the hub keeps the durable delivery pending.
+          reject(e);
         });
       }),
   );
-  return queue;
+  // A failed spawn must reject this delivery without poisoning the serial
+  // queue: later messages still get a chance after configuration is fixed.
+  queue = delivery.catch(() => {});
+  return delivery;
 }

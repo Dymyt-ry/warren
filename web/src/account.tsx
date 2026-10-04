@@ -193,17 +193,30 @@ export function JoinScreen({ code, onDone }: { code: string; onDone: (m: Member)
   );
 }
 
-export function ResetScreen({ code, onDone }: { code: string; onDone: (m: Member) => void }) {
-  const [info, setInfo] = useState<{ instanceName: string; email: string; name: string } | null>(null);
+export function ResetScreen({ code, onDone }: { code: string; onDone: (m: Member | null) => void }) {
+  const [info, setInfo] = useState<{ instanceName: string; email: string; name: string; twoFactor: boolean } | null>(null);
   const [gone, setGone] = useState<string | null>(null);
   const [password, setPassword] = useState("");
+  const [requiresLogin, setRequiresLogin] = useState(false);
   useEffect(() => {
     api.resetInfo(code).then(setInfo, (e) => setGone((e as Error).message));
   }, [code]);
-  const { busy, error, onSubmit } = useSubmit(async () => onDone(await api.reset(code, password)));
+  const { busy, error, onSubmit } = useSubmit(async () => {
+    const result = await api.reset(code, password);
+    if ("requiresLogin" in result) setRequiresLogin(true);
+    else onDone(result);
+  });
 
   if (gone) return <Screen title={t("This link doesn't work anymore")} lead={t("Reset links work once and for a day. Ask an admin for a new one.")}>{null}</Screen>;
   if (!info) return <Screen title={t("Opening your link")}>{null}</Screen>;
+  if (requiresLogin)
+    return (
+      <Screen title={t("Password changed")} lead={t("Sign in with your new password and a code from your authenticator app.")}>
+        <Button size="lg" className="h-10" onClick={() => onDone(null)}>
+          {t("Continue to sign in")}
+        </Button>
+      </Screen>
+    );
   return (
     <Screen title={t("Set a new password")} lead={`For ${info.email} on ${info.instanceName}. You'll be signed out everywhere else.`}>
       <form className="flex flex-col gap-5" onSubmit={onSubmit}>
@@ -213,7 +226,7 @@ export function ResetScreen({ code, onDone }: { code: string; onDone: (m: Member
         </Field>
         {error && <p className="error">{error}</p>}
         <Button type="submit" size="lg" className="h-10" disabled={busy}>
-          {busy ? "Saving" : "Save and sign in"}
+          {busy ? "Saving" : info.twoFactor ? t("Save password") : t("Save and sign in")}
         </Button>
       </form>
     </Screen>

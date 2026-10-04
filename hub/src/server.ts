@@ -10,11 +10,12 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
 import { tx } from "./db.js";
-import { checkPassword, hashPassword, newRecoveryCodes, newSecret, newTotpSecret, totpUri, verifyPassword, verifyTotp } from "./auth.js";
+import { checkPassword, hashPassword, matchingTotpStep, newRecoveryCodes, newSecret, newTotpSecret, totpUri, verifyPassword } from "./auth.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
 import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
 import { canEmail, sendHeld, sendInvite, sendReset, sendWaitlistConfirmation } from "./email.js";
+import { gateDecision } from "./safety.js";
 
 const PORT = Number(process.env.PORT ?? 8790);
 const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
@@ -75,9 +76,9 @@ function cookies(req: Request): Record<string, string> {
   return out;
 }
 
-/** `Authorization: Bearer <token>`, or `?token=` (EventSource can't set headers). */
-function presentedToken(req: Request): string | undefined {
-  const q = req.query.token;
+/** Bearer token; EventSource is the sole endpoint allowed to use `?token=`. */
+function presentedToken(req: Request, allowQuery = false): string | undefined {
+  const q = allowQuery ? req.query.token : undefined;
   return req.headers.authorization?.replace(/^Bearer\s+/i, "") || (typeof q === "string" ? q : undefined) || undefined;
 }
 
@@ -93,8 +94,8 @@ function sameSecret(a: string | undefined, b: string | undefined): boolean {
 const isAdminToken = (req: Request) => sameSecret(presentedToken(req), ADMIN_TOKEN);
 
 /** The member behind the bearer token (agent token, or a session id for scripts), else the session cookie. */
-function caller(req: Request): store.Member | undefined {
-  const token = presentedToken(req);
+function caller(req: Request, allowQuery = false): store.Member | undefined {
+  const token = presentedToken(req, allowQuery);
   if (token) return token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token);
   return store.sessionMember(sessionId(req));
 }
@@ -141,19 +142,20 @@ function requireAdmin(req: Request, res: Response): store.Member | null | undefi
  * in demo mode, or the admin token). Answers 401 and returns false for an
  * unknown token, or for an anonymous visitor outside demo mode.
  */
-function reader(req: Request, res: Response): store.Member | undefined | false {
-  const m = caller(req);
+function reader(req: Request, res: Response, allowQuery = false): store.Member | undefined | false {
+  const m = caller(req, allowQuery);
   if (m) return m;
-  if (isAdminToken(req) || (OPEN_DOORS && !presentedToken(req))) return undefined;
-  res.status(401).json({ error: presentedToken(req) ? "unknown token" : "sign in first" });
+  const token = presentedToken(req, allowQuery);
+  if (sameSecret(token, ADMIN_TOKEN) || (OPEN_DOORS && !token)) return undefined;
+  res.status(401).json({ error: token ? "unknown token" : "sign in first" });
   return false;
 }
 
 const httpError = (res: Response, status: number, e: unknown) => res.status(status).json({ error: (e as Error).message });
 const statusFor = (e: unknown, fallback = 400) => ((e as Error).message.startsWith("no such") ? 404 : fallback);
 
-function setSessionCookie(req: Request, res: Response, handle: string) {
-  const { id, expiresAt } = store.createSession(handle);
+function setSessionCookie(req: Request, res: Response, handle: string, recentlyAuthenticated = true) {
+  const { id, expiresAt } = store.createSession(handle, recentlyAuthenticated);
   const secure = req.secure || PUBLIC_URL.startsWith("https:");
   res.setHeader(
     "Set-Cookie",
@@ -161,6 +163,11 @@ function setSessionCookie(req: Request, res: Response, handle: string) {
   );
   return id;
 }
+
+const activeSessionId = (req: Request) => {
+  const bearer = presentedToken(req);
+  return bearer?.startsWith("ws_") ? bearer : sessionId(req);
+};
 
 function clearSessionCookie(res: Response) {
   res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
@@ -172,19 +179,20 @@ function clearSessionCookie(res: Response) {
  * guesses. Successful requests don't count, so people behind one proxy address
  * don't lock each other out by signing in.
  */
-function limiter(perIp: number, perAccount: number, windowMs: number) {
+function limiter(perIp: number, perAccount: number, windowMs: number, accountFor: (req: Request) => string = (req) =>
+  typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "") {
   const fails = new Map<string, number[]>();
   const recent = (key: string, now: number) => (fails.get(key) ?? []).filter((t) => now - t < windowMs);
   return (req: Request, res: Response, next: NextFunction) => {
     const now = Date.now();
     const route = req.route?.path ?? req.path;
-    const account = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+    const account = accountFor(req);
     const keys = [`${route}|ip|${clientIp(req)}`, ...(account ? [`${route}|acct|${account}`] : [])];
     const limits = [perIp, perAccount];
     if (keys.some((k, i) => recent(k, now).length >= limits[i]))
       return void res.status(429).json({ error: "too many failed attempts, try again in 15 minutes" });
     res.on("finish", () => {
-      if (res.statusCode < 400 || res.statusCode === 429) return;
+      if (res.statusCode < 400 || res.statusCode === 429 || res.locals.rateLimitNeutral) return;
       for (const k of keys) fails.set(k, [...recent(k, Date.now()), Date.now()]);
       if (fails.size > 50_000) fails.clear();
     });
@@ -192,6 +200,18 @@ function limiter(perIp: number, perAccount: number, windowMs: number) {
   };
 }
 const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 30), Number(process.env.WARREN_ACCOUNT_LIMIT ?? 10), 15 * 60_000);
+const authenticatedLimit = limiter(
+  Number(process.env.WARREN_LOGIN_LIMIT ?? 30),
+  Number(process.env.WARREN_ACCOUNT_LIMIT ?? 10),
+  15 * 60_000,
+  (req) => caller(req)?.handle ?? store.approverHandleForKey(presentedToken(req)) ?? "",
+);
+
+function useTotp(handle: string, code: unknown): boolean {
+  const secret = store.totpSecretOf(handle);
+  const step = secret ? matchingTotpStep(secret, code) : null;
+  return step !== null && store.useTotpStep(handle, step);
+}
 
 /** What a person sees about themselves: their member record with email and settings. */
 const self = (m: store.Member) => ({
@@ -290,9 +310,11 @@ app.post("/api/auth/login", signInLimit, (req, res) => {
   if (!m || !ok) return void res.status(401).json({ error: "wrong email or password" });
   if (m.twoFactor) {
     const code = req.body?.code;
-    if (!code) return void res.status(401).json({ error: "enter the code from your authenticator app", twoFactor: true });
-    const secret = store.totpSecretOf(m.handle);
-    if (!(secret && verifyTotp(secret, code)) && !store.useRecoveryCode(m.handle, code))
+    if (!code) {
+      res.locals.rateLimitNeutral = true; // The password was right; this is a challenge, not a failed guess.
+      return void res.status(401).json({ error: "enter the code from your authenticator app", twoFactor: true });
+    }
+    if (!useTotp(m.handle, code) && !store.useRecoveryCode(m.handle, code))
       return void res.status(401).json({ error: "that code didn't work; try the next one, or a recovery code", twoFactor: true });
   }
   setSessionCookie(req, res, m.handle);
@@ -312,7 +334,7 @@ app.post("/api/login", (req, res) => {
   if (!OPEN_DOORS) return void res.status(404).json({ error: "login by handle is only available in demo mode" });
   const m = store.getMember(String(req.body?.handle ?? ""));
   if (!m || m.kind !== "human" || m.disabled) return void res.status(404).json({ error: "no such person" });
-  const token = setSessionCookie(req, res, m.handle);
+  const token = setSessionCookie(req, res, m.handle, false);
   res.json({ ...self(m), token });
 });
 
@@ -332,14 +354,16 @@ app.put("/api/me", (req, res) => {
 });
 
 // Change your password: needs the current one; signs you out everywhere else.
-app.post("/api/me/password", signInLimit, (req, res) => {
+app.post("/api/me/password", authenticatedLimit, (req, res) => {
   const m = requirePerson(req, res);
   if (!m) return;
   if (!verifyPassword(String(req.body?.current ?? ""), store.passwordHashOf(m.handle)))
     return void res.status(403).json({ error: "your current password is wrong" });
   try {
     store.setPasswordHash(m.handle, hashPassword(checkPassword(req.body?.password)));
-    store.endSessions(m.handle, sessionId(req));
+    const current = activeSessionId(req);
+    store.endSessions(m.handle, current);
+    if (current) store.markSessionAuthenticated(current, m.handle);
     res.json({ ok: true });
   } catch (e) {
     httpError(res, 400, e);
@@ -367,38 +391,63 @@ app.put("/api/me/prefs", (req, res) => {
 });
 
 // Two-factor sign-in (TOTP). Setup returns a secret to scan; enable confirms it with a code.
-app.post("/api/me/2fa/setup", (req, res) => {
+app.post("/api/me/2fa/setup", authenticatedLimit, (req, res) => {
   const m = requirePerson(req, res);
   if (!m) return;
   if (m.twoFactor) return void res.status(409).json({ error: "two-factor sign-in is already on" });
+  const current = activeSessionId(req);
+  if (!current || store.sessionMember(current)?.handle !== m.handle)
+    return void res.status(401).json({ error: "sign in with your password before setting up two-factor sign-in" });
+  if (!store.sessionRecentlyAuthenticated(current, m.handle)) {
+    if (!verifyPassword(String(req.body?.password ?? ""), store.passwordHashOf(m.handle)))
+      return void res.status(403).json({ error: "enter your password again before setting up two-factor sign-in" });
+    store.markSessionAuthenticated(current, m.handle);
+  }
   const secret = newTotpSecret();
-  store.setPendingTotp(m.handle, secret);
-  res.json({ secret, uri: totpUri(secret, m.email ?? m.handle, `Warren (${store.instanceName()})`) });
+  const expiresAt = store.setPendingTotp(m.handle, secret, current);
+  res.json({ secret, uri: totpUri(secret, m.email ?? m.handle, `Warren (${store.instanceName()})`), expiresAt });
 });
 
-app.post("/api/me/2fa/enable", signInLimit, (req, res) => {
+app.post("/api/me/2fa/enable", authenticatedLimit, (req, res) => {
   const m = requirePerson(req, res);
   if (!m) return;
-  const secret = store.pendingTotpOf(m.handle);
-  if (!secret) return void res.status(409).json({ error: "start the setup first" });
-  if (!verifyTotp(secret, req.body?.code)) return void res.status(400).json({ error: "that code didn't match; check the time on your phone and try the next one" });
+  const current = activeSessionId(req);
+  if (!current) return void res.status(409).json({ error: "start the setup again in this signed-in session" });
+  const pending = store.pendingTotpOf(m.handle, current);
+  if (!pending) return void res.status(409).json({ error: "start the setup again in this signed-in session" });
+  const step = matchingTotpStep(pending.secret, req.body?.code);
+  if (step === null) return void res.status(400).json({ error: "that code didn't match; check the time on your phone and try the next one" });
   const codes = newRecoveryCodes();
-  store.enableTotp(m.handle, secret, codes);
-  store.endSessions(m.handle, sessionId(req));
+  if (!store.enableTotp(m.handle, pending.secret, codes, step, current))
+    return void res.status(409).json({ error: "that setup expired; start it again" });
+  store.endSessions(m.handle, current);
   store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} turned on two-factor sign-in` });
   res.json({ recoveryCodes: codes });
 });
 
-app.post("/api/me/2fa/disable", signInLimit, (req, res) => {
+app.post("/api/me/2fa/disable", authenticatedLimit, (req, res) => {
   const m = requirePerson(req, res);
   if (!m) return;
   if (!verifyPassword(String(req.body?.password ?? ""), store.passwordHashOf(m.handle))) return void res.status(403).json({ error: "your password is wrong" });
-  const secret = store.totpSecretOf(m.handle);
-  if (secret && !verifyTotp(secret, req.body?.code) && !store.useRecoveryCode(m.handle, req.body?.code))
+  if (!useTotp(m.handle, req.body?.code) && !store.useRecoveryCode(m.handle, req.body?.code))
     return void res.status(403).json({ error: "enter a current code or a recovery code" });
   store.disableTotp(m.handle);
   store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} turned off two-factor sign-in` });
   res.json(self(m));
+});
+
+app.post("/api/me/2fa/recovery-codes", authenticatedLimit, (req, res) => {
+  const m = requirePerson(req, res);
+  if (!m) return;
+  if (!m.twoFactor) return void res.status(409).json({ error: "two-factor sign-in is not on" });
+  if (!verifyPassword(String(req.body?.password ?? ""), store.passwordHashOf(m.handle)))
+    return void res.status(403).json({ error: "your password is wrong" });
+  if (!useTotp(m.handle, req.body?.code) && !store.useRecoveryCode(m.handle, req.body?.code))
+    return void res.status(403).json({ error: "enter a current code or a recovery code" });
+  const codes = newRecoveryCodes();
+  store.replaceRecoveryCodes(m.handle, codes);
+  store.audit({ type: "member", roomId: "*", actor: m.handle, target: m.handle, detail: `@${m.handle} regenerated two-factor recovery codes` });
+  res.json({ recoveryCodes: codes });
 });
 
 // Approver keys: put one next to your agents so you can approve held messages from inside their session.
@@ -431,7 +480,7 @@ app.get("/api/me/export", (req, res) => {
 });
 
 // Delete your account (GDPR art. 17). { password, deleteMessages }
-app.delete("/api/me", signInLimit, (req, res) => {
+app.delete("/api/me", authenticatedLimit, (req, res) => {
   const m = requirePerson(req, res);
   if (!m) return;
   if (m.role === "owner") return void res.status(403).json({ error: "the owner can't leave; hand over ownership in Settings first" });
@@ -453,7 +502,7 @@ function approver(req: Request, res: Response): store.Member | undefined {
   return m;
 }
 
-app.get("/api/session-review/:id", signInLimit, (req, res) => {
+app.get("/api/session-review/:id", authenticatedLimit, (req, res) => {
   const m = approver(req, res);
   if (!m) return;
   const msg = store.getMessage(String(req.params.id));
@@ -465,7 +514,7 @@ app.get("/api/session-review/:id", signInLimit, (req, res) => {
   res.json({ id: msg.id, roomId: msg.roomId, from: msg.from, fromKind: msg.fromKind, org: msg.org, kind: msg.kind, text: msg.text, flags: msg.safety.flags, at: msg.at, agents });
 });
 
-app.post("/api/session-review/:id", signInLimit, (req, res) => {
+app.post("/api/session-review/:id", authenticatedLimit, (req, res) => {
   const m = approver(req, res);
   if (!m) return;
   const decision = req.body?.decision;
@@ -631,7 +680,7 @@ app.get("/api/reset/:code", (req, res) => {
   const link = store.findLink(req.params.code, "reset");
   const m = link?.handle ? store.getMember(link.handle) : undefined;
   if (!link || !m || m.disabled) return void res.status(404).json({ error: "this reset link is used up or expired" });
-  res.json({ instanceName: store.instanceName(), email: m.email, name: m.name });
+  res.json({ instanceName: store.instanceName(), email: m.email, name: m.name, twoFactor: m.twoFactor });
 });
 
 app.post("/api/reset/:code", signInLimit, (req, res) => {
@@ -640,9 +689,17 @@ app.post("/api/reset/:code", signInLimit, (req, res) => {
   if (!link || !m || m.disabled) return void res.status(404).json({ error: "this reset link is used up or expired" });
   try {
     const hash = hashPassword(checkPassword(req.body?.password));
-    if (!store.useLink(link.id, m.handle)) throw new Error("this reset link was just used or has expired");
-    store.setPasswordHash(m.handle, hash);
-    store.endSessions(m.handle);
+    tx(() => {
+      if (!store.useLink(link.id, m.handle)) throw new Error("this reset link was just used or has expired");
+      store.setPasswordHash(m.handle, hash);
+      store.endSessions(m.handle);
+    });
+    // A reset link replaces only the password factor. For a 2FA account it
+    // must not create a fully authenticated session by itself.
+    if (m.twoFactor) {
+      clearSessionCookie(res);
+      return void res.json({ ok: true, twoFactor: true, requiresLogin: true });
+    }
     setSessionCookie(req, res, m.handle);
     res.json(self(m));
   } catch (e) {
@@ -755,7 +812,9 @@ function createAgent(req: Request, res: Response) {
       handle: b.handle || undefined,
       name: b.name ?? b.agentName ?? b.handle,
       kind: "agent",
-      org: (store.isAdmin(m) || !m ? b.org : undefined) ?? m?.org,
+      // Any owned agent is always in its owner's trust boundary, including
+      // agents created by an owner/admin. Only admin-token agents are unowned.
+      org: m?.org ?? b.org,
       scopeRoomId: b.room,
       adapter: b.adapter,
       token,
@@ -924,13 +983,22 @@ app.get("/api/rooms/:id/messages", (req, res) => {
   res.json(store.recentMessages(room.id).map((x) => store.viewFor(m, x)));
 });
 
+app.get("/api/messages/:id", (req, res) => {
+  const m = reader(req, res);
+  if (m === false) return;
+  const msg = store.getMessage(req.params.id);
+  if (!msg || (m && !store.canSee(m, msg.roomId))) return void res.status(404).json({ error: "no such message" });
+  res.json(store.withDeliveries(m, store.viewFor(m, msg)));
+});
+
 app.post("/api/rooms/:id/messages", (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
   // Same answer for a room that doesn't exist and one you can't see: no telling them apart.
   if (!store.canSee(m, req.params.id)) return void res.status(404).json({ error: "no such room" });
   try {
-    res.status(201).json(store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text));
+    const posted = store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text);
+    res.status(201).json(store.withDeliveries(m, posted));
   } catch (e) {
     httpError(res, store.canSee(m, req.params.id) ? 400 : 403, e);
   }
@@ -1036,6 +1104,36 @@ app.get("/api/inbox", (req, res) => {
   if (m) res.json(store.inbox(m, req.query.since as string | undefined, req.query.all !== "1"));
 });
 
+// Bridges acknowledge only after their adapter accepted a message. Until this
+// explicit ack, reconnect catch-up keeps the message durable.
+const DELIVERY_LEASE_MS = Math.max(30_000, Number(process.env.WARREN_DELIVERY_LEASE_MS ?? 15 * 60_000));
+const deliveryLeases = new Map<string, { streamId: string; expiresAt: number }>();
+let lastDeliveryLeaseSweep = 0;
+const deliveryLeaseKey = (messageId: string, handle: string) => `${messageId}\0${handle}`;
+const acquireDeliveryLease = (messageId: string, handle: string, streamId: string) => {
+  const key = deliveryLeaseKey(messageId, handle);
+  const now = Date.now();
+  if (now - lastDeliveryLeaseSweep > 60_000) {
+    for (const [leasedKey, lease] of deliveryLeases) if (lease.expiresAt <= now) deliveryLeases.delete(leasedKey);
+    lastDeliveryLeaseSweep = now;
+  }
+  const existing = deliveryLeases.get(key);
+  if (existing && existing.expiresAt > now) return false;
+  deliveryLeases.set(key, { streamId, expiresAt: now + DELIVERY_LEASE_MS });
+  return true;
+};
+const releaseDeliveryLease = (messageId: string, handle: string) => deliveryLeases.delete(deliveryLeaseKey(messageId, handle));
+
+app.post("/api/deliveries/:id/ack", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  const msg = store.getMessage(req.params.id);
+  if (!msg || m.kind !== "agent" || !store.isFor(m, msg)) return void res.status(404).json({ error: "no such delivery" });
+  store.markDelivered(msg, m.handle);
+  releaseDeliveryLease(msg.id, m.handle);
+  res.json({ ok: true });
+});
+
 // --- SSE ---------------------------------------------------------------------
 // With a token or session: what that member may see, minus their own messages,
 // each message flagged `forYou` when it @mentions them. `?mentions=1` keeps only
@@ -1048,7 +1146,7 @@ const STREAMS_PER_CALLER = Number(process.env.WARREN_STREAMS_PER_CALLER ?? 12);
 const STREAMS_TOTAL = Number(process.env.WARREN_STREAMS_TOTAL ?? 2000);
 
 app.get("/api/events", (req: Request, res: Response) => {
-  const m = reader(req, res);
+  const m = reader(req, res, true);
   if (m === false) return;
   const who = m ? `m:${m.handle}` : `ip:${clientIp(req)}`;
   if ((streams.get(who) ?? 0) >= STREAMS_PER_CALLER || totalStreams >= STREAMS_TOTAL)
@@ -1062,12 +1160,13 @@ app.get("/api/events", (req: Request, res: Response) => {
     else streams.delete(who);
   });
   const mentionsOnly = req.query.mentions === "1";
+  const streamId = randomUUID();
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
   res.write(": connected\n\n");
   const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   // Access is re-read on every event: a member moved, paused or removed, a session signed out
   // or expired, a token replaced: the stream sees it at once (and closes on the next ping).
-  const token = presentedToken(req);
+  const token = presentedToken(req, true);
   const credential = () => (token ? (token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token)) : store.sessionMember(sessionId(req)));
   const live = () => {
     if (!m) return undefined;
@@ -1075,23 +1174,28 @@ app.get("/api/events", (req: Request, res: Response) => {
     return me?.handle === m.handle ? me : undefined;
   };
 
-  const onMessage = (msg: store.Message) => {
+  const onMessage = (msg: store.Message, late = false) => {
     const me = live();
     if (!m) return send("message", msg);
     if (!me || !store.canSee(me, msg.roomId) || msg.from === me.handle) return;
     const forYou = store.isFor(me, msg);
     if (mentionsOnly) {
-      // Bridges: each message is pushed once, and counts as delivered.
-      if (!forYou || !store.markDelivered(msg, me.handle)) return;
+      // Delivery is recorded only by POST /api/deliveries/:id/ack after the
+      // bridge accepted this frame. A short-lived in-memory lease prevents
+      // two concurrent bridges for one agent from both accepting it first.
+      if (!forYou || store.wasDelivered(msg.id, me.handle)) return;
+      if (!acquireDeliveryLease(msg.id, me.handle, streamId)) return;
     }
-    send("message", { ...store.withDeliveries(me, store.viewFor(me, msg)), forYou });
+    send("message", { ...store.withDeliveries(me, store.viewFor(me, msg)), forYou, ...(late ? { late: true } : {}) });
   };
   // A message to this agent waits for its person: tell the bridge (no text) so it can ask them.
   const onHeld = (msg: store.Message) => {
     const me = live();
     if (!mentionsOnly || !me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
     const approval = msg.safety.approvals?.[store.approvalKey(me)];
-    if (!approval?.agents.includes(me.handle) || !(msg.mentionsRoom || msg.mentions.includes(me.handle))) return;
+    const addressed = msg.mentionsRoom || msg.mentions.includes(me.handle);
+    const reviewable = approval?.decision === "pending" && approval.agents.includes(me.handle);
+    if (!addressed || (!reviewable && gateDecision(msg.safety) !== "pending")) return;
     send("held", {
       id: msg.id,
       roomId: msg.roomId,
@@ -1099,7 +1203,8 @@ app.get("/api/events", (req: Request, res: Response) => {
       org: msg.org,
       kind: msg.kind,
       flags: msg.safety.flags,
-      waitsFor: store.approvalKey(me),
+      waitsFor: reviewable ? store.approvalKey(me) : msg.safety.flags.includes("needs-approval") ? `org:${msg.org}` : "a person in the room",
+      reviewable,
       reviewUrl: `${PUBLIC_URL}/app?review=${msg.id}`,
     });
   };
@@ -1112,7 +1217,18 @@ app.get("/api/events", (req: Request, res: Response) => {
   // Safety status changed (a person released or rejected a held message).
   const onMessageUpdate = (msg: store.Message) => {
     const me = live();
-    if (mentionsOnly || (m && (!me || !store.canSee(me, msg.roomId)))) return;
+    if (mentionsOnly) {
+      if (!me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
+      const approval = msg.safety.approvals?.[store.approvalKey(me)];
+      const wasTarget =
+        (Array.isArray(approval?.agents) && approval.agents.includes(me.handle)) ||
+        msg.mentionsRoom ||
+        msg.mentions.includes(me.handle);
+      if (wasTarget && (gateDecision(msg.safety) === "rejected" || approval?.decision === "rejected"))
+        send("held_resolution", { id: msg.id, roomId: msg.roomId, resolution: "rejected", waitsFor: store.approvalKey(me) });
+      return;
+    }
+    if (m && (!me || !store.canSee(me, msg.roomId))) return;
     send("message_update", me ? store.viewFor(me, msg) : msg);
   };
   const onRoom = (r: store.Room) => {
@@ -1124,6 +1240,16 @@ app.get("/api/events", (req: Request, res: Response) => {
     const me = live();
     if (mentionsOnly || (m && !(me && (me.scopeRoomId === null || (r.parentId && store.canSee(me, r.parentId)))))) return;
     send("room_deleted", { id: r.id });
+  };
+  const onRoomMessagesDeleted = (r: { roomId: string }) => {
+    const me = live();
+    if (!mentionsOnly && (!m || (me && store.canSee(me, r.roomId)))) send("room_messages_deleted", r);
+  };
+  // Data-free invalidation is used when the old access topology is needed to
+  // know who must remove stale state (room moves and account erasure).
+  const onInvalidate = (r: { handles: string[] }) => {
+    const me = live();
+    if (!mentionsOnly && (!m || (me && r.handles.includes(me.handle)))) send("invalidate", {});
   };
   // Other members are only visible to those who share a room with them.
   const knows = (handle: string) => {
@@ -1155,6 +1281,8 @@ app.get("/api/events", (req: Request, res: Response) => {
     ["message_update", onMessageUpdate],
     ["room", onRoom],
     ["room_deleted", onRoomDeleted],
+    ["room_messages_deleted", onRoomMessagesDeleted],
+    ["invalidate", onInvalidate],
     ["member", onMember],
     ["presence", onPresence],
     ["audit", onAudit],
@@ -1165,12 +1293,28 @@ app.get("/api/events", (req: Request, res: Response) => {
   const ping = setInterval(() => (m && !live() ? res.end() : res.write(": ping\n\n")), 15_000);
   for (const [e, fn] of handlers) store.events.on(e, fn);
   if (m) store.trackConnection(m, 1);
-  // An agent that was offline catches up: what it was sent in the last week and never got.
-  if (m && mentionsOnly)
-    for (const msg of store.undelivered(m)) if (store.markDelivered(msg, m.handle)) send("message", { ...store.viewFor(m, msg), forYou: true, late: true });
+  // An agent that was offline catches up. Held notices are replayed without
+  // text until resolved; normal messages remain pending until the bridge acks.
+  if (m && mentionsOnly) {
+    let cursor = 0;
+    do {
+      const page = store.pendingHeld(m, cursor);
+      for (const msg of page.messages) onHeld(msg);
+      cursor = page.nextSeq ?? 0;
+      if (!page.nextSeq) break;
+    } while (true);
+    cursor = 0;
+    do {
+      const page = store.undelivered(m, cursor);
+      for (const msg of page.messages) onMessage(msg, true);
+      cursor = page.nextSeq ?? 0;
+      if (!page.nextSeq) break;
+    } while (true);
+  }
   req.on("close", () => {
     clearInterval(ping);
     for (const [e, fn] of handlers) store.events.off(e, fn);
+    for (const [key, lease] of deliveryLeases) if (lease.streamId === streamId) deliveryLeases.delete(key);
     if (m) store.trackConnection(m, -1);
   });
 });

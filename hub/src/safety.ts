@@ -16,16 +16,22 @@ export interface Safety {
   status: SafetyStatus; // overall: held while any decision is pending
   flags: string[]; // e.g. "override-instructions", "shell-payload", "agent-loop"
   redactions: string[]; // kinds of secrets that were masked, e.g. "github-token"
-  reviewedBy?: string; // handle of the person who made the last decision
+  reviewedBy?: string; // legacy/summary: handle of the person who made the last decision
   // A room-wide decision (agent loop, contract change under the approval policy):
   // nobody's agent gets the message until it's released.
-  gate?: Decision;
+  gate?: GateDecision;
   // Per-recipient decisions for a message from another company: each person
   // decides for their own agents ("org:<org>" for agents nobody owns).
   approvals?: Record<string, Approval>;
 }
 
 export type Decision = "pending" | "released" | "rejected";
+
+export interface GateDecision {
+  decision: Decision;
+  by?: string;
+  at?: string;
+}
 
 export interface Approval {
   decision: Decision;
@@ -34,14 +40,17 @@ export interface Approval {
   at?: string;
 }
 
+export const gateDecision = (s: Safety): Decision | undefined => s.gate?.decision;
+
 /** Flags that mean "this text may be an attack", as opposed to process holds. */
 export const isAttackFlag = (f: string) => f !== "agent-loop" && f !== "needs-approval" && f !== "strict";
 
 /** Overall status from the gate and the per-owner decisions. */
 export function settle(s: Safety): SafetyStatus {
-  const decisions = [...(s.gate ? [s.gate] : []), ...Object.values(s.approvals ?? {}).map((a) => a.decision)];
+  const gate = gateDecision(s);
+  const decisions = [...(gate ? [gate] : []), ...Object.values(s.approvals ?? {}).map((a) => a.decision)];
   if (decisions.length === 0) return "delivered";
-  if (s.gate === "rejected") return "rejected";
+  if (gate === "rejected") return "rejected";
   if (decisions.includes("pending")) return "held";
   return decisions.includes("released") ? "released" : "rejected";
 }

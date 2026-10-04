@@ -129,6 +129,69 @@ const MIGRATIONS: string[] = [
     last_used_at TEXT
   );
   `,
+  `
+  -- Security state added after the first 2FA/delivery release.
+  ALTER TABLE members ADD COLUMN totp_pending_session_hash TEXT;
+  ALTER TABLE members ADD COLUMN totp_pending_expires_at TEXT;
+  ALTER TABLE members ADD COLUMN totp_last_step INTEGER;
+  ALTER TABLE sessions ADD COLUMN authenticated_at TEXT;
+
+  -- Erased handles remain unavailable without retaining the handle itself.
+  CREATE TABLE reserved_handles (
+    handle_hash TEXT PRIMARY KEY,
+    erased_at TEXT NOT NULL
+  );
+
+  -- Old enrollment secrets were not session-bound, and old recovery codes
+  -- had only 32 bits and a fast hash. They cannot be upgraded without the
+  -- plaintext, so invalidate them fail-closed.
+  UPDATE members
+     SET totp_pending = NULL,
+         recovery_codes = CASE WHEN totp_secret IS NULL THEN NULL ELSE '[]' END;
+
+  CREATE INDEX deliveries_handle ON deliveries(handle, message_id);
+  CREATE INDEX links_expiry ON links(expires_at, used_at);
+  `,
+  `
+  -- Before per-owner approvals, a hold lived only in safety.status. Preserve
+  -- that room-wide decision explicitly so an upgraded hub never treats the
+  -- missing gate/approvals fields as permission to reveal held text.
+  UPDATE messages
+     SET safety = json_set(
+       safety,
+       '$.gate',
+       CASE json_extract(safety, '$.status')
+         WHEN 'held' THEN 'pending'
+         WHEN 'rejected' THEN 'rejected'
+       END
+     )
+   WHERE json_valid(safety)
+     AND json_extract(safety, '$.status') IN ('held', 'rejected')
+     AND json_type(safety, '$.gate') IS NULL
+     AND json_type(safety, '$.approvals') IS NULL;
+
+  -- Repair agents created by older admin flows with a foreign org label.
+  UPDATE members
+     SET org = (SELECT owner.org FROM members AS owner WHERE owner.handle = members.owner_handle)
+   WHERE kind = 'agent'
+     AND owner_handle IS NOT NULL
+     AND EXISTS (SELECT 1 FROM members AS owner WHERE owner.handle = members.owner_handle);
+  `,
+  `
+  -- Gate decisions used to be a bare string plus one global reviewedBy field,
+  -- which lost attribution as soon as somebody made a later per-owner review.
+  UPDATE messages
+     SET safety = json_set(
+       safety,
+       '$.gate',
+       json_object(
+         'decision', json_extract(safety, '$.gate'),
+         'by', json_extract(safety, '$.reviewedBy')
+       )
+     )
+   WHERE json_valid(safety)
+     AND json_type(safety, '$.gate') = 'text';
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {

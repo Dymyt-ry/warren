@@ -95,19 +95,24 @@ export function totpCode(secret: string, step = Math.floor(Date.now() / 30_000))
   return String(n).padStart(6, "0");
 }
 
-/** Accepts the current code and one step either side (clock drift). */
-export function verifyTotp(secret: string, code: unknown): boolean {
-  if (typeof code !== "string" || !/^\d{6}$/.test(code.replace(/\s/g, ""))) return false;
+/** Returns the matching timestep, accepting one step either side for clock drift. */
+export function matchingTotpStep(secret: string, code: unknown): number | null {
+  if (typeof code !== "string" || !/^\d{6}$/.test(code.replace(/\s/g, ""))) return null;
   const c = code.replace(/\s/g, "");
   const now = Math.floor(Date.now() / 30_000);
-  return [-1, 0, 1].some((d) => {
+  for (const d of [1, 0, -1]) {
     const expected = totpCode(secret, now + d);
-    return timingSafeEqual(Buffer.from(expected), Buffer.from(c));
-  });
+    if (timingSafeEqual(Buffer.from(expected), Buffer.from(c))) return now + d;
+  }
+  return null;
 }
+
+/** Accepts the current code and one step either side (clock drift). */
+export const verifyTotp = (secret: string, code: unknown): boolean => matchingTotpStep(secret, code) !== null;
 
 export const totpUri = (secret: string, account: string, issuer: string) =>
   `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
 
-/** Ten single-use recovery codes like "3f9a-c21b". */
-export const newRecoveryCodes = () => Array.from({ length: 10 }, () => randomBytes(4).toString("hex").replace(/^(.{4})/, "$1-"));
+/** Ten 80-bit single-use recovery codes, grouped for transcription. */
+export const newRecoveryCodes = () =>
+  Array.from({ length: 10 }, () => randomBytes(10).toString("hex").match(/.{1,4}/g)!.join("-"));

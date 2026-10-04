@@ -12,6 +12,8 @@ import { Field } from "./account";
 import { AgentDialog, CopyField, InviteDialog, RoomSelect } from "./dialogs";
 import {
   api,
+  ApiError,
+  DEFAULT_PREFS,
   roomPath,
   type ApproverKey,
   type HubConfig,
@@ -50,7 +52,7 @@ const Quiet = ({ children }: { children: ReactNode }) => <p className="m-0 text-
 
 function Note({ note }: { note: { ok: boolean; text: string } | null }) {
   if (!note) return null;
-  return <p className={note.ok ? "m-0 text-[13px] text-muted-foreground" : "error"}>{note.text}</p>;
+  return <p role="status" aria-live="polite" className={note.ok ? "m-0 text-[13px] text-muted-foreground" : "error"}>{note.text}</p>;
 }
 
 function Switch({ checked, onChange, label, hint }: { checked: boolean; onChange: (v: boolean) => void; label: string; hint?: ReactNode }) {
@@ -65,13 +67,36 @@ function Switch({ checked, onChange, label, hint }: { checked: boolean; onChange
   );
 }
 
-function useLoad<T>(load: () => Promise<T>, deps: unknown[]): [T | null, () => void] {
-  const [data, setData] = useState<T | null>(null);
+type LoadState<T> = { status: "loading" } | { status: "error"; error: string } | { status: "data"; data: T };
+
+function useLoad<T>(load: () => Promise<T>, deps: unknown[]): [LoadState<T>, () => void] {
+  const [state, setState] = useState<LoadState<T>>({ status: "loading" });
   const [n, setN] = useState(0);
   useEffect(() => {
-    load().then(setData, () => setData(null));
+    let active = true;
+    setState({ status: "loading" });
+    load().then(
+      (data) => active && setState({ status: "data", data }),
+      (error) => active && setState({ status: "error", error: (error as Error).message }),
+    );
+    return () => {
+      active = false;
+    };
   }, [...deps, n]);
-  return [data, () => setN((x) => x + 1)];
+  return [state, () => setN((x) => x + 1)];
+}
+
+function LoadError({ message, error, retry }: { message: string; error: string; retry: () => void }) {
+  return (
+    <div className="flex flex-col items-start gap-2">
+      <p className="error m-0">
+        {message} ({error})
+      </p>
+      <Button size="sm" variant="outline" onClick={retry}>
+        {t("Retry")}
+      </Button>
+    </div>
+  );
 }
 
 export function Settings({
@@ -92,6 +117,7 @@ export function Settings({
   useLanguage();
   const admin = isAdmin(me);
   const [tab, setTab] = useState<Tab>("profile");
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const tabs: { id: Tab; label: string }[] = [
     { id: "profile", label: t("Profile") },
     { id: "security", label: t("Sign-in") },
@@ -112,22 +138,39 @@ export function Settings({
               {config.instanceName} · Warren {config.version}
             </Quiet>
           </div>
-          <ToggleGroup type="single" size="sm" value={tab} onValueChange={(v) => v && setTab(v as Tab)} aria-label={t("Settings")} className="flex-wrap justify-start">
+          <ToggleGroup
+            type="single"
+            size="sm"
+            value={tab}
+            onValueChange={(v) => v && setTab(v as Tab)}
+            aria-label={t("Settings")}
+            role="tablist"
+            className="flex-wrap justify-start"
+          >
             {tabs.map((x) => (
-              <ToggleGroupItem key={x.id} value={x.id}>
+              <ToggleGroupItem
+                key={x.id}
+                id={`settings-tab-${x.id}`}
+                value={x.id}
+                role="tab"
+                aria-selected={tab === x.id}
+                aria-controls={`settings-panel-${x.id}`}
+              >
                 {x.label}
               </ToggleGroupItem>
             ))}
           </ToggleGroup>
         </header>
 
-        {tab === "profile" && <Profile me={me} onMe={onMe} />}
-        {tab === "security" && <Security me={me} onMe={onMe} />}
-        {tab === "safety" && <Safety me={me} onMe={onMe} emailOn={config.email} />}
-        {tab === "privacy" && <Privacy me={me} config={config} onMe={onMe} />}
-        {tab === "people" && <People me={me} config={config} rooms={rooms} members={members} />}
-        {tab === "agents" && <Agents me={me} rooms={rooms} members={members} />}
-        {tab === "hub" && admin && <Hub config={config} onConfig={onConfig} />}
+        <div id={`settings-panel-${tab}`} role="tabpanel" aria-labelledby={`settings-tab-${tab}`} className="flex flex-col gap-8">
+          {tab === "profile" && <Profile me={me} onMe={onMe} />}
+          {tab === "security" && <Security me={me} onMe={onMe} codes={recoveryCodes} onCodes={setRecoveryCodes} />}
+          {tab === "safety" && <Safety me={me} onMe={onMe} emailOn={config.email} />}
+          {tab === "privacy" && <Privacy me={me} config={config} onMe={onMe} />}
+          {tab === "people" && <People me={me} config={config} rooms={rooms} members={members} />}
+          {tab === "agents" && <Agents me={me} rooms={rooms} members={members} />}
+          {tab === "hub" && admin && <Hub config={config} onConfig={onConfig} />}
+        </div>
       </div>
     </div>
   );
@@ -138,7 +181,7 @@ export function Settings({
 function Profile({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
   const [name, setName] = useState(me.name);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
-  const prefs = me.prefs!;
+  const prefs = me.prefs ?? DEFAULT_PREFS;
 
   const saveName = (e: FormEvent) => {
     e.preventDefault();
@@ -209,7 +252,17 @@ function Profile({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
 
 // --- sign-in security -------------------------------------------------------------------
 
-function Security({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
+function Security({
+  me,
+  onMe,
+  codes,
+  onCodes,
+}: {
+  me: Member;
+  onMe: (m: Member) => void;
+  codes: string[] | null;
+  onCodes: (codes: string[] | null) => void;
+}) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -237,23 +290,49 @@ function Security({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
         </form>
         <Note note={note} />
       </Section>
-      <TwoFactor me={me} onMe={onMe} />
+      <TwoFactor me={me} onMe={onMe} codes={codes} onCodes={onCodes} />
     </>
   );
 }
 
-function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
+function TwoFactor({
+  me,
+  onMe,
+  codes,
+  onCodes,
+}: {
+  me: Member;
+  onMe: (m: Member) => void;
+  codes: string[] | null;
+  onCodes: (codes: string[] | null) => void;
+}) {
   const [setup, setSetup] = useState<{ secret: string; uri: string } | null>(null);
   const [code, setCode] = useState("");
-  const [codes, setCodes] = useState<string[] | null>(null);
   const [password, setPassword] = useState("");
+  const [setupPassword, setSetupPassword] = useState("");
+  const [needsPassword, setNeedsPassword] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const fail = (err: unknown) => setNote({ ok: false, text: (err as Error).message });
+  const startSetup = (e?: FormEvent) => {
+    e?.preventDefault();
+    api.totpSetup(needsPassword ? setupPassword : undefined).then(
+      (value) => {
+        setSetup(value);
+        setSetupPassword("");
+        setNeedsPassword(false);
+        setNote(null);
+      },
+      (err) => {
+        if (err instanceof ApiError && err.status === 403) setNeedsPassword(true);
+        fail(err);
+      },
+    );
+  };
 
   const enable = (e: FormEvent) => {
     e.preventDefault();
     api.totpEnable(code).then((r) => {
-      setCodes(r.recoveryCodes);
+      onCodes(r.recoveryCodes);
       setSetup(null);
       setCode("");
       setNote(null);
@@ -263,6 +342,15 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
   const disable = (e: FormEvent) => {
     e.preventDefault();
     api.totpDisable(password, code).then((m) => (onMe(m), setPassword(""), setCode(""), setNote({ ok: true, text: t("Two-factor sign-in is off.") })), fail);
+  };
+  const regenerate = () => {
+    api.totpRegenerate(password, code).then((r) => {
+      onCodes(r.recoveryCodes);
+      setPassword("");
+      setCode("");
+      setNote(null);
+      api.me().then(onMe);
+    }, fail);
   };
 
   return (
@@ -274,7 +362,7 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
         <div className="flex flex-col gap-3">
           <p className="m-0 text-sm">{t("Two-factor sign-in is on. Save these recovery codes somewhere safe: each one signs you in once if you lose your phone.")}</p>
           <CopyField label={t("Recovery codes")} value={codes.join("\n")} multiline />
-          <Button className="self-start" onClick={() => setCodes(null)}>
+          <Button className="self-start" onClick={() => onCodes(null)}>
             {t("I saved them")}
           </Button>
         </div>
@@ -290,9 +378,14 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
             <Field label={t("Code or recovery code")}>
               <Input required autoComplete="one-time-code" value={code} onChange={(e) => setCode(e.target.value)} />
             </Field>
-            <Button type="submit" variant="outline">
-              {t("Turn off")}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" variant="outline">
+                {t("Turn off")}
+              </Button>
+              <Button type="button" variant="outline" disabled={!password || !code} onClick={regenerate}>
+                {t("Generate new recovery codes")}
+              </Button>
+            </div>
           </div>
         </form>
       ) : setup ? (
@@ -308,7 +401,7 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
               <p className="m-0 text-sm">{t("Scan the code with your authenticator app, or type in the key.")}</p>
               <CopyField label={t("Key")} value={setup.secret} />
               <Field label={t("Code from the app")}>
-                <Input required autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={7} value={code} onChange={(e) => setCode(e.target.value)} />
+                <Input required inputMode="numeric" autoComplete="one-time-code" maxLength={7} value={code} onChange={(e) => setCode(e.target.value)} />
               </Field>
               <div className="flex gap-2">
                 <Button type="submit">{t("Turn on")}</Button>
@@ -319,8 +412,17 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
             </div>
           </div>
         </form>
+      ) : needsPassword ? (
+        <form className="flex max-w-sm flex-col gap-3" onSubmit={startSetup}>
+          <Field label={t("Password")} hint={t("Enter your password again to continue.")}>
+            <Input required type="password" autoComplete="current-password" value={setupPassword} onChange={(e) => setSetupPassword(e.target.value)} />
+          </Field>
+          <Button type="submit" variant="outline" className="self-start">
+            {t("Continue")}
+          </Button>
+        </form>
       ) : (
-        <Button variant="outline" className="self-start" onClick={() => api.totpSetup().then(setSetup, fail)}>
+        <Button variant="outline" className="self-start" onClick={() => startSetup()}>
           {t("Set up two-factor sign-in")}
         </Button>
       )}
@@ -332,7 +434,7 @@ function TwoFactor({ me, onMe }: { me: Member; onMe: (m: Member) => void }) {
 // --- safety ----------------------------------------------------------------------------
 
 function Safety({ me, onMe, emailOn }: { me: Member; onMe: (m: Member) => void; emailOn: boolean }) {
-  const prefs = me.prefs!;
+  const prefs = me.prefs ?? DEFAULT_PREFS;
   const [keys, reloadKeys] = useLoad(() => api.approverKeys(), []);
   const [label, setLabel] = useState("");
   const [created, setCreated] = useState<string | null>(null);
@@ -398,9 +500,14 @@ function Safety({ me, onMe, emailOn }: { me: Member; onMe: (m: Member) => void; 
             </Button>
           </form>
         )}
-        {keys && keys.length > 0 && (
+        {keys.status === "loading" && <Quiet>{t("Loading approver keys…")}</Quiet>}
+        {keys.status === "error" && (
+          <LoadError message={t("Couldn't load approver keys.")} error={keys.error} retry={reloadKeys} />
+        )}
+        {keys.status === "data" && keys.data.length === 0 && <Quiet>{t("No approver keys yet.")}</Quiet>}
+        {keys.status === "data" && keys.data.length > 0 && (
           <ul className="flex flex-col gap-1">
-            {keys.map((k: ApproverKey) => (
+            {keys.data.map((k: ApproverKey) => (
               <li key={k.id} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-muted/40">
                 <div className="min-w-0 flex-1 text-sm">
                   <div className="truncate font-medium">{k.label}</div>
@@ -427,7 +534,28 @@ function Privacy({ me, config, onMe }: { me: Member; config: HubConfig; onMe: (m
   const [password, setPassword] = useState("");
   const [withMessages, setWithMessages] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const download = async () => {
+    setDownloading(true);
+    try {
+      const data = await api.exportMe();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "warren-data.json";
+      link.hidden = true;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+      setNote(null);
+    } catch (error) {
+      setNote({ ok: false, text: (error as Error).message });
+    } finally {
+      setDownloading(false);
+    }
+  };
 
   return (
     <>
@@ -443,11 +571,10 @@ function Privacy({ me, config, onMe }: { me: Member; config: HubConfig; onMe: (m
           </>
         }
       >
-        <a className="self-start" href="/api/me/export" download>
-          <Button variant="outline" tabIndex={-1}>
-            {t("Download my data")}
-          </Button>
-        </a>
+        <Button variant="outline" className="self-start" disabled={downloading} onClick={download}>
+          {downloading ? t("Preparing download…") : t("Download my data")}
+        </Button>
+        <Note note={note} />
       </Section>
 
       <Section
@@ -511,17 +638,27 @@ function People({ me, config, rooms, members }: { me: Member; config: HubConfig;
     <>
       {admin && (
         <Section title={t("People")} action={inviteButton}>
-          <ul className="flex flex-col gap-1">
-            {(users ?? []).map((u) => (
-              <UserRow key={u.handle} u={u} me={me} rooms={rooms} onChanged={reloadUsers} />
-            ))}
-          </ul>
+          {users.status === "loading" ? (
+            <Quiet>{t("Loading people…")}</Quiet>
+          ) : users.status === "error" ? (
+            <LoadError message={t("Couldn't load people.")} error={users.error} retry={reloadUsers} />
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {users.data.map((u) => (
+                <UserRow key={u.handle} u={u} me={me} rooms={rooms} onChanged={reloadUsers} />
+              ))}
+            </ul>
+          )}
         </Section>
       )}
       <Section title={admin ? t("Pending invites") : t("Invites you sent")} action={!admin && inviteButton}>
-        {invites?.length ? (
+        {invites.status === "loading" ? (
+          <Quiet>{t("Loading invites…")}</Quiet>
+        ) : invites.status === "error" ? (
+          <LoadError message={t("Couldn't load invites.")} error={invites.error} retry={reloadInvites} />
+        ) : invites.data.length ? (
           <ul className="flex flex-col gap-1">
-            {invites.map((i) => (
+            {invites.data.map((i) => (
               <InviteRow key={i.id} i={i} onRevoked={reloadInvites} />
             ))}
           </ul>
@@ -538,11 +675,32 @@ function UserRow({ u, me, rooms, onChanged }: { u: User; me: Member; rooms: Reco
   const [error, setError] = useState<string | null>(null);
   const [reset, setReset] = useState<{ url: string; emailed: boolean } | null>(null);
   const [confirm, setConfirm] = useState(false);
+  const [demoting, setDemoting] = useState(false);
+  const [demotionRoom, setDemotionRoom] = useState<string | null>(null);
   const isOwner = u.role === "owner";
   const isMe = u.handle === me.handle;
   const canEdit = !isMe && (!isOwner || me.role === "owner");
   const act = (p: Promise<unknown>) => p.then(onChanged, (e) => setError((e as Error).message));
-  const firstRoom = Object.values(rooms).find((r) => !r.parentId)?.id;
+  const changeRole = (role: Role) => {
+    setError(null);
+    if (role === "member") {
+      setDemotionRoom(null);
+      setDemoting(true);
+      return;
+    }
+    setDemoting(false);
+    act(api.updateUser(u.handle, { role }));
+  };
+  const demote = () => {
+    if (!demotionRoom) return;
+    api.updateUser(u.handle, { role: "member", room: demotionRoom }).then(
+      () => {
+        setDemoting(false);
+        onChanged();
+      },
+      (e) => setError((e as Error).message),
+    );
+  };
 
   return (
     <li className="flex flex-col gap-2 rounded-lg px-2 py-3 hover:bg-muted/40">
@@ -562,7 +720,7 @@ function UserRow({ u, me, rooms, onChanged }: { u: User; me: Member; rooms: Reco
         {canEdit && !isOwner ? (
           <Select
             value={u.role ?? "member"}
-            onValueChange={(role) => act(api.updateUser(u.handle, { role: role as Role, ...(role === "member" ? { room: firstRoom } : {}) }))}
+            onValueChange={(role) => changeRole(role as Role)}
           >
             <SelectTrigger size="sm" className="w-28" aria-label={t("Role of {name}", { name: u.name })}>
               <SelectValue />
@@ -577,6 +735,22 @@ function UserRow({ u, me, rooms, onChanged }: { u: User; me: Member; rooms: Reco
           <span className="w-28 px-2 text-xs text-muted-foreground">{roleLabel(u.role)}</span>
         )}
       </div>
+      {demoting && (
+        <div className="flex flex-col gap-2 pl-[42px]">
+          <p className="m-0 text-xs text-muted-foreground">{t("Choose the room this member can see before changing their role.")}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="w-64">
+              <RoomSelect rooms={rooms} value={demotionRoom} onChange={setDemotionRoom} label={t("Room for {name}", { name: u.name })} />
+            </div>
+            <Button size="xs" disabled={!demotionRoom} onClick={demote}>
+              {t("Change to member")}
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setDemoting(false)}>
+              {t("Cancel")}
+            </Button>
+          </div>
+        </div>
+      )}
       <div className="flex flex-wrap items-center gap-2 pl-[42px]">
         {u.role === "member" && canEdit ? (
           <div className="w-64">
@@ -654,9 +828,13 @@ function Agents({ me, rooms, members }: { me: Member; rooms: Record<string, Room
         </Button>
       }
     >
-      {agents?.length ? (
+      {agents.status === "loading" ? (
+        <Quiet>{t("Loading agents…")}</Quiet>
+      ) : agents.status === "error" ? (
+        <LoadError message={t("Couldn't load agents.")} error={agents.error} retry={reload} />
+      ) : agents.data.length ? (
         <ul className="flex flex-col gap-1">
-          {agents.map((a) => (
+          {agents.data.map((a) => (
             <AgentRow key={a.handle} a={a} rooms={rooms} members={members} onRotated={setRotated} onChanged={reload} />
           ))}
         </ul>

@@ -54,15 +54,20 @@ import { applyTheme, plural, savedTheme, setLanguage, t, useLanguage } from "./i
 
 const OVERVIEW = "__overview";
 const SETTINGS = "__settings";
+const INITIAL_LINKS = (() => {
+  const params = new URLSearchParams(location.search);
+  const links = { invite: params.get("invite"), reset: params.get("reset"), review: params.get("review") };
+  if (links.invite || links.reset) history.replaceState(history.state, "", "/app");
+  return links;
+})();
 
 const isForMe = (m: Msg, handle: string) => m.from !== handle && (m.forYou || m.mentions.includes(handle) || m.mentionsRoom);
 const isAdmin = (m: Member | null) => m?.role === "owner" || m?.role === "admin";
 
 /** Decides what to show before the dashboard: a link being opened, first-run setup, or sign-in. */
 export function App() {
-  const params = new URLSearchParams(location.search);
-  const [link, setLink] = useState(() => ({ invite: params.get("invite"), reset: params.get("reset") }));
-  const [review] = useState(() => params.get("review"));
+  const [link, setLink] = useState(() => ({ invite: INITIAL_LINKS.invite, reset: INITIAL_LINKS.reset }));
+  const [review, setReview] = useState(INITIAL_LINKS.review);
   useLanguage();
   useEffect(() => applyTheme(savedTheme()), []);
   const [config, setConfig] = useState<HubConfig | null>(null);
@@ -83,7 +88,6 @@ export function App() {
 
   /** Signed in (or out): drop the one-time link from the address bar. */
   const enter = (m: Member | null) => {
-    if (link.invite || link.reset) history.replaceState(null, "", review ? `/app?review=${review}` : "/app");
     setLink({ invite: null, reset: null });
     setConfig((c) => (c ? { ...c, needsSetup: false } : c));
     setMe(m);
@@ -105,7 +109,21 @@ export function App() {
   if (link.reset) return <ResetScreen code={link.reset} onDone={enter} />;
   if (config.needsSetup) return <SetupScreen config={config} onDone={enter} />;
   if (!me && !config.demo) return <SignInScreen config={config} onDone={enter} />;
-  return <Dashboard config={config} me={me} onMe={enter} review={review} onConfig={(c) => setConfig((x) => (x ? { ...x, ...c } : x))} />;
+  return (
+    <Dashboard
+      config={config}
+      me={me}
+      onMe={enter}
+      review={review}
+      onReviewConsumed={() => {
+        setReview(null);
+        const url = new URL(location.href);
+        url.searchParams.delete("review");
+        history.replaceState(history.state, "", `${url.pathname}${url.search}${url.hash}`);
+      }}
+      onConfig={(c) => setConfig((x) => (x ? { ...x, ...c } : x))}
+    />
+  );
 }
 
 function Dashboard({
@@ -113,15 +131,17 @@ function Dashboard({
   me,
   onMe,
   review,
+  onReviewConsumed,
   onConfig,
 }: {
   config: HubConfig;
   me: Member | null;
   onMe: (m: Member | null) => void;
   review: string | null;
+  onReviewConsumed: () => void;
   onConfig: (c: Partial<HubConfig>) => void;
 }) {
-  const { rooms, members, audit, status, error, addMessage, updateMessage, upsertRoom, removeRooms } = useHub(me?.handle ?? null);
+  const { rooms, members, audit, status, error, addMessage, updateMessage, upsertRoom, removeRooms } = useHub(me?.handle ?? null, true, onMe);
   const [selected, setSelected] = useState<string | null>(null);
   const [newTop, setNewTop] = useState(false);
   const accounts = !config.demo;
@@ -129,10 +149,36 @@ function Dashboard({
 
   // A review link opens the room of that message.
   const [focus, setFocus] = useState<string | null>(review);
+  const requestedFocus = useRef<string | null>(null);
+  const consumeFocus = () => {
+    if (!focus) return;
+    setFocus(null);
+    onReviewConsumed();
+  };
+  const selectRoom = (id: string) => {
+    consumeFocus();
+    setSelected(id);
+  };
+  const openSettings = () => {
+    consumeFocus();
+    setSelected(SETTINGS);
+  };
   useEffect(() => {
     if (!focus) return;
     const room = Object.values(rooms).find((r) => r.messages.some((x) => x.id === focus));
-    if (room) setSelected(room.id);
+    if (room) {
+      setSelected(room.id);
+      return;
+    }
+    if (!Object.keys(rooms).length || requestedFocus.current === focus) return;
+    requestedFocus.current = focus;
+    api.message(focus).then(
+      (message) => {
+        updateMessage(message);
+        setSelected(message.roomId);
+      },
+      () => consumeFocus(),
+    );
   }, [rooms, focus]);
 
   // Open where you're needed: a room that mentions you, else the latest activity, else the top room.
@@ -211,13 +257,13 @@ function Dashboard({
                 </Button>
               )}
             </div>
-            <RoomTree rooms={rooms} selected={selected} onSelect={setSelected} me={me?.handle} />
+            <RoomTree rooms={rooms} selected={selected} onSelect={selectRoom} me={me?.handle} />
           </nav>
 
           {me && accounts && (
             <div className="hidden flex-col gap-1 md:flex">
               <button
-                onClick={() => (setSelected(SETTINGS), setFocus(null))}
+                onClick={openSettings}
                 aria-current={selected === SETTINGS ? "page" : undefined}
                 className={cn(
                   "flex h-11 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-accent",
@@ -244,7 +290,7 @@ function Dashboard({
           )}
           {me && accounts && (
             <div className="flex gap-2 px-1 md:hidden">
-              <Button variant="ghost" size="sm" onClick={() => setSelected(SETTINGS)}>
+              <Button variant="ghost" size="sm" onClick={openSettings}>
                 <GearSixIcon data-icon="inline-start" />
                 {t("Settings")}
               </Button>
@@ -277,6 +323,7 @@ function Dashboard({
             <RoomView
               key={room.id}
               focus={focus}
+              onFocusConsumed={consumeFocus}
               room={room}
               rooms={rooms}
               members={members}
@@ -400,8 +447,10 @@ function RoomView({
   onNewRoom,
   onDeleted,
   focus,
+  onFocusConsumed,
 }: {
   focus?: string | null;
+  onFocusConsumed: () => void;
   room: Room;
   rooms: Record<string, Room>;
   members: Record<string, Member>;
@@ -423,9 +472,13 @@ function RoomView({
   const memberState = Object.values(members)
     .map((m) => `${m.handle}:${m.paused ? 1 : 0}${m.online ? 1 : 0}${m.scopeRoomId}`)
     .join(",");
+  const roomTopology = Object.values(rooms)
+    .map((r) => `${r.id}:${r.parentId ?? ""}`)
+    .sort()
+    .join(",");
   useEffect(() => {
     api.roomMembers(room.id).then(setInRoom, () => setInRoom([]));
-  }, [room.id, memberCount, memberState]);
+  }, [room.id, room.parentId, roomTopology, memberCount, memberState]);
 
   const path: Room[] = [];
   for (let r: Room | undefined = room; r; r = r.parentId ? rooms[r.parentId] : undefined) path.unshift(r);
@@ -468,7 +521,7 @@ function RoomView({
 
         <RoomContext room={room} canEdit={!!me} onSaved={onContext} />
 
-        <Thread room={room} members={members} me={me} inRoom={inRoom} focus={focus} onUpdated={onUpdated} />
+        <Thread room={room} members={members} me={me} inRoom={inRoom} focus={focus} onFocusConsumed={onFocusConsumed} onUpdated={onUpdated} />
 
         <Composer room={room} me={me} inRoom={inRoom} onPosted={onPosted} />
       </section>
@@ -561,6 +614,7 @@ function Thread({
   me,
   inRoom,
   focus,
+  onFocusConsumed,
   onUpdated,
 }: {
   room: Room;
@@ -568,14 +622,23 @@ function Thread({
   me: Member | null;
   inRoom: Member[];
   focus?: string | null;
+  onFocusConsumed: () => void;
   onUpdated: (m: Msg) => void;
 }) {
   // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
   const [mountedAt] = useState(() => Date.now());
   // Opened from a review link (email, agent session): bring that message into view.
   useEffect(() => {
-    if (focus) setTimeout(() => document.getElementById(`msg-${focus}`)?.scrollIntoView({ block: "center" }), 300);
-  }, [focus]);
+    if (!focus) return;
+    const timer = setTimeout(() => {
+      const target = document.getElementById(`msg-${focus}`);
+      if (!target) return;
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: "center" });
+      onFocusConsumed();
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [focus, room.id]);
   if (room.messages.length === 0)
     return (
       <Empty className="flex-1">
@@ -604,6 +667,7 @@ function Thread({
                 <MessageScrollerItem key={m.id} messageId={m.id} scrollAnchor={m.from === me?.handle}>
                   <Message
                     id={`msg-${m.id}`}
+                    tabIndex={focus === m.id ? -1 : undefined}
                     className={cn(
                       "items-start gap-3 rounded-xl px-3 py-2.5",
                       forMe && "bg-mention",
@@ -667,11 +731,12 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
   const [error, setError] = useState<string | null>(null);
   const s = m.safety;
   if (!s) return null;
+  const gate = s.gate?.decision;
   const approval = s.flags.includes("needs-approval");
   const reasons = s.flags.filter((f) => f !== "needs-approval").map(flagLabel);
   const person = me?.kind === "human" && me.handle !== m.from ? me : null;
   const mine = (key: string) => !!person && (key === person.handle || key === `org:${person.org}`);
-  const gateIsMine = s.gate === "pending" && !!person && (!approval || person.org === m.org);
+  const gateIsMine = gate === "pending" && !!person && (!approval || person.org === m.org);
   const approvals = Object.entries(s.approvals ?? {});
   const myPending = approvals.filter(([k, a]) => a.decision === "pending" && mine(k));
 
@@ -708,7 +773,7 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
         </span>
       )}
 
-      {s.gate === "pending" && (
+      {gate === "pending" && (
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-[10px] border border-dashed border-muted-foreground/50 px-3 py-2">
           <span className="flex items-center gap-1.5 font-semibold text-foreground">
             <ShieldWarningIcon aria-hidden weight="fill" />
@@ -752,10 +817,10 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
               </li>
             ))}
           </ul>
-          {myPending.length > 0 && buttons("agents", t("Release to my agents"))}
+          {s.status === "held" && myPending.length > 0 && buttons("agents", t("Release to my agents"))}
         </div>
       )}
-      {error && <p className="error w-full">{error}</p>}
+      {error && <p role="alert" className="error w-full">{error}</p>}
 
       {!s.gate && !approvals.length && s.status === "delivered" && reasons.length > 0 && (
         <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -763,16 +828,18 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
           {t("Flagged ({why}), delivered: no other company's agent is in this room", { why: reasons.join(", ") })}
         </span>
       )}
-      {s.gate === "released" && (
+      {gate === "released" && (
         <span className="flex items-center gap-1.5 text-muted-foreground">
           <ShieldCheckIcon aria-hidden />
-          {approval ? t("Approved by @{who}", { who: s.reviewedBy ?? "" }) : t("Released by @{who}", { who: s.reviewedBy ?? "" })}
+          {approval
+            ? t("Approved by @{who}", { who: s.gate?.by ?? s.reviewedBy ?? "" })
+            : t("Released by @{who}", { who: s.gate?.by ?? s.reviewedBy ?? "" })}
         </span>
       )}
-      {s.gate === "rejected" && (
+      {gate === "rejected" && (
         <span className="flex items-center gap-1.5 text-muted-foreground">
           <ProhibitIcon aria-hidden />
-          {t("Rejected by @{who}. No agent ever saw it.", { who: s.reviewedBy ?? "" })}
+          {t("Rejected by @{who}. No agent ever saw it.", { who: s.gate?.by ?? s.reviewedBy ?? "" })}
         </span>
       )}
     </div>
@@ -781,7 +848,7 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
 
 /** Who a message reached: agents that got it, and the ones it waits for because they're offline. */
 function DeliveryLine({ m, inRoom }: { m: Msg; inRoom: Member[] }) {
-  if (m.safety?.status === "held" && m.safety.gate === "pending") return null;
+  if (m.safety?.status === "held" && m.safety.gate?.decision === "pending") return null;
   const targets = inRoom.filter((x) => x.kind === "agent" && x.handle !== m.from && (m.mentionsRoom || m.mentions.includes(x.handle)));
   if (!targets.length) return null;
   const got = new Set(m.delivered ?? []);

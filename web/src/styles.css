@@ -180,8 +180,8 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 
 /* Sections below the fold: type and space, no boxes */
 .problem { padding: 120px 0 0; max-width: 720px; }
-.problem h2, .delivery h2, .scope h2, .safety h2, .closing h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
-.problem p, .scope p, .safety-copy p, .closing-panel > div > p { font-size: 18px; color: var(--text-2); margin: 18px 0 0; max-width: 58ch; }
+.problem h2, .self-host h2, .delivery h2, .scope h2, .safety h2, .closing h2 { font-size: clamp(1.75rem, 2.4vw + 0.6rem, 2.5rem); line-height: 1.1; }
+.problem p, .self-host p, .scope p, .safety-copy p, .closing-panel > div > p { font-size: 18px; color: var(--text-2); margin: 18px 0 0; max-width: 58ch; }
 .landing h3 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; margin: 0; }
 
 /* Terminal: the one dark surface on the page, because that's where coding agents live */
@@ -191,6 +191,12 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .term pre { margin: 0; padding: 12px 14px 16px; font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .term .t-dim { color: #8B93A1; }
 .term .t-prompt { color: #3D9BFF; }
+
+/* Self-hosting: the real quickstart in the same terminal treatment as delivery */
+.self-host { padding: 128px 0 0; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 56px; align-items: center; }
+.self-host > div:first-child > a { display: inline-block; margin-top: 18px; font-weight: 600; }
+.self-host code { padding: 1px 5px; border: 1px solid var(--border); border-radius: 5px; background: var(--surface-2); color: var(--text); font-size: 0.9em; }
+.self-host .term pre { padding-block: 18px 22px; font-size: 13px; }
 
 /* Delivery: one mention fans out to four clients */
 .delivery { padding: 128px 0 0; }
@@ -242,10 +248,10 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
 .controls-icon svg { width: 16px; height: 16px; }
 .controls p { margin: 6px 0 0; color: var(--text-2); font-size: 15px; }
 
-/* Closing: the waitlist is the call; running it yourself sits beside it */
+/* Closing: hosted Warren is a smaller secondary option */
 .closing { padding: 152px 0 0; }
 .closing-panel {
-  display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 56px; align-items: center; padding: 56px;
+  max-width: 760px; padding: 40px;
   border-radius: 32px; background: linear-gradient(160deg, color-mix(in srgb, var(--blue) 8%, var(--bg)), color-mix(in srgb, var(--blue) 18%, var(--bg)));
 }
 .waitlist-form { position: relative; display: flex; flex-direction: column; gap: 10px; margin-top: 28px; max-width: 520px; }
@@ -267,7 +273,7 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
   .showcase-frame { margin-right: 0; }
   .agent-card { position: relative; top: auto; right: auto; width: auto; max-width: 420px; margin: -64px 16px 0 auto; }
   .showcase-link, .action-chip { display: none; }
-  .scope, .safety, .closing-panel { grid-template-columns: minmax(0, 1fr); gap: 28px; }
+  .self-host, .scope, .safety { grid-template-columns: minmax(0, 1fr); gap: 28px; }
   .delivery-clients { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .delivery-fan { display: none; }
   .delivery-source { margin: 32px 0 24px; }
@@ -280,7 +286,7 @@ button.ghost { min-height: 32px; padding: 0 12px; font-size: 13px; }
   .float-nav .nav-link { display: none; }
   .float-nav-wrap { top: 8px; padding-top: 8px; }
   .hero h1 { font-size: clamp(2.1rem, 9vw, 2.6rem); }
-  .delivery, .scope, .safety, .closing { padding-top: 88px; }
+  .self-host, .delivery, .scope, .safety, .closing { padding-top: 88px; }
   .delivery h2 { max-width: none; }
   .scope-stage, .safety-stage { padding-inline: 14px; }
   .line-footer { margin-top: 96px; gap: 12px; }

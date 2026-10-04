@@ -23,7 +23,16 @@ export interface HeldNotice {
   kind: string;
   flags: string[];
   waitsFor: string; // the person who decides (or "org:<company>")
+  reviewable: boolean; // this bridge's approver key can decide it
   reviewUrl: string;
+}
+
+/** A held message was rejected. Deliberately contains no message text. */
+export interface HeldResolution {
+  id: string;
+  roomId: string;
+  resolution: "rejected";
+  waitsFor: string;
 }
 
 export async function subscribe(
@@ -31,30 +40,39 @@ export async function subscribe(
   token: string,
   onMessage: (m: HubMessage) => void | Promise<void>,
   onHeld: (h: HeldNotice) => void | Promise<void> = () => {},
+  onHeldResolution: (r: HeldResolution) => void | Promise<void> = () => {},
 ) {
   const headers = { Accept: "text/event-stream", Authorization: `Bearer ${token}` };
-  let lastAt = new Date().toISOString(); // newest message we handled, or start time
   const seen = new Set<string>(); // replay and live stream can overlap
+  let reconnect = () => {};
   // Delivery runs outside the read loop: an agent turn can take minutes and
   // must not stall the stream. The exec adapter keeps its own queue for order.
-  const handle = (m: HubMessage) => {
+  const handle = async (m: HubMessage) => {
     if (seen.has(m.id)) return;
     seen.add(m.id);
-    if (m.at > lastAt) lastAt = m.at;
-    void Promise.resolve(onMessage(m)).catch((e) => console.error(`warren-bridge: delivery failed: ${(e as Error).message}`));
+    try {
+      await onMessage(m);
+      const ack = await fetch(`${hub}/api/deliveries/${encodeURIComponent(m.id)}/ack`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!ack.ok) throw new Error(`delivery ack answered ${ack.status}`);
+      // The hub's durable delivery row is now the source of truth. Keeping
+      // every id forever would leak memory in a long-running bridge.
+      seen.delete(m.id);
+    } catch (e) {
+      seen.delete(m.id);
+      console.error(`warren-bridge: delivery failed: ${(e as Error).message}`);
+      reconnect();
+    }
   };
 
-  for (let attempt = 0; ; attempt++) {
+  for (;;) {
+    const controller = new AbortController();
+    reconnect = () => controller.abort();
     try {
-      const res = await fetch(`${hub}/api/events?mentions=1`, { headers });
+      const res = await fetch(`${hub}/api/events?mentions=1`, { headers, signal: controller.signal });
       if (!res.ok || !res.body) throw new Error(`hub answered ${res.status}`);
-      if (attempt > 0) {
-        // Replay what arrived while we were disconnected (inbox = mentions only).
-        const inbox: HubMessage[] = await fetch(`${hub}/api/inbox`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }).then((r) => r.json());
-        for (const m of inbox) if (m.at >= lastAt) handle(m); // seen drops repeats
-      }
       const decoder = new TextDecoder();
       let buffer = "";
       for await (const chunk of res.body) {
@@ -66,8 +84,10 @@ export async function subscribe(
           const event = frame.match(/^event: (.*)$/m)?.[1];
           const data = frame.match(/^data: (.*)$/m)?.[1];
           if (!data) continue;
-          if (event === "message") handle(JSON.parse(data));
+          if (event === "message") void handle(JSON.parse(data));
           else if (event === "held") void Promise.resolve(onHeld(JSON.parse(data))).catch((e) => console.error(`warren-bridge: ${(e as Error).message}`));
+          else if (event === "held_resolution")
+            void Promise.resolve(onHeldResolution(JSON.parse(data))).catch((e) => console.error(`warren-bridge: ${(e as Error).message}`));
         }
       }
     } catch (e) {
