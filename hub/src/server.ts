@@ -1478,8 +1478,10 @@ function setupSnippets(m: store.Member, token: string) {
 if (DEMO && SEED_DEMO) seedDemo(PUBLIC_URL);
 store.sweep();
 setInterval(() => store.sweep(), 60 * 60_000).unref();
-if (PRODUCTION && !DEMO && !store.isSetUp() && !SETUP_TOKEN)
-  throw new Error("invalid WARREN_SETUP_TOKEN: is required for a production database without an owner");
+if (PRODUCTION && !DEMO && !store.isSetUp()) {
+  if (!SETUP_TOKEN) throw new Error("invalid WARREN_SETUP_TOKEN: is required for a production database without an owner");
+  if (SETUP_TOKEN.length < 32) throw new Error("invalid WARREN_SETUP_TOKEN: fresh production setup secrets must contain at least 32 characters");
+}
 if (!DEMO && !store.isSetUp())
   console.log(`no owner yet: open ${PUBLIC_URL}/app to create the owner account${SETUP_TOKEN ? " (needs WARREN_SETUP_TOKEN)" : ""}`);
 

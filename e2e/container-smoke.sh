@@ -21,6 +21,10 @@ docker run --detach --name "$container" \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --pids-limit 256 \
+  --health-interval 1s \
+  --health-start-period 1s \
+  --health-timeout 5s \
+  --health-retries 5 \
   --publish "127.0.0.1:${port}:3000" \
   --volume "${volume}:/data" \
   --env "PUBLIC_URL=http://127.0.0.1:${port}" \
@@ -32,6 +36,19 @@ for _ in $(seq 1 60); do
   sleep 0.25
 done
 curl --fail --silent "http://127.0.0.1:${port}/healthz" >/dev/null
+
+test "$(docker image inspect --format '{{json .Config.Healthcheck.Test}}' "$image")" != "null"
+health_status=starting
+for _ in $(seq 1 60); do
+  health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")"
+  if [ "$health_status" = "healthy" ]; then break; fi
+  if [ "$health_status" = "unhealthy" ] || [ "$health_status" = "missing" ]; then
+    docker inspect --format '{{json .State.Health}}' "$container"
+    exit 1
+  fi
+  sleep 0.5
+done
+test "$health_status" = "healthy"
 
 test "$(docker exec "$container" id -u)" != "0"
 docker exec "$container" test -d /app/node_modules/express

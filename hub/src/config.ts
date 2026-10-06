@@ -100,8 +100,7 @@ export const CLIENT_IP_HEADER = ipHeader;
 
 export const ADMIN_TOKEN = raw("WARREN_ADMIN_TOKEN") || undefined;
 export const SETUP_TOKEN = raw("WARREN_SETUP_TOKEN") || undefined;
-for (const [name, value] of [["WARREN_ADMIN_TOKEN", ADMIN_TOKEN], ["WARREN_SETUP_TOKEN", SETUP_TOKEN]] as const)
-  if (PRODUCTION && value && value.length < 32) fail(name, "production secrets must contain at least 32 characters");
+if (PRODUCTION && ADMIN_TOKEN && ADMIN_TOKEN.length < 32) fail("WARREN_ADMIN_TOKEN", "production secrets must contain at least 32 characters");
 
 export const SMTP_HOST = raw("SMTP_HOST") || undefined;
 export const SMTP_PORT = integerEnv("SMTP_PORT", 587, 1, 65_535);

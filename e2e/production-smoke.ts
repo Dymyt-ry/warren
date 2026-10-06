@@ -22,7 +22,7 @@ const freePort = () =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function start(port: number, withSetupToken = true) {
+async function start(port: number, configuredSetupToken = setupToken) {
   let output = "";
   const child = spawn(process.execPath, ["--enable-source-maps", "hub/dist/server.js"], {
     env: {
@@ -31,7 +31,7 @@ async function start(port: number, withSetupToken = true) {
       PORT: String(port),
       PUBLIC_URL: `http://127.0.0.1:${port}`,
       WARREN_DATA_DIR: dataDir,
-      WARREN_SETUP_TOKEN: withSetupToken ? setupToken : "",
+      WARREN_SETUP_TOKEN: configuredSetupToken,
       WARREN_DEMO: "0",
       WARREN_SEED: "0",
     },
@@ -86,14 +86,20 @@ try {
   await stop(activeChild);
   activeChild = undefined;
 
-  activeChild = await start(port, false);
+  activeChild = await start(port, "");
   const config = await fetch(`${base}/api/config`).then((response) => response.json() as Promise<{ needsSetup: boolean }>);
   const login = await fetch(`${base}/api/auth/login`, json({ email, password }));
   if (config.needsSetup || login.status !== 200)
     throw new Error("SQLite state did not survive a compiled-server restart without the setup-only token");
   await stop(activeChild);
   activeChild = undefined;
-  console.log("PASS  compiled production server: health, assets, setup/login, SSE shutdown, and SQLite restart");
+
+  activeChild = await start(port, "legacy-short-token");
+  const legacyHealth = await fetch(`${base}/healthz`);
+  if (!legacyHealth.ok) throw new Error("initialized SQLite state did not restart with an inactive legacy setup token");
+  await stop(activeChild);
+  activeChild = undefined;
+  console.log("PASS  compiled production server: health, assets, setup/login, SSE shutdown, and compatible SQLite restarts");
 } finally {
   if (activeChild?.exitCode === null) activeChild.kill("SIGKILL");
   rmSync(dataDir, { recursive: true, force: true });

@@ -124,6 +124,20 @@ try {
     encoding: "utf8",
     timeout: 5_000,
   });
+  const productionWithWeakSetupToken = spawnSync(process.execPath, [TSX_CLI, "hub/src/server.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PUBLIC_URL: "http://127.0.0.1:18791",
+      PORT: "18791",
+      WARREN_DATA_DIR: freshProductionData,
+      WARREN_SETUP_TOKEN: "change-me",
+      WARREN_DEMO: "0",
+    },
+    encoding: "utf8",
+    timeout: 5_000,
+  });
   rmSync(freshProductionData, { recursive: true, force: true });
   const productionIpv6Loopback = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
     cwd: process.cwd(),
@@ -144,8 +158,11 @@ try {
     "production refuses fixed demo credentials without an explicit public-sandbox acknowledgement",
   );
   check(
-    productionWithoutSetupToken.status !== 0 && `${productionWithoutSetupToken.stderr}${productionWithoutSetupToken.stdout}`.includes("invalid WARREN_SETUP_TOKEN"),
-    "a fresh production database refuses to start without first-owner setup protection",
+    productionWithoutSetupToken.status !== 0 &&
+      `${productionWithoutSetupToken.stderr}${productionWithoutSetupToken.stdout}`.includes("invalid WARREN_SETUP_TOKEN") &&
+      productionWithWeakSetupToken.status !== 0 &&
+      `${productionWithWeakSetupToken.stderr}${productionWithWeakSetupToken.stdout}`.includes("at least 32 characters"),
+    "a fresh production database requires strong first-owner setup protection",
   );
   check(productionIpv6Loopback.status === 0, "production permits IPv6 loopback between a local reverse proxy and the hub");
 
