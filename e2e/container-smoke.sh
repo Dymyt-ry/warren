@@ -42,13 +42,16 @@ health_status=starting
 for _ in $(seq 1 60); do
   health_status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}missing{{end}}' "$container")"
   if [ "$health_status" = "healthy" ]; then break; fi
-  if [ "$health_status" = "unhealthy" ] || [ "$health_status" = "missing" ]; then
-    docker inspect --format '{{json .State.Health}}' "$container"
+  if [ "$health_status" = "missing" ] || [ "$(docker inspect --format '{{.State.Running}}' "$container")" != "true" ]; then
+    docker inspect --format '{{json .State}}' "$container"
     exit 1
   fi
   sleep 0.5
 done
-test "$health_status" = "healthy"
+if [ "$health_status" != "healthy" ]; then
+  docker inspect --format '{{json .State.Health}}' "$container"
+  exit 1
+fi
 
 test "$(docker exec "$container" id -u)" != "0"
 docker exec "$container" test -d /app/node_modules/express
