@@ -5,6 +5,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DATA_DIR, DB_PATH, DEMO } from "./config.js";
 
 const MIGRATIONS: string[] = [
   `
@@ -215,11 +216,26 @@ export function openDb(path: string): DatabaseSync {
 
 /** Demo hubs start fresh on every boot unless WARREN_DB says otherwise. */
 export function defaultDbPath(demo: boolean): string {
-  if (process.env.WARREN_DB) return process.env.WARREN_DB;
-  return demo ? ":memory:" : join(process.env.WARREN_DATA_DIR ?? "data", "warren.db");
+  if (DB_PATH) return DB_PATH;
+  return demo ? ":memory:" : join(DATA_DIR, "warren.db");
 }
 
-export const db = openDb(defaultDbPath(process.env.WARREN_DEMO === "1"));
+export const db = openDb(defaultDbPath(DEMO));
+
+export function dbHealthy(): boolean {
+  try {
+    return (db.prepare("SELECT 1 AS ok").get() as { ok: number }).ok === 1;
+  } catch {
+    return false;
+  }
+}
+
+let closed = false;
+export function closeDb() {
+  if (closed) return;
+  closed = true;
+  db.close();
+}
 
 /** Runs `fn` in a transaction (nested calls join the outer one). */
 let depth = 0;

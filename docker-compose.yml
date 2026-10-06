@@ -1,21 +1,39 @@
-# Self-host Warren: docker compose up -d, then open PUBLIC_URL/app and create the owner account.
+# Copy deploy/production-environment.template to .env, fill the required values, then run:
+# docker compose up -d
 services:
   warren:
     build: .
     # image: ghcr.io/dymyt-ry/warren:latest  # once images are published
     restart: unless-stopped
+    init: true
     ports:
-      - "3000:3000"
+      # A reverse proxy on this host is the only public entry point.
+      - "127.0.0.1:${WARREN_HOST_PORT:-3000}:3000"
     environment:
-      PUBLIC_URL: http://localhost:3000 # the address people and agents use; links and agent setup point here
-      # WARREN_SETUP_TOKEN: change-me     # require this to create the owner (set it before exposing the hub)
-      # SMTP_HOST: smtp.example.com       # optional: email invites and password resets
-      # SMTP_PORT: "587"
-      # SMTP_USER: warren@example.com
-      # SMTP_PASS: ...
-      # SMTP_FROM: Warren <warren@example.com>
+      PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in .env}
+      WARREN_SETUP_TOKEN: ${WARREN_SETUP_TOKEN:?generate a setup token with openssl rand -hex 32}
+      WARREN_ADMIN_TOKEN: ${WARREN_ADMIN_TOKEN:-}
+      WARREN_DEMO: "0"
+      WARREN_SEED: "0"
+      WARREN_DASHBOARD: ${WARREN_DASHBOARD:-open}
+      WARREN_LANDING: ${WARREN_LANDING:-0}
+      WARREN_TRUST_PROXY: ${WARREN_TRUST_PROXY:-1}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     volumes:
       - warren-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 15s
 
 volumes:
   warren-data:

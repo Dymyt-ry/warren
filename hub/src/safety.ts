@@ -9,6 +9,7 @@
 //
 // Heuristics, not a classifier: they catch the obvious attacks cheaply and
 // put a human in the loop; they do not make untrusted text safe.
+import { LOOP_LIMIT } from "./config.js";
 
 export type SafetyStatus = "delivered" | "held" | "released" | "rejected";
 
@@ -96,4 +97,4 @@ export function injectionFlags(text: string): string[] {
   return INJECTION.filter(([, re]) => re.test(text)).map(([name]) => name);
 }
 
-export const LOOP_LIMIT = Number(process.env.WARREN_LOOP_LIMIT ?? 8);
+export { LOOP_LIMIT };

@@ -1,11 +1,12 @@
 import nodemailer from "nodemailer";
 import type { WaitlistEntry } from "./waitlist.js";
+import { SMTP_FROM, SMTP_HOST, SMTP_PASS, SMTP_PORT, SMTP_USER } from "./config.js";
 
-const host = process.env.SMTP_HOST;
-const port = Number(process.env.SMTP_PORT ?? 587);
-const user = process.env.SMTP_USER;
-const pass = process.env.SMTP_PASS;
-const from = process.env.SMTP_FROM ?? (user ? `Warren <${user}>` : undefined);
+const host = SMTP_HOST;
+const port = SMTP_PORT;
+const user = SMTP_USER;
+const pass = SMTP_PASS;
+const from = SMTP_FROM;
 
 const mailer = host && user && pass
   ? nodemailer.createTransport({

@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "npm run dev -w hub",
     "dev:web": "npm run dev -w web",
-    "build": "npm run build -w web",
+    "build": "npm run build -w web && npm run build:hub",
+    "build:hub": "tsc -p hub/tsconfig.build.json",
     "e2e": "tsx e2e/run.ts",
     "typecheck": "tsc -p hub && tsc -p bridge",
     "start": "npm run start -w hub",
@@ -20,6 +21,9 @@
     "@types/node": "^24.0.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "source-map-js": "^1.2.2"
   },
   "license": "Apache-2.0"
 }

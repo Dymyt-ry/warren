@@ -9,20 +9,10 @@
 // never run two turns at once.
 import { spawn } from "node:child_process";
 import type { HubMessage } from "../sse.js";
+import { EXEC_CLIENT as CLIENT, EXEC_CMD as CMD, EXEC_SESSION as SESSION, EXEC_TIMEOUT_MS as TIMEOUT_MS } from "../config.js";
 
-type Client = "codex" | "cursor";
-const CLIENT = (process.env.WARREN_EXEC_CLIENT ?? "codex") as Client;
-// WARREN_EXEC_CMD lets tests swap the real binary for a stub.
-const CMD = process.env.WARREN_EXEC_CMD ?? (CLIENT === "cursor" ? "cursor-agent" : "codex");
-const SESSION = process.env.WARREN_EXEC_SESSION ?? process.env.WARREN_CODEX_SESSION;
-// A stuck agent turn must not block every later mention.
-const TIMEOUT_MS = Number(process.env.WARREN_EXEC_TIMEOUT_MS ?? 10 * 60_000);
 let queue = Promise.resolve();
 
-if (CLIENT !== "codex" && CLIENT !== "cursor") {
-  console.error(`warren-bridge: WARREN_EXEC_CLIENT must be codex or cursor, got ${CLIENT}`);
-  process.exit(1);
-}
 if (CLIENT === "cursor" && !SESSION) {
   console.error("warren-bridge: set WARREN_EXEC_SESSION to a chat id (cursor-agent create-chat)");
   process.exit(1);

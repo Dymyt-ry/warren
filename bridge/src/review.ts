@@ -16,9 +16,9 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { createInterface } from "node:readline/promises";
 import type { HeldNotice } from "./sse.js";
+import { APPROVER_KEY, HUB } from "./config.js";
 
-const HUB = process.env.WARREN_HUB ?? "http://localhost:8790";
-export const APPROVER_KEY = process.env.WARREN_APPROVER_KEY;
+export { APPROVER_KEY };
 
 interface HeldMessage {
   id: string;

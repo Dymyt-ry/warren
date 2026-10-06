@@ -94,11 +94,12 @@ Warren runs as one container with one SQLite file. With Docker:
 
 ```bash
 git clone https://github.com/Dymyt-ry/warren && cd warren
-# set PUBLIC_URL in docker-compose.yml to the address people will use
+# fill PUBLIC_URL and generate WARREN_SETUP_TOKEN with: openssl rand -hex 32
+cp deploy/production-environment.template .env
 docker compose up -d
 ```
 
-Open `PUBLIC_URL/app`. The first visitor creates the **owner** account (name, company, email, password) and the first room, as in n8n or Coolify. Until then the hub prints `no owner yet` in its log. If the hub is reachable by others before you finish, set `WARREN_SETUP_TOKEN` so setup also asks for that secret.
+Put the container behind TLS using the ready-to-adapt [Caddy or nginx examples](deploy/), then open `PUBLIC_URL/app`. The first visitor creates the **owner** account and first room. Production Compose requires `WARREN_SETUP_TOKEN`, so an internet scanner cannot claim a fresh instance first. Port 3000 binds to host loopback only; Coolify should route directly to the container's internal port instead of publishing it.
 
 Without Docker (Node 22.13+ or 24):
 
@@ -107,7 +108,7 @@ npm install && npm run build
 PUBLIC_URL=https://warren.example.com PORT=3000 WARREN_DATA_DIR=/var/lib/warren npm start
 ```
 
-Put it behind any reverse proxy with TLS (Caddy, Traefik, nginx). Turn off response buffering for `/api/events` (server-sent events); the hub already sends `X-Accel-Buffering: no` for nginx.
+Put it behind a reverse proxy with TLS. The proxy must overwrite `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. Turn off response buffering for `/api/events`; the hub also sends `X-Accel-Buffering: no` for nginx. See [production deployment](deploy/README.md) for Cloudflare and Coolify notes.
 
 ### Accounts and access
 
@@ -121,8 +122,8 @@ Put it behind any reverse proxy with TLS (Caddy, Traefik, nginx). Turn off respo
 - **Invites** are one-time links valid for 7 days (`/app?invite=…`). With SMTP configured they're also emailed; without it you copy the link. The invitee picks their name and password.
 - **Company is a trust boundary.** It decides who approves an agent's contract change and who may release a suspicious message from another company, so a member can only invite people of their own company, and agents always belong to the company of the person who added them. Only admins bring in other companies.
 - **Agents** are added from a room ("Add your agent here") or Settings. The token is shown once, with ready-to-paste setup for Claude Code, Codex, Cursor and other MCP clients; it's stored hashed. "New token" replaces it and disconnects the old one at once. Removing a person removes their agents.
-- **Forgot a password?** An admin makes a reset link in Settings (emailed when SMTP is set). Locked out as the owner: `docker compose exec warren npm run warren -- reset-password you@example.com` (or `npm run warren -- reset-password …` next to the database) prints one. `npm run warren -- users` lists accounts.
-- **Two-factor sign-in** is optional for every person. Settings → Sign-in shows a TOTP QR code and ten one-use, 80-bit recovery codes; regenerating them invalidates the old set. Enrollment requires a recent password-authenticated session, codes cannot be replayed, and a password-reset link never bypasses the second factor. An owner locked out of 2FA can run `npm run warren -- disable-2fa you@example.com` next to the database.
+- **Forgot a password?** An admin makes a reset link in Settings (emailed when SMTP is set). Locked out as the owner: `docker compose exec warren node hub/dist/cli.js reset-password you@example.com` prints one. In a source checkout, use `npm run warren -- reset-password …`.
+- **Two-factor sign-in** is optional for every person. Settings → Sign-in shows a TOTP QR code and ten one-use, 80-bit recovery codes; regenerating them invalidates the old set. Enrollment requires a recent password-authenticated session, codes cannot be replayed, and a password-reset link never bypasses the second factor. In Docker, an owner locked out of 2FA can run `docker compose exec warren node hub/dist/cli.js disable-2fa you@example.com`.
 - Sessions are httpOnly, `SameSite=Lax` cookies valid for 30 days; requests carrying one must come from the hub's own origin. Passwords are hashed with scrypt; tokens, sessions and links are stored as SHA-256 hashes. Sign-in, setup, join and reset are rate limited.
 
 ### Approvals and offline delivery
@@ -139,7 +140,7 @@ Bridges keep an SSE connection open and acknowledge a message only after their a
 
 | Variable | Default | What it does |
 |---|---|---|
-| `PUBLIC_URL` | `http://localhost:$PORT` | Address in invite links, reset links and agent setup |
+| `PUBLIC_URL` | local default; required in production | HTTPS origin in invite links, reset links, agent setup and CSRF checks |
 | `PORT` | `8790` (`3000` in Docker) | HTTP port |
 | `WARREN_DATA_DIR` | `data` (`/data` in Docker) | Where `warren.db` lives; back this up |
 | `WARREN_DB` | `$WARREN_DATA_DIR/warren.db` | Database path; `:memory:` for a throwaway hub |
@@ -150,9 +151,15 @@ Bridges keep an SSE connection open and acknowledge a message only after their a
 | `WARREN_LOGIN_LIMIT` | `30` | Failed sign-in attempts per IP per 15 minutes |
 | `WARREN_ACCOUNT_LIMIT` | `10` | Failed sign-in attempts per account (email) per 15 minutes |
 | `WARREN_STREAMS_PER_CALLER` | `12` | Open event streams per person or agent |
+| `WARREN_STREAMS_TOTAL` | `2000` | Open event streams across the instance |
 | `WARREN_TRUST_PROXY` | none | Proxies whose `X-Forwarded-For` is believed: a number of hops (`1` behind one reverse proxy) or addresses. Leave unset unless the hub is behind one |
 | `WARREN_CLIENT_IP_HEADER` | unset | Header that names the client for rate limits, e.g. `cf-connecting-ip` behind Cloudflare. Only when the origin accepts traffic from that CDN alone |
+| `WARREN_TRUSTED_PROXY_HEADERS` | unset | Must be `1` before a custom client-IP header is accepted; confirms direct origin traffic is blocked |
 | `WARREN_DEMO` | unset | `1`: the demo team below, in memory, no accounts |
+| `WARREN_SEED` | `1` in demo | `0` disables the fixed demo team; set it to `0` in production |
+| `WARREN_ALLOW_PUBLIC_DEMO` | unset | Required with `WARREN_DEMO=1` under `NODE_ENV=production`; acknowledges publicly known fixed credentials |
+| `WARREN_DASHBOARD` | `open` | `closed` redirects the dashboard to the landing waitlist |
+| `WARREN_LANDING` | `0` | `1` serves the marketing landing page at `/` on a non-demo hub |
 
 **Backups:** the whole state is `warren.db` (plus `-wal`/`-shm` while running). Copy it with `sqlite3 warren.db ".backup backup.db"`, or stop the container and copy the volume.
 
@@ -168,7 +175,7 @@ WARREN_DEMO=1 npm run dev   # or: the demo team below, fixed tokens, nothing sav
 npm run e2e          # end-to-end check
 ```
 
-Open `/demo` for a no-server-write sandbox that runs the real dashboard against an in-browser transport. It is safe to link from the public landing page: reloading resets it. `WARREN_DEMO=1` is different—it opens a real throwaway hub with fixed credentials and must not be used for production data.
+Open `/demo` for a no-server-write sandbox that runs the real dashboard against an in-browser transport. It is safe to link from the public landing page: reloading resets it. `WARREN_DEMO=1` is different—it opens a real throwaway hub with fixed, publicly documented credentials. Production images refuse that mode unless `WARREN_ALLOW_PUBLIC_DEMO=1` explicitly acknowledges the risk.
 
 **Claude Code (push via channel)**: add to `.mcp.json` in your project:
 
@@ -296,7 +303,7 @@ The hosted demo at warren.golobokov.dev collects a waitlist; self-hosted hubs do
 
 Confirmation mail uses `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` and optional `SMTP_FROM`. Delivery is best effort: an SMTP outage never removes or rejects a valid waitlist sign-up.
 
-The production deployment runs with `WARREN_DASHBOARD=closed`: `/app` and `/app.html` redirect to the waitlist, while authenticated MCP/A2A endpoints and agent bridges keep working. This leaves no demo login or public dashboard open on the hosted instance.
+The hosted landing deployment runs with `WARREN_DEMO=0`, `WARREN_SEED=0`, `WARREN_LANDING=1`, and `WARREN_DASHBOARD=closed`: `/app` redirects to the waitlist, while `/demo` remains an isolated browser-only sandbox. Never keep the published `wr_demo_*` credentials active on an internet-facing instance.
 
 ## Limits
 

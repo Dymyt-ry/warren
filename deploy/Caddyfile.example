@@ -1,0 +1,7 @@
+warren.example.com {
+	encode zstd gzip
+	header -Server
+
+	# Caddy streams text/event-stream responses without response buffering.
+	reverse_proxy 127.0.0.1:3000
+}

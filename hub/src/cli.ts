@@ -6,8 +6,8 @@
 //
 // In Docker: docker compose exec warren npm run warren -- reset-password you@example.com
 import * as store from "./store.js";
+import { PUBLIC_URL } from "./config.js";
 
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 8790}`).replace(/\/$/, "");
 const [command, arg] = process.argv.slice(2);
 
 switch (command) {

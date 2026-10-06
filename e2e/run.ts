@@ -9,11 +9,12 @@
 //   +  claims and file locks, WARREN_DEMO=0, safety (secrets, injection hold, loop guard)
 //   8. WARREN_DEMO=0 closes the demo shortcuts
 //  13. accounts: owner setup, sign-in, invite links, guests scoped by room and company, removal, resets, restart
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -30,6 +31,7 @@ const CURSOR = "wr_demo_acme_cursor";
 const ANNA = "wr_demo_anna";
 const BEN = "wr_demo_ben";
 const MAREK = "wr_demo_marek";
+const TSX_CLI = fileURLToPath(import.meta.resolve("tsx/cli"));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 let failed = false;
@@ -62,16 +64,20 @@ async function startHub(port: number, env: Record<string, string> = {}) {
   const up = () => fetch(`${url}/.well-known/agent-card.json`).then((r) => r.ok, () => false);
   if (await up()) throw new Error(`port ${port} is taken: a hub from an earlier run is still up`);
   const dataDir = env.WARREN_DATA_DIR ?? mkdtempSync(join(tmpdir(), "warren-data-"));
-  const child = spawn("npx", ["tsx", "hub/src/server.ts"], {
+  const child = spawn(process.execPath, [TSX_CLI, "hub/src/server.ts"], {
     env: { ...process.env, PORT: String(port), WARREN_DATA_DIR: dataDir, WARREN_LOGIN_LIMIT: "50", ...env },
     stdio: ["ignore", "ignore", "inherit"],
     detached: true,
   });
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  let stopped = false;
   const stop = async () => {
+    if (stopped) return;
+    stopped = true;
     try {
       process.kill(-child.pid!);
     } catch {}
-    await waitFor(async () => !(await up()), 5000);
+    await Promise.race([exited, sleep(5000)]);
   };
   cleanup.push(stop);
   if (!(await waitFor(up, 15_000))) throw new Error(`hub on ${port} did not start`);
@@ -86,6 +92,31 @@ const online = (handle: string) =>
   });
 
 try {
+  const invalidNumber = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+    cwd: process.cwd(),
+    env: { ...process.env, WARREN_LOGIN_LIMIT: "not-a-number" },
+    encoding: "utf8",
+  });
+  const productionDemo = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PUBLIC_URL: "http://localhost:8790",
+      WARREN_DEMO: "1",
+      WARREN_ALLOW_PUBLIC_DEMO: "0",
+    },
+    encoding: "utf8",
+  });
+  check(
+    invalidNumber.status !== 0 && `${invalidNumber.stderr}${invalidNumber.stdout}`.includes("invalid WARREN_LOGIN_LIMIT"),
+    "invalid numeric security settings fail startup instead of disabling controls",
+  );
+  check(
+    productionDemo.status !== 0 && `${productionDemo.stderr}${productionDemo.stdout}`.includes("fixed demo credentials are forbidden"),
+    "production refuses fixed demo credentials without an explicit public-sandbox acknowledgement",
+  );
+
   let refreshRuns = 0;
   let releaseFirst!: () => void;
   const firstSnapshot = new Promise<void>((resolve) => (releaseFirst = resolve));
@@ -700,7 +731,7 @@ try {
 
   // 8. WARREN_DEMO=0: no demo team, no login by handle, no anonymous reads, invites need the admin token
   const PRIVATE = `http://localhost:${PORT - 1}`;
-  await startHub(PORT - 1, { WARREN_DEMO: "0", WARREN_ADMIN_TOKEN: "wr_admin_e2e" });
+  await startHub(PORT - 1, { WARREN_DEMO: "0", WARREN_ADMIN_TOKEN: "wr_admin_e2e", PUBLIC_URL: "https://warren.test" });
   const priv = (path: string, token?: string, body?: unknown) =>
     fetch(`${PRIVATE}${path}`, {
       method: body ? "POST" : "GET",
@@ -717,6 +748,14 @@ try {
     anonRooms.status === 401 && anonLogin.status === 404 && anonInvite.status === 401 && demoToken.status === 401,
     "WARREN_DEMO=0 closes anonymous reads, login, anonymous invites and demo tokens",
   );
+  const privateHealth = await fetch(`${PRIVATE}/healthz`);
+  check(
+    privateHealth.status === 200 &&
+      privateHealth.headers.has("strict-transport-security") &&
+      privateHealth.headers.get("content-security-policy")?.includes("frame-ancestors 'none'") &&
+      privateHealth.headers.get("x-frame-options") === "DENY",
+    "HTTPS deployments send HSTS, CSP, and anti-framing headers",
+  );
   const root = await priv("/api/rooms", "wr_admin_e2e", { name: "acme" });
   const rootRoom = await root.json();
   const invited = await priv("/api/invites", "wr_admin_e2e", { name: "Claude", org: "acme", room: rootRoom.id }).then((r) => r.json());
@@ -728,13 +767,20 @@ try {
   const OWN = `http://localhost:${PORT - 3}`;
   let stopOwn = await startHub(PORT - 3, { WARREN_DATA_DIR: OWN_DATA });
   type Session = { cookie?: string };
-  const as = async (who: Session, path: string, init: { method?: string; body?: unknown; origin?: string; token?: string } = {}) => {
+  const as = async (
+    who: Session,
+    path: string,
+    init: { method?: string; body?: unknown; origin?: string | null; forwardedHost?: string; token?: string } = {},
+  ) => {
+    const method = init.method ?? (init.body ? "POST" : "GET");
+    const origin = init.origin === null ? undefined : init.origin ?? (who.cookie && !["GET", "HEAD", "OPTIONS"].includes(method) ? OWN : undefined);
     const res = await fetch(`${OWN}${path}`, {
-      method: init.method ?? (init.body ? "POST" : "GET"),
+      method,
       headers: {
         "Content-Type": "application/json",
         ...(who.cookie ? { Cookie: who.cookie } : {}),
-        ...(init.origin ? { Origin: init.origin } : {}),
+        ...(origin ? { Origin: origin } : {}),
+        ...(init.forwardedHost ? { "X-Forwarded-Host": init.forwardedHost } : {}),
         ...(init.token ? { Authorization: `Bearer ${init.token}` } : {}),
       },
       body: init.body ? JSON.stringify(init.body) : undefined,
@@ -748,7 +794,29 @@ try {
   };
   const PASS = "correct horse battery";
   const owner: Session = {};
-  const cfg = await as({}, "/api/config").then((r) => r.json());
+  const cfgResponse = await as({}, "/api/config");
+  const cfg = await cfgResponse.json();
+  check(
+    cfgResponse.headers.get("cache-control") === "no-store" && cfgResponse.headers.get("permissions-policy")?.includes("camera=()"),
+    "API responses are non-cacheable and carry a restrictive browser permissions policy",
+  );
+  const malformedJson = await fetch(`${OWN}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{",
+  });
+  const oversizedJson = await fetch(`${OWN}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email: "x".repeat(1_100_000) }),
+  });
+  check(
+    malformedJson.status === 400 &&
+      (await malformedJson.json()).error === "malformed JSON body" &&
+      oversizedJson.status === 413 &&
+      (await oversizedJson.json()).error === "request body is too large",
+    "malformed and oversized JSON fail with bounded errors and no internal stack response",
+  );
   const weak = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: "short" } });
   const setup = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: PASS, room: "Agency" } });
   const second = await as({}, "/api/setup", { body: { name: "Eve", org: "Evil", email: "eve@example.com", password: PASS } });
@@ -756,7 +824,21 @@ try {
   const ownerMe = await as(owner, "/api/me").then((r) => r.json());
   const anonOwn = await as({}, "/api/rooms");
   const crossSite = await as(owner, "/api/rooms", { body: { name: "x", parentId: "agency" }, origin: "https://evil.example" });
-  check(ownerMe.role === "owner" && ownerMe.scopeRoomId === null && anonOwn.status === 401 && crossSite.status === 403, "owner sees every room; no anonymous reads; the cookie doesn't work cross-site");
+  const noOrigin = await as(owner, "/api/rooms", { body: { name: "x", parentId: "agency" }, origin: null });
+  const spoofedForwardedHost = await as(owner, "/api/rooms", {
+    body: { name: "x", parentId: "agency" },
+    origin: "https://evil.example",
+    forwardedHost: "evil.example",
+  });
+  check(
+    ownerMe.role === "owner" &&
+      ownerMe.scopeRoomId === null &&
+      anonOwn.status === 401 &&
+      crossSite.status === 403 &&
+      noOrigin.status === 403 &&
+      spoofedForwardedHost.status === 403,
+    "owner sees every room; cookie mutations require the exact public origin and ignore spoofed forwarded hosts",
+  );
   const wrong = await as({}, "/api/auth/login", { body: { email: "olga@example.com", password: "wrong password!" } });
   const relogin: Session = {};
   const right = await as(relogin, "/api/auth/login", { body: { email: "OLGA@example.com", password: PASS } });

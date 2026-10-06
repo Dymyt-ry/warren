@@ -1,0 +1,22 @@
+# Copy this file to the repository root as `.env`; never commit that copy.
+# Public origin used in links, cookies, and CSRF validation. No path or trailing slash.
+PUBLIC_URL=https://warren.example.com
+WARREN_HOST_PORT=3000
+
+# Required for first-owner setup. Generate with: openssl rand -hex 32
+WARREN_SETUP_TOKEN=
+
+# Optional instance-wide automation credential. Prefer scoped agent tokens.
+# Generate with: openssl rand -hex 32
+WARREN_ADMIN_TOKEN=
+
+WARREN_DASHBOARD=open
+WARREN_LANDING=0
+WARREN_TRUST_PROXY=1
+
+# Optional SMTP. Configure the complete group or leave it empty.
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USER=
+SMTP_PASS=
+SMTP_FROM=

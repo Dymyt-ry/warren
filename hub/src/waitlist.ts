@@ -4,6 +4,7 @@
 // no user agent. Rate limits per IP live in memory only.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { DATA_DIR } from "./config.js";
 
 export interface WaitlistEntry {
   email: string;
@@ -13,7 +14,7 @@ export interface WaitlistEntry {
   at: string;
 }
 
-const DIR = process.env.WARREN_DATA_DIR ?? "data";
+const DIR = DATA_DIR;
 const FILE = join(DIR, "waitlist.jsonl");
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
 const PER_IP_PER_HOUR = 5;

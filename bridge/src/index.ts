@@ -17,10 +17,8 @@ import { subscribe, type HeldNotice, type HeldResolution, type HubMessage } from
 import { APPROVER_KEY, describeFlags, reviewInSession, reviewInTerminal } from "./review.js";
 import { deliverViaChannel } from "./adapters/channel.js";
 import { deliverViaExec } from "./adapters/exec.js";
+import { ADAPTER, EXEC_CLIENT, HUB, TOKEN } from "./config.js";
 
-const HUB = process.env.WARREN_HUB ?? "http://localhost:8790";
-const TOKEN = process.env.WARREN_TOKEN;
-const ADAPTER = process.env.WARREN_ADAPTER ?? "channel";
 if (!TOKEN) {
   console.error("warren-bridge: set WARREN_TOKEN (get one from POST /api/invites)");
   process.exit(1);
@@ -76,7 +74,7 @@ if (!terminal) {
   process.stdin.on("end", () => process.exit(0));
   await mcp.connect(new StdioServerTransport());
 } else {
-  console.error(`warren-bridge: waking ${process.env.WARREN_EXEC_CLIENT ?? "codex"} on mentions${APPROVER_KEY ? "; held messages are reviewed here" : ""}`);
+  console.error(`warren-bridge: waking ${EXEC_CLIENT} on mentions${APPROVER_KEY ? "; held messages are reviewed here" : ""}`);
 }
 
 const deliver = (m: HubMessage) => (ADAPTER === "exec" ? deliverViaExec(m) : deliverViaChannel(mcp, m));

@@ -7,33 +7,45 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
-import { tx } from "./db.js";
+import { closeDb, dbHealthy, tx } from "./db.js";
 import { checkPassword, hashPassword, matchingTotpStep, newRecoveryCodes, newSecret, newTotpSecret, totpUri, verifyPassword } from "./auth.js";
 import { createMcpServer } from "./mcp.js";
 import { seedDemo } from "./seed.js";
 import { joinWaitlist, RateLimited, waitlistCount, waitlistEntries } from "./waitlist.js";
 import { canEmail, sendHeld, sendInvite, sendReset, sendWaitlistConfirmation } from "./email.js";
 import { gateDecision } from "./safety.js";
+import {
+  ACCOUNT_LIMIT,
+  ADMIN_TOKEN,
+  CLIENT_IP_HEADER,
+  DASHBOARD_OPEN,
+  DELIVERY_LEASE_MS,
+  DEMO,
+  LANDING,
+  LOGIN_LIMIT,
+  PORT,
+  PUBLIC_URL,
+  PUBLIC_URL_OBJECT,
+  SEED_DEMO,
+  SETUP_TOKEN,
+  STREAMS_PER_CALLER,
+  STREAMS_TOTAL,
+  TRUST_PROXY,
+} from "./config.js";
 
-const PORT = Number(process.env.PORT ?? 8790);
-const PUBLIC_URL = (process.env.PUBLIC_URL ?? `http://localhost:${PORT}`).replace(/\/$/, "");
 const VERSION = "0.3.0";
 
 // Demo mode (WARREN_DEMO=1) seeds the demo team with fixed tokens into a
 // throwaway database, lets the dashboard sign in by picking a person, and
 // shows the whole tree to visitors without a token. Off by default: a
 // self-hosted hub starts empty and asks for its owner on the first visit.
-const DEMO = process.env.WARREN_DEMO === "1";
 // WARREN_DASHBOARD=closed (the hosted demo): the dashboard isn't served, and the
 // demo's open doors close with it: no anonymous reads, no login by handle, no
 // anonymous invites. The seeded team and its fixed tokens still work for invited agents.
-const DASHBOARD_OPEN = process.env.WARREN_DASHBOARD !== "closed";
 const OPEN_DOORS = DEMO && DASHBOARD_OPEN;
-const ADMIN_TOKEN = process.env.WARREN_ADMIN_TOKEN;
-// Optional: the first visitor must also know this to create the owner account.
-const SETUP_TOKEN = process.env.WARREN_SETUP_TOKEN;
 const INVITE_DAYS = 7;
 const RESET_HOURS = 24;
 
@@ -41,14 +53,15 @@ const app = express();
 // Which proxies may set X-Forwarded-For. None by default: a client could otherwise
 // rotate the header to dodge rate limits. Behind a reverse proxy, set it to the
 // number of proxies in front of the hub (WARREN_TRUST_PROXY=1) or their addresses.
-const TRUST_PROXY = process.env.WARREN_TRUST_PROXY;
-app.set("trust proxy", TRUST_PROXY === undefined ? false : /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY === "true" ? true : TRUST_PROXY);
+app.set("trust proxy", TRUST_PROXY);
 // Behind a CDN that names the client in its own header (Cloudflare: cf-connecting-ip), set
 // WARREN_CLIENT_IP_HEADER, and only when the origin accepts traffic from that CDN alone.
-const CLIENT_IP_HEADER = process.env.WARREN_CLIENT_IP_HEADER?.toLowerCase();
-const clientIp = (req: Request) => String((CLIENT_IP_HEADER && req.headers[CLIENT_IP_HEADER]) || req.ip || "unknown");
+const clientIp = (req: Request) => {
+  const header = CLIENT_IP_HEADER ? req.headers[CLIENT_IP_HEADER] : undefined;
+  const value = Array.isArray(header) ? header[0] : header;
+  return value && isIP(value) ? value : req.ip || "unknown";
+};
 app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {
   // Bearer-token API: any origin may call it. Cookies are never sent cross-origin (no credentials allowed).
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -56,9 +69,20 @@ app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
+  );
+  if (PUBLIC_URL_OBJECT.protocol === "https:") res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  if (req.path.startsWith("/api/") || req.path === "/mcp" || req.path === "/a2a")
+    res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return void res.status(204).end();
   next();
 });
+app.use(express.json({ limit: "1mb" }));
 
 // --- who is calling ------------------------------------------------------------
 
@@ -102,16 +126,14 @@ function caller(req: Request, allowQuery = false): store.Member | undefined {
 
 // Cookie sessions only work from the hub's own pages: a state-changing request
 // carrying a session cookie must come from this origin. Browsers always send
-// Origin on POST/PUT/DELETE, so another site can't ride on the cookie.
+// Origin on POST/PUT/DELETE, so another site can't ride on the cookie. Scripts
+// without an Origin must use a bearer token instead of a browser session.
 app.use((req, res, next) => {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method) || presentedToken(req) || !sessionId(req)) return next();
   const origin = req.headers.origin;
-  if (!origin) return next();
-  const host = req.headers["x-forwarded-host"] ?? req.headers.host;
   let ok = false;
   try {
-    const o = new URL(origin).host;
-    ok = o === host || o === new URL(PUBLIC_URL).host;
+    ok = !!origin && new URL(origin).origin === PUBLIC_URL_OBJECT.origin;
   } catch {}
   if (!ok) return void res.status(403).json({ error: "cross-origin request refused" });
   next();
@@ -156,7 +178,7 @@ const statusFor = (e: unknown, fallback = 400) => ((e as Error).message.startsWi
 
 function setSessionCookie(req: Request, res: Response, handle: string, recentlyAuthenticated = true) {
   const { id, expiresAt } = store.createSession(handle, recentlyAuthenticated);
-  const secure = req.secure || PUBLIC_URL.startsWith("https:");
+  const secure = req.secure || PUBLIC_URL_OBJECT.protocol === "https:";
   res.setHeader(
     "Set-Cookie",
     `${COOKIE}=${id}; Path=/; HttpOnly; SameSite=Lax; Expires=${expiresAt.toUTCString()}${secure ? "; Secure" : ""}`,
@@ -170,7 +192,8 @@ const activeSessionId = (req: Request) => {
 };
 
 function clearSessionCookie(res: Response) {
-  res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  const secure = PUBLIC_URL_OBJECT.protocol === "https:" ? "; Secure" : "";
+  res.setHeader("Set-Cookie", `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`);
 }
 
 /**
@@ -199,10 +222,10 @@ function limiter(perIp: number, perAccount: number, windowMs: number, accountFor
     next();
   };
 }
-const signInLimit = limiter(Number(process.env.WARREN_LOGIN_LIMIT ?? 30), Number(process.env.WARREN_ACCOUNT_LIMIT ?? 10), 15 * 60_000);
+const signInLimit = limiter(LOGIN_LIMIT, ACCOUNT_LIMIT, 15 * 60_000);
 const authenticatedLimit = limiter(
-  Number(process.env.WARREN_LOGIN_LIMIT ?? 30),
-  Number(process.env.WARREN_ACCOUNT_LIMIT ?? 10),
+  LOGIN_LIMIT,
+  ACCOUNT_LIMIT,
   15 * 60_000,
   (req) => caller(req)?.handle ?? store.approverHandleForKey(presentedToken(req)) ?? "",
 );
@@ -1106,7 +1129,6 @@ app.get("/api/inbox", (req, res) => {
 
 // Bridges acknowledge only after their adapter accepted a message. Until this
 // explicit ack, reconnect catch-up keeps the message durable.
-const DELIVERY_LEASE_MS = Math.max(30_000, Number(process.env.WARREN_DELIVERY_LEASE_MS ?? 15 * 60_000));
 const deliveryLeases = new Map<string, { streamId: string; expiresAt: number }>();
 let lastDeliveryLeaseSweep = 0;
 const deliveryLeaseKey = (messageId: string, handle: string) => `${messageId}\0${handle}`;
@@ -1141,9 +1163,8 @@ app.post("/api/deliveries/:id/ack", (req, res) => {
 // Without: everything (demo overview and the admin token only).
 // Open event streams per member (or per address for the demo overview), and in total.
 const streams = new Map<string, number>();
+const openStreamResponses = new Set<Response>();
 let totalStreams = 0;
-const STREAMS_PER_CALLER = Number(process.env.WARREN_STREAMS_PER_CALLER ?? 12);
-const STREAMS_TOTAL = Number(process.env.WARREN_STREAMS_TOTAL ?? 2000);
 
 app.get("/api/events", (req: Request, res: Response) => {
   const m = reader(req, res, true);
@@ -1152,8 +1173,10 @@ app.get("/api/events", (req: Request, res: Response) => {
   if ((streams.get(who) ?? 0) >= STREAMS_PER_CALLER || totalStreams >= STREAMS_TOTAL)
     return void res.status(429).json({ error: "too many open event streams; close some tabs or bridges" });
   streams.set(who, (streams.get(who) ?? 0) + 1);
+  openStreamResponses.add(res);
   totalStreams++;
   res.on("close", () => {
+    openStreamResponses.delete(res);
     totalStreams--;
     const n = (streams.get(who) ?? 1) - 1;
     if (n > 0) streams.set(who, n);
@@ -1348,7 +1371,10 @@ app.get("/.well-known/agent-card.json", (_req, res) => {
   });
 });
 
-app.get("/healthz", (_req, res) => void res.json({ ok: true, version: VERSION }));
+app.get("/healthz", (_req, res) => {
+  const ok = dbHealthy();
+  res.status(ok ? 200 : 503).json({ ok, version: VERSION });
+});
 
 app.post("/a2a", (req, res) => {
   const { id = null, method, params } = req.body ?? {};
@@ -1402,8 +1428,19 @@ app.get(["/app", "/app/", "/app.html"], (_req, res) =>
 app.get("/privacy", (_req, res) => res.sendFile("privacy.html", { root: WEB }));
 app.get("/demo", (_req, res) => res.sendFile("demo.html", { root: WEB }));
 // A self-hosted hub has no use for the marketing landing page: / opens the dashboard.
-app.get("/", (req, res, next) => (DEMO || process.env.WARREN_LANDING === "1" ? next() : res.redirect(302, "/app")));
+app.get("/", (req, res, next) => (DEMO || LANDING ? next() : res.redirect(302, "/app")));
 app.use(express.static(WEB));
+
+// Keep parser and unexpected route errors in the same non-sensitive JSON shape
+// as the API. Expected client errors do not need stack traces in production logs.
+app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  const e = error as Error & { status?: number; type?: string };
+  if (e.type === "entity.too.large" || e.status === 413) return void res.status(413).json({ error: "request body is too large" });
+  if ((e instanceof SyntaxError && e.status === 400) || e.type === "entity.parse.failed")
+    return void res.status(400).json({ error: "malformed JSON body" });
+  console.error("request failed", e.message);
+  res.status(500).json({ error: "internal server error" });
+});
 
 function setupSnippets(m: store.Member, token: string) {
   return {
@@ -1432,10 +1469,28 @@ function setupSnippets(m: store.Member, token: string) {
   };
 }
 
-if (DEMO && process.env.WARREN_SEED !== "0") seedDemo(PUBLIC_URL);
+if (DEMO && SEED_DEMO) seedDemo(PUBLIC_URL);
 store.sweep();
 setInterval(() => store.sweep(), 60 * 60_000).unref();
 if (!DEMO && !store.isSetUp())
   console.log(`no owner yet: open ${PUBLIC_URL}/app to create the owner account${SETUP_TOKEN ? " (needs WARREN_SETUP_TOKEN)" : ""}`);
 
-app.listen(PORT, () => console.log(`warren hub ${VERSION} on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app)`));
+const httpServer = app.listen(PORT, () => console.log(`warren hub ${VERSION} on ${PUBLIC_URL}  (dashboard: ${PUBLIC_URL}/app)`));
+let stopping = false;
+const shutdown = (signal: string) => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal}: stopping warren hub`);
+  for (const response of openStreamResponses) response.end();
+  httpServer.close(() => {
+    closeDb();
+    process.exit(0);
+  });
+  setTimeout(() => {
+    httpServer.closeAllConnections();
+    closeDb();
+    process.exit(1);
+  }, 10_000).unref();
+};
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+process.once("SIGINT", () => shutdown("SIGINT"));
