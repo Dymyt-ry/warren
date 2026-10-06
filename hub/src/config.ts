@@ -100,7 +100,6 @@ export const CLIENT_IP_HEADER = ipHeader;
 
 export const ADMIN_TOKEN = raw("WARREN_ADMIN_TOKEN") || undefined;
 export const SETUP_TOKEN = raw("WARREN_SETUP_TOKEN") || undefined;
-if (PRODUCTION && !SETUP_TOKEN) fail("WARREN_SETUP_TOKEN", "is required when NODE_ENV=production to protect first-owner setup");
 for (const [name, value] of [["WARREN_ADMIN_TOKEN", ADMIN_TOKEN], ["WARREN_SETUP_TOKEN", SETUP_TOKEN]] as const)
   if (PRODUCTION && value && value.length < 32) fail(name, "production secrets must contain at least 32 characters");
 

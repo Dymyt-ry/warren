@@ -16,7 +16,7 @@ Back up the database first and keep the existing `warren-data` named volume atta
 
 - Build with the repository `Dockerfile`; route the domain to internal port `3000` without publishing that port on the host.
 - Prefer a managed named volume at `/data`; use `/healthz` for health checks. The container runs as the unprivileged `node` user, so a bind mount must already be writable by that user. Check the image's numeric identity with `docker run --rm --entrypoint id <image> node`, then set ownership on the dedicated host data directory to that exact UID/GID before starting Warren. Do not make the directory world-writable.
-- Set `PUBLIC_URL=https://…`, `WARREN_DEMO=0`, `WARREN_SEED=0`, and the required setup token before the first request.
+- Set `PUBLIC_URL=https://…`, `WARREN_DEMO=0`, `WARREN_SEED=0`, and the required setup token before the first request. An already initialized database can restart without the setup token, though leaving it configured is harmless.
 - Coolify/Traefik is the immediate proxy, so `WARREN_TRUST_PROXY=1` is normally correct when there is exactly one network hop to the container.
 
 ## Cloudflare

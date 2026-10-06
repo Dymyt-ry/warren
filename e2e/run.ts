@@ -11,7 +11,7 @@
 //  13. accounts: owner setup, sign-in, invite links, guests scoped by room and company, removal, resets, restart
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -109,11 +109,22 @@ try {
     },
     encoding: "utf8",
   });
-  const productionWithoutSetupToken = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+  const freshProductionData = mkdtempSync(join(tmpdir(), "warren-production-no-setup-"));
+  const productionWithoutSetupToken = spawnSync(process.execPath, [TSX_CLI, "hub/src/server.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, NODE_ENV: "production", PUBLIC_URL: "https://warren.example.test", WARREN_SETUP_TOKEN: "" },
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PUBLIC_URL: "http://127.0.0.1:18791",
+      PORT: "18791",
+      WARREN_DATA_DIR: freshProductionData,
+      WARREN_SETUP_TOKEN: "",
+      WARREN_DEMO: "0",
+    },
     encoding: "utf8",
+    timeout: 5_000,
   });
+  rmSync(freshProductionData, { recursive: true, force: true });
   const productionIpv6Loopback = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
     cwd: process.cwd(),
     env: {
@@ -134,7 +145,7 @@ try {
   );
   check(
     productionWithoutSetupToken.status !== 0 && `${productionWithoutSetupToken.stderr}${productionWithoutSetupToken.stdout}`.includes("invalid WARREN_SETUP_TOKEN"),
-    "production refuses to start without first-owner setup protection",
+    "a fresh production database refuses to start without first-owner setup protection",
   );
   check(productionIpv6Loopback.status === 0, "production permits IPv6 loopback between a local reverse proxy and the hub");
 

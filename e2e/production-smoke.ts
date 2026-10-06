@@ -22,7 +22,7 @@ const freePort = () =>
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function start(port: number) {
+async function start(port: number, withSetupToken = true) {
   let output = "";
   const child = spawn(process.execPath, ["--enable-source-maps", "hub/dist/server.js"], {
     env: {
@@ -31,7 +31,7 @@ async function start(port: number) {
       PORT: String(port),
       PUBLIC_URL: `http://127.0.0.1:${port}`,
       WARREN_DATA_DIR: dataDir,
-      WARREN_SETUP_TOKEN: setupToken,
+      WARREN_SETUP_TOKEN: withSetupToken ? setupToken : "",
       WARREN_DEMO: "0",
       WARREN_SEED: "0",
     },
@@ -86,10 +86,11 @@ try {
   await stop(activeChild);
   activeChild = undefined;
 
-  activeChild = await start(port);
+  activeChild = await start(port, false);
   const config = await fetch(`${base}/api/config`).then((response) => response.json() as Promise<{ needsSetup: boolean }>);
   const login = await fetch(`${base}/api/auth/login`, json({ email, password }));
-  if (config.needsSetup || login.status !== 200) throw new Error("SQLite state did not survive a compiled-server restart");
+  if (config.needsSetup || login.status !== 200)
+    throw new Error("SQLite state did not survive a compiled-server restart without the setup-only token");
   await stop(activeChild);
   activeChild = undefined;
   console.log("PASS  compiled production server: health, assets, setup/login, SSE shutdown, and SQLite restart");

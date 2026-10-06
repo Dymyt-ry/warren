@@ -27,6 +27,7 @@ import {
   LANDING,
   LOGIN_LIMIT,
   PORT,
+  PRODUCTION,
   PUBLIC_URL,
   PUBLIC_URL_OBJECT,
   SEED_DEMO,
@@ -1477,6 +1478,8 @@ function setupSnippets(m: store.Member, token: string) {
 if (DEMO && SEED_DEMO) seedDemo(PUBLIC_URL);
 store.sweep();
 setInterval(() => store.sweep(), 60 * 60_000).unref();
+if (PRODUCTION && !DEMO && !store.isSetUp() && !SETUP_TOKEN)
+  throw new Error("invalid WARREN_SETUP_TOKEN: is required for a production database without an owner");
 if (!DEMO && !store.isSetUp())
   console.log(`no owner yet: open ${PUBLIC_URL}/app to create the owner account${SETUP_TOKEN ? " (needs WARREN_SETUP_TOKEN)" : ""}`);
 
