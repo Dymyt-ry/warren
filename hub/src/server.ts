@@ -100,10 +100,9 @@ function cookies(req: Request): Record<string, string> {
   return out;
 }
 
-/** Bearer token; EventSource is the sole endpoint allowed to use `?token=`. */
-function presentedToken(req: Request, allowQuery = false): string | undefined {
-  const q = allowQuery ? req.query.token : undefined;
-  return req.headers.authorization?.replace(/^Bearer\s+/i, "") || (typeof q === "string" ? q : undefined) || undefined;
+/** Credentials belong in an Authorization header or the httpOnly session cookie, never in a URL. */
+function presentedToken(req: Request): string | undefined {
+  return req.headers.authorization?.replace(/^Bearer\s+/i, "") || undefined;
 }
 
 const sessionId = (req: Request) => cookies(req)[COOKIE];
@@ -118,8 +117,8 @@ function sameSecret(a: string | undefined, b: string | undefined): boolean {
 const isAdminToken = (req: Request) => sameSecret(presentedToken(req), ADMIN_TOKEN);
 
 /** The member behind the bearer token (agent token, or a session id for scripts), else the session cookie. */
-function caller(req: Request, allowQuery = false): store.Member | undefined {
-  const token = presentedToken(req, allowQuery);
+function caller(req: Request): store.Member | undefined {
+  const token = presentedToken(req);
   if (token) return token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token);
   return store.sessionMember(sessionId(req));
 }
@@ -164,10 +163,10 @@ function requireAdmin(req: Request, res: Response): store.Member | null | undefi
  * in demo mode, or the admin token). Answers 401 and returns false for an
  * unknown token, or for an anonymous visitor outside demo mode.
  */
-function reader(req: Request, res: Response, allowQuery = false): store.Member | undefined | false {
-  const m = caller(req, allowQuery);
+function reader(req: Request, res: Response): store.Member | undefined | false {
+  const m = caller(req);
   if (m) return m;
-  const token = presentedToken(req, allowQuery);
+  const token = presentedToken(req);
   if (sameSecret(token, ADMIN_TOKEN) || (OPEN_DOORS && !token)) return undefined;
   res.status(401).json({ error: token ? "unknown token" : "sign in first" });
   return false;
@@ -1167,7 +1166,7 @@ const openStreamResponses = new Set<Response>();
 let totalStreams = 0;
 
 app.get("/api/events", (req: Request, res: Response) => {
-  const m = reader(req, res, true);
+  const m = reader(req, res);
   if (m === false) return;
   const who = m ? `m:${m.handle}` : `ip:${clientIp(req)}`;
   if ((streams.get(who) ?? 0) >= STREAMS_PER_CALLER || totalStreams >= STREAMS_TOTAL)
@@ -1189,7 +1188,7 @@ app.get("/api/events", (req: Request, res: Response) => {
   const send = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   // Access is re-read on every event: a member moved, paused or removed, a session signed out
   // or expired, a token replaced: the stream sees it at once (and closes on the next ping).
-  const token = presentedToken(req, true);
+  const token = presentedToken(req);
   const credential = () => (token ? (token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token)) : store.sessionMember(sessionId(req)));
   const live = () => {
     if (!m) return undefined;
@@ -1433,11 +1432,17 @@ app.use(express.static(WEB));
 
 // Keep parser and unexpected route errors in the same non-sensitive JSON shape
 // as the API. Expected client errors do not need stack traces in production logs.
-app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-  const e = error as Error & { status?: number; type?: string };
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) return next(error);
+  const e = error as Error & { status?: number; statusCode?: number; type?: string };
   if (e.type === "entity.too.large" || e.status === 413) return void res.status(413).json({ error: "request body is too large" });
   if ((e instanceof SyntaxError && e.status === 400) || e.type === "entity.parse.failed")
     return void res.status(400).json({ error: "malformed JSON body" });
+  if (e.type === "charset.unsupported" || e.type === "encoding.unsupported")
+    return void res.status(415).json({ error: "unsupported request body format" });
+  if (e.type === "request.aborted") return void res.status(400).json({ error: "request body was not completed" });
+  const status = e.status ?? e.statusCode;
+  if (status && status >= 400 && status < 500) return void res.status(status).json({ error: "invalid request body" });
   console.error("request failed", e.message);
   res.status(500).json({ error: "internal server error" });
 });

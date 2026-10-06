@@ -14,6 +14,11 @@ WARREN_DASHBOARD=open
 WARREN_LANDING=0
 WARREN_TRUST_PROXY=1
 
+# Optional CDN client-IP support. Leave disabled unless direct origin traffic
+# is blocked and only the trusted CDN/proxy can set this header.
+WARREN_CLIENT_IP_HEADER=
+WARREN_TRUSTED_PROXY_HEADERS=0
+
 # Optional SMTP. Configure the complete group or leave it empty.
 SMTP_HOST=
 SMTP_PORT=587

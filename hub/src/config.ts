@@ -50,7 +50,7 @@ function publicUrl(): URL {
   if (!(["http:", "https:"] as string[]).includes(url.protocol)) fail("PUBLIC_URL", "only http:// and https:// are supported");
   if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== ""))
     fail("PUBLIC_URL", "must be an origin without credentials, path, query, or fragment");
-  if (PRODUCTION && url.protocol !== "https:" && !["localhost", "127.0.0.1", "::1"].includes(url.hostname))
+  if (PRODUCTION && url.protocol !== "https:" && !["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname))
     fail("PUBLIC_URL", "production deployments must use https:// (localhost is allowed for a local proxy)");
   return url;
 }
@@ -100,6 +100,7 @@ export const CLIENT_IP_HEADER = ipHeader;
 
 export const ADMIN_TOKEN = raw("WARREN_ADMIN_TOKEN") || undefined;
 export const SETUP_TOKEN = raw("WARREN_SETUP_TOKEN") || undefined;
+if (PRODUCTION && !SETUP_TOKEN) fail("WARREN_SETUP_TOKEN", "is required when NODE_ENV=production to protect first-owner setup");
 for (const [name, value] of [["WARREN_ADMIN_TOKEN", ADMIN_TOKEN], ["WARREN_SETUP_TOKEN", SETUP_TOKEN]] as const)
   if (PRODUCTION && value && value.length < 32) fail(name, "production secrets must contain at least 32 characters");
 

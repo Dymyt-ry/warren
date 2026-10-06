@@ -13,6 +13,7 @@
     "build": "npm run build -w web && npm run build:hub",
     "build:hub": "tsc -p hub/tsconfig.build.json",
     "e2e": "tsx e2e/run.ts",
+    "smoke:production": "tsx e2e/production-smoke.ts",
     "typecheck": "tsc -p hub && tsc -p bridge",
     "start": "npm run start -w hub",
     "warren": "tsx hub/src/cli.ts"

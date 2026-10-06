@@ -65,7 +65,7 @@ async function startHub(port: number, env: Record<string, string> = {}) {
   if (await up()) throw new Error(`port ${port} is taken: a hub from an earlier run is still up`);
   const dataDir = env.WARREN_DATA_DIR ?? mkdtempSync(join(tmpdir(), "warren-data-"));
   const child = spawn(process.execPath, [TSX_CLI, "hub/src/server.ts"], {
-    env: { ...process.env, PORT: String(port), WARREN_DATA_DIR: dataDir, WARREN_LOGIN_LIMIT: "50", ...env },
+    env: { ...process.env, NODE_ENV: "test", PORT: String(port), WARREN_DATA_DIR: dataDir, WARREN_LOGIN_LIMIT: "50", ...env },
     stdio: ["ignore", "ignore", "inherit"],
     detached: true,
   });
@@ -103,8 +103,24 @@ try {
       ...process.env,
       NODE_ENV: "production",
       PUBLIC_URL: "http://localhost:8790",
+      WARREN_SETUP_TOKEN: "s".repeat(64),
       WARREN_DEMO: "1",
       WARREN_ALLOW_PUBLIC_DEMO: "0",
+    },
+    encoding: "utf8",
+  });
+  const productionWithoutSetupToken = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+    cwd: process.cwd(),
+    env: { ...process.env, NODE_ENV: "production", PUBLIC_URL: "https://warren.example.test", WARREN_SETUP_TOKEN: "" },
+    encoding: "utf8",
+  });
+  const productionIpv6Loopback = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      NODE_ENV: "production",
+      PUBLIC_URL: "http://[::1]:3000",
+      WARREN_SETUP_TOKEN: "s".repeat(64),
     },
     encoding: "utf8",
   });
@@ -116,6 +132,11 @@ try {
     productionDemo.status !== 0 && `${productionDemo.stderr}${productionDemo.stdout}`.includes("fixed demo credentials are forbidden"),
     "production refuses fixed demo credentials without an explicit public-sandbox acknowledgement",
   );
+  check(
+    productionWithoutSetupToken.status !== 0 && `${productionWithoutSetupToken.stderr}${productionWithoutSetupToken.stdout}`.includes("invalid WARREN_SETUP_TOKEN"),
+    "production refuses to start without first-owner setup protection",
+  );
+  check(productionIpv6Loopback.status === 0, "production permits IPv6 loopback between a local reverse proxy and the hub");
 
   let refreshRuns = 0;
   let releaseFirst!: () => void;
@@ -211,7 +232,7 @@ try {
   const annaEvents: { forYou: boolean; from: string; text: string }[] = [];
   const annaStream = new AbortController();
   cleanup.push(() => annaStream.abort());
-  void fetch(`${HUB}/api/events?token=${ANNA}`, { signal: annaStream.signal })
+  void fetch(`${HUB}/api/events`, { headers: { Authorization: `Bearer ${ANNA}` }, signal: annaStream.signal })
     .then(async (res) => {
     let buf = "";
     for await (const chunk of res.body!) {
@@ -449,7 +470,7 @@ try {
     const got: { event: string; data: { id: string; text?: string; late?: boolean; from?: string } }[] = [];
     const ctl = new AbortController();
     cleanup.push(() => ctl.abort());
-    void fetch(`${base}/api/events?mentions=1&token=${token}`, { signal: ctl.signal })
+    void fetch(`${base}/api/events?mentions=1`, { headers: { Authorization: `Bearer ${token}` }, signal: ctl.signal })
       .then(async (res) => {
         let buf = "";
         for await (const chunk of res.body!) {
@@ -810,12 +831,26 @@ try {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email: "x".repeat(1_100_000) }),
   });
+  const unsupportedCharset = await fetch(`${OWN}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json; charset=bogus" },
+    body: "{}",
+  });
+  const unsupportedEncoding = await fetch(`${OWN}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Content-Encoding": "compress" },
+    body: "{}",
+  });
   check(
     malformedJson.status === 400 &&
       (await malformedJson.json()).error === "malformed JSON body" &&
       oversizedJson.status === 413 &&
-      (await oversizedJson.json()).error === "request body is too large",
-    "malformed and oversized JSON fail with bounded errors and no internal stack response",
+      (await oversizedJson.json()).error === "request body is too large" &&
+      unsupportedCharset.status === 415 &&
+      (await unsupportedCharset.json()).error === "unsupported request body format" &&
+      unsupportedEncoding.status === 415 &&
+      (await unsupportedEncoding.json()).error === "unsupported request body format",
+    "malformed, oversized, and unsupported JSON bodies keep bounded 4xx semantics",
   );
   const weak = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: "short" } });
   const setup = await as(owner, "/api/setup", { body: { name: "Olga", org: "Agency", email: "olga@example.com", password: PASS, room: "Agency" } });
@@ -844,7 +879,8 @@ try {
   const right = await as(relogin, "/api/auth/login", { body: { email: "OLGA@example.com", password: PASS } });
   check(wrong.status === 401 && right.status === 200 && !!relogin.cookie, "sign in with email and password");
   const queryOnly = await as({}, `/api/me?token=${encodeURIComponent(relogin.cookie!.split("=")[1])}`);
-  check(queryOnly.status === 401, "URL tokens are ignored outside the SSE endpoint");
+  const querySse = await fetch(`${OWN}/api/events?token=${encodeURIComponent(relogin.cookie!.split("=")[1])}`);
+  check(queryOnly.status === 401 && querySse.status === 401, "URL credentials are ignored on REST and SSE endpoints");
   const spoofed: number[] = [];
   for (let i = 0; i < 12; i++)
     spoofed.push(
@@ -1139,8 +1175,18 @@ try {
     keys: erasedDb.prepare("SELECT handle FROM approver_keys").all(),
   });
   erasedDb.close();
+  const erasedDumpLower = erasedDump.toLowerCase();
+  const handleCharacters = "abcdefghijklmnopqrstuvwxyz0123456789_-";
+  const containsMention = (identifier: string) => {
+    const needle = `@${identifier.toLowerCase()}`;
+    for (let at = erasedDumpLower.indexOf(needle); at !== -1; at = erasedDumpLower.indexOf(needle, at + 1)) {
+      const next = erasedDumpLower[at + needle.length];
+      if (!next || !handleCharacters.includes(next)) return true;
+    }
+    return false;
+  };
   const leakedHandle = [adaMe.handle, adaAgent.handle, adaDisabled.handle].some(
-    (identifier) => erasedDump.includes(`"${identifier}"`) || new RegExp(`@${identifier}(?![a-z0-9_-])`, "i").test(erasedDump),
+    (identifier) => erasedDump.includes(`"${identifier}"`) || containsMention(identifier),
   );
   check(
     !leakedHandle && !erasedDump.includes("ada@example.com"),

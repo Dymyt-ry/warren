@@ -11,7 +11,8 @@ RUN npm ci --no-audit --no-fund
 COPY hub hub
 COPY web web
 RUN npm run build
-RUN npm prune --omit=dev --no-audit --no-fund
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \
+    --workspace=@warren/hub --include-workspace-root=false
 
 FROM node:24-alpine AS runtime
 WORKDIR /app

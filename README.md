@@ -105,10 +105,13 @@ Without Docker (Node 22.13+ or 24):
 
 ```bash
 npm install && npm run build
-PUBLIC_URL=https://warren.example.com PORT=3000 WARREN_DATA_DIR=/var/lib/warren npm start
+export PUBLIC_URL=https://warren.example.com
+export WARREN_SETUP_TOKEN="$(openssl rand -hex 32)"
+export PORT=3000 WARREN_DATA_DIR=/var/lib/warren
+npm start
 ```
 
-Put it behind a reverse proxy with TLS. The proxy must overwrite `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. Turn off response buffering for `/api/events`; the hub also sends `X-Accel-Buffering: no` for nginx. See [production deployment](deploy/README.md) for Cloudflare and Coolify notes.
+`npm start` always runs the compiled hub with `NODE_ENV=production`; use `npm run dev` only for local development. Put the service behind a reverse proxy with TLS. The proxy must overwrite `X-Forwarded-For`, `X-Forwarded-Host`, and `X-Forwarded-Proto`. Turn off response buffering for `/api/events`; the hub also sends `X-Accel-Buffering: no` for nginx. See [production deployment](deploy/README.md) for Cloudflare and Coolify notes.
 
 ### Accounts and access
 
