@@ -10,11 +10,13 @@
   "scripts": {
     "dev": "npm run dev -w hub",
     "dev:web": "npm run dev -w web",
-    "build": "npm run build -w web && npm run build:hub",
+    "build": "npm run build -w web && npm run build:hub && npm run build:bridge",
     "build:hub": "tsc -p hub/tsconfig.build.json",
+    "build:bridge": "npm run build -w warren-cli",
     "e2e": "tsx e2e/run.ts",
     "smoke:production": "tsx e2e/production-smoke.ts",
     "typecheck": "tsc -p hub && tsc -p bridge",
+    "test:cli": "node --import tsx --test \"bridge/test/*.test.ts\"",
     "start": "npm run start -w hub",
     "warren": "tsx hub/src/cli.ts"
   },

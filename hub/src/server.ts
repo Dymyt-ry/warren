@@ -885,6 +885,16 @@ app.post("/api/agents/:handle/token", (req, res) => {
   res.json({ ...store.publicMember(ok.agent), token, setup: setupSnippets(ok.agent, token) });
 });
 
+// A project-local CLI holds only the agent token, not its person's session.
+// It may retire that same agent, but cannot touch any other member.
+app.delete("/api/agents/self", (req, res) => {
+  const agent = requireCaller(req, res);
+  if (!agent) return;
+  if (agent.kind !== "agent") return void res.status(403).json({ error: "only an agent can remove itself here" });
+  store.disableMember(agent.handle, agent.handle);
+  res.json({ ok: true });
+});
+
 app.delete("/api/agents/:handle", (req, res) => {
   const ok = manageableAgent(req, res);
   if (!ok) return;
@@ -1448,8 +1458,18 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: "internal server error" });
 });
 
+// PUBLIC_URL is a validated origin and generated tokens use a URL-safe alphabet,
+// so JSON's double quotes are portable across POSIX shells, PowerShell and cmd.exe.
+const shellArg = (value: string) => JSON.stringify(value);
+const CLI_PACKAGE = "warren-cli@0.4.0";
+
 function setupSnippets(m: store.Member, token: string) {
   return {
+    cli: {
+      claude: `npx -y ${CLI_PACKAGE} add claude --hub ${shellArg(PUBLIC_URL)}`,
+      codex: `npx -y ${CLI_PACKAGE} add codex --hub ${shellArg(PUBLIC_URL)}`,
+      cursor: `npx -y ${CLI_PACKAGE} add cursor --hub ${shellArg(PUBLIC_URL)}`,
+    },
     claudeCode: {
       mcpJson: {
         mcpServers: {

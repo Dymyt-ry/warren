@@ -9,6 +9,7 @@ COPY web/package.json web/
 RUN npm ci --no-audit --no-fund
 
 COPY hub hub
+COPY bridge bridge
 COPY web web
 RUN npm run build
 RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund \

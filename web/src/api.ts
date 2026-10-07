@@ -126,6 +126,7 @@ export interface Invite {
   emailed?: boolean;
 }
 export interface Setup {
+  cli: { claude: string; codex: string; cursor: string };
   claudeCode: { mcpJson: unknown; launch: string };
   codex: { mcp: string; wake: string };
   cursor: { mcpJson: unknown; wake: string };

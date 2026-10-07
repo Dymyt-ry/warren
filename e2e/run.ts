@@ -149,6 +149,11 @@ try {
     },
     encoding: "utf8",
   });
+  const publicUrlWithShellSyntax = spawnSync("npx", ["tsx", "-e", 'import("./hub/src/config.ts")'], {
+    cwd: process.cwd(),
+    env: { ...process.env, PUBLIC_URL: "https://example.com$(id)" },
+    encoding: "utf8",
+  });
   check(
     invalidNumber.status !== 0 && `${invalidNumber.stderr}${invalidNumber.stdout}`.includes("invalid WARREN_LOGIN_LIMIT"),
     "invalid numeric security settings fail startup instead of disabling controls",
@@ -165,6 +170,10 @@ try {
     "a fresh production database requires strong first-owner setup protection",
   );
   check(productionIpv6Loopback.status === 0, "production permits IPv6 loopback between a local reverse proxy and the hub");
+  check(
+    publicUrlWithShellSyntax.status !== 0 && `${publicUrlWithShellSyntax.stderr}${publicUrlWithShellSyntax.stdout}`.includes("hostname contains unsupported characters"),
+    "PUBLIC_URL rejects shell syntax before it can appear in a setup command",
+  );
 
   let refreshRuns = 0;
   let releaseFirst!: () => void;
@@ -316,7 +325,15 @@ try {
   const reviewer = await inviteIn.json();
   const reviewerMe = await api("/api/me", reviewer.token).then((r) => r.json());
   check(byAgent0.status === 403 && inviteOut.status === 403 && posing.status === 403, "agents can't add agents; people add them only into rooms they see, for their own company");
-  check(inviteIn.status === 201 && reviewerMe.org === "firmab" && reviewerMe.owner === "ben" && !!reviewer.setup?.codex, "ben's new agent belongs to ben and firmab, with a token and setup");
+  check(
+    inviteIn.status === 201 &&
+      reviewerMe.org === "firmab" &&
+      reviewerMe.owner === "ben" &&
+      !!reviewer.setup?.codex &&
+      reviewer.setup.cli.codex === `npx -y warren-cli@0.4.0 add codex --hub "${HUB}"` &&
+      !reviewer.setup.cli.codex.includes(reviewer.token),
+    "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
+  );
   const reserved = await api("/api/invites", undefined, { name: "x", handle: "here", org: "acme", room: "shop" });
   check(reserved.status === 400, "@here, @all and @room are reserved handles");
   const noisy = await api("/api/rooms/shop/messages", ANNA, {
@@ -973,6 +990,11 @@ try {
   const ginaAgent = await as(gina, "/api/agents", { body: { name: "Claude Code (Gina)", room: clientRoom.id, adapter: "channel" } }).then((r) => r.json());
   const ownerAgents = await as(owner, "/api/agents").then((r) => r.json());
   check(ginaUsers.status === 403 && ginaAgent.org === "clientco" && ginaAgent.owner === "gina" && ownerAgents.length === 1, "people add their own agents; admins see all of them");
+  const selfAgent = await as(gina, "/api/agents", { body: { name: "CLI disposable", room: clientRoom.id, adapter: "exec" } }).then((r) => r.json());
+  const personSelfDelete = await as(gina, "/api/agents/self", { method: "DELETE" });
+  const agentSelfDelete = await as({}, "/api/agents/self", { method: "DELETE", token: selfAgent.token });
+  const selfAgentAfter = await as({}, "/api/me", { token: selfAgent.token });
+  check(personSelfDelete.status === 403 && agentSelfDelete.status === 200 && selfAgentAfter.status === 401, "an agent token can retire only itself for `warren leave`");
   const privateUnsafe = await as(owner, "/api/rooms", {
     body: {
       name: "Private instructions",

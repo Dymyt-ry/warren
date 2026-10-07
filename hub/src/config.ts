@@ -48,6 +48,8 @@ function publicUrl(): URL {
     return fail("PUBLIC_URL", "expected an absolute http:// or https:// URL");
   }
   if (!(["http:", "https:"] as string[]).includes(url.protocol)) fail("PUBLIC_URL", "only http:// and https:// are supported");
+  const hostnameIsSafe = url.hostname.startsWith("[") ? /^\[[0-9a-f:.]+\]$/i.test(url.hostname) : /^[a-z0-9.-]+$/i.test(url.hostname);
+  if (!hostnameIsSafe) fail("PUBLIC_URL", "hostname contains unsupported characters");
   if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== ""))
     fail("PUBLIC_URL", "must be an origin without credentials, path, query, or fragment");
   if (PRODUCTION && url.protocol !== "https:" && !["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname))

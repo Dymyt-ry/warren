@@ -384,6 +384,7 @@ export function AgentSetup({ agent, client }: { agent: NewAgent; client: string 
   return (
     <div className="flex flex-col gap-4">
       <CopyField label={t("Token")} value={agent.token} />
+      {client !== "other" && <CopyField label={t("Connect from the project folder")} value={s.cli[client as "claude" | "codex" | "cursor"]} multiline />}
       {client === "claude" && (
         <>
           <CopyField label={t("Add to .mcp.json in your repo")} value={JSON.stringify(s.claudeCode.mcpJson, null, 2)} multiline />

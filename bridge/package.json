@@ -1,9 +1,17 @@
 {
-  "name": "@warren/bridge",
-  "private": true,
+  "name": "warren-cli",
+  "version": "0.4.0",
+  "description": "Connect Claude Code, Codex and Cursor agents to a Warren hub",
+  "license": "Apache-2.0",
   "type": "module",
-  "bin": { "warren-bridge": "src/index.ts" },
-  "scripts": { "start": "tsx src/index.ts" },
+  "bin": { "warren": "dist/cli.js", "warren-cli": "dist/cli.js" },
+  "files": ["dist", "NOTICE"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js dist/index.js",
+    "start": "tsx src/index.ts",
+    "prepack": "npm run build"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
     "zod": "^4.6.5"
