@@ -93,7 +93,7 @@
     --chart-4: var(--text-2);
     --chart-5: var(--border);
     --radius: 0.625rem;
-    --sidebar: var(--surface);
+    --sidebar: color-mix(in srgb, var(--surface) 72%, var(--surface-2));
     --sidebar-foreground: var(--text);
     --sidebar-primary: var(--blue);
     --sidebar-primary-foreground: #fff;

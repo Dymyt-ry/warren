@@ -2,7 +2,16 @@
 // people on this hub (owners and admins), invites, agents and hub settings.
 // Rows separated by space, not cards (web/DESIGN.md).
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { PlusIcon } from "@phosphor-icons/react";
+import {
+  BuildingsIcon,
+  KeyIcon,
+  LockKeyIcon,
+  PlusIcon,
+  RobotIcon,
+  ShieldCheckIcon,
+  UserCircleIcon,
+  UsersIcon,
+} from "@phosphor-icons/react";
 import { renderSVG } from "uqr";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,6 +36,7 @@ import {
 } from "./api";
 import { applyTheme, formatDate, LANGUAGES, plural, setLanguage, t, useLanguage } from "./i18n";
 import { Avatar } from "./ui";
+import { cn } from "@/lib/utils";
 
 const isAdmin = (m: Member) => m.role === "owner" || m.role === "admin";
 const roleLabel = (r: Role | null | undefined) => (r === "owner" ? t("Owner") : r === "admin" ? t("Admin") : t("Member"));
@@ -118,58 +128,58 @@ export function Settings({
   const admin = isAdmin(me);
   const [tab, setTab] = useState<Tab>("profile");
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "profile", label: t("Profile") },
-    { id: "security", label: t("Sign-in") },
-    { id: "safety", label: t("Safety") },
-    { id: "privacy", label: t("Privacy") },
-    { id: "people", label: admin ? t("People") : t("Invites") },
-    { id: "agents", label: t("Agents") },
-    ...(admin ? [{ id: "hub" as Tab, label: t("Hub") }] : []),
+  const tabs = [
+    { id: "profile" as Tab, label: t("Profile"), icon: UserCircleIcon },
+    { id: "security" as Tab, label: t("Sign-in"), icon: KeyIcon },
+    { id: "safety" as Tab, label: t("Safety"), icon: ShieldCheckIcon },
+    { id: "privacy" as Tab, label: t("Privacy"), icon: LockKeyIcon },
+    { id: "people" as Tab, label: admin ? t("People") : t("Invites"), icon: UsersIcon },
+    { id: "agents" as Tab, label: t("Agents"), icon: RobotIcon },
+    ...(admin ? [{ id: "hub" as Tab, label: t("Hub"), icon: BuildingsIcon }] : []),
   ];
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="mx-auto flex max-w-[760px] flex-col gap-8 px-4 py-6 md:px-8 md:py-10">
-        <header className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1">
-            <h1 className="font-heading text-2xl">{t("Settings")}</h1>
-            <Quiet>
-              {config.instanceName} · Warren {config.version}
-            </Quiet>
-          </div>
-          <ToggleGroup
-            type="single"
-            size="sm"
-            value={tab}
-            onValueChange={(v) => v && setTab(v as Tab)}
-            aria-label={t("Settings")}
-            role="tablist"
-            className="flex-wrap justify-start"
-          >
-            {tabs.map((x) => (
-              <ToggleGroupItem
-                key={x.id}
-                id={`settings-tab-${x.id}`}
-                value={x.id}
-                role="tab"
-                aria-selected={tab === x.id}
-                aria-controls={`settings-panel-${x.id}`}
-              >
-                {x.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
+      <div className="mx-auto max-w-[1040px] px-4 py-6 md:px-8 md:py-9">
+        <header className="border-b border-border pb-5">
+          <h1 className="font-heading text-2xl">{t("Settings")}</h1>
+          <Quiet>{config.instanceName} · Warren {config.version}</Quiet>
         </header>
 
-        <div id={`settings-panel-${tab}`} role="tabpanel" aria-labelledby={`settings-tab-${tab}`} className="flex flex-col gap-8">
-          {tab === "profile" && <Profile me={me} onMe={onMe} />}
-          {tab === "security" && <Security me={me} onMe={onMe} codes={recoveryCodes} onCodes={setRecoveryCodes} />}
-          {tab === "safety" && <Safety me={me} onMe={onMe} emailOn={config.email} />}
-          {tab === "privacy" && <Privacy me={me} config={config} onMe={onMe} />}
-          {tab === "people" && <People me={me} config={config} rooms={rooms} members={members} />}
-          {tab === "agents" && <Agents me={me} rooms={rooms} members={members} />}
-          {tab === "hub" && admin && <Hub config={config} onConfig={onConfig} />}
+        <div className="grid gap-8 pt-4 md:grid-cols-[200px_minmax(0,1fr)] md:gap-12 md:pt-7">
+          <nav aria-label={t("Settings")} role="tablist" className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1 md:sticky md:top-0 md:mx-0 md:flex-col md:self-start md:overflow-visible md:p-0">
+            {tabs.map((x) => {
+              const Icon = x.icon;
+              return (
+                <button
+                  key={x.id}
+                  id={`settings-tab-${x.id}`}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === x.id}
+                  aria-controls={`settings-panel-${x.id}`}
+                  onClick={() => setTab(x.id)}
+                  className={cn(
+                    "flex h-9 shrink-0 items-center gap-2 rounded-lg px-2.5 text-left text-sm transition-colors hover:bg-muted md:w-full",
+                    tab === x.id ? "bg-muted font-semibold text-foreground" : "text-muted-foreground",
+                  )}
+                >
+                  <Icon aria-hidden className="size-4" />
+                  {x.label}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div id={`settings-panel-${tab}`} role="tabpanel" aria-labelledby={`settings-tab-${tab}`} className="flex min-w-0 flex-col gap-8 pb-12">
+            {tab === "profile" && <Profile me={me} onMe={onMe} />}
+            {tab === "security" && <Security me={me} onMe={onMe} codes={recoveryCodes} onCodes={setRecoveryCodes} />}
+            {tab === "safety" && <Safety me={me} onMe={onMe} emailOn={config.email} />}
+            {tab === "privacy" && <Privacy me={me} config={config} onMe={onMe} />}
+            {tab === "people" && <People me={me} config={config} rooms={rooms} members={members} />}
+            {tab === "agents" && <Agents me={me} rooms={rooms} members={members} />}
+            {tab === "hub" && admin && <Hub config={config} onConfig={onConfig} />}
+          </div>
         </div>
       </div>
     </div>

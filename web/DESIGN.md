@@ -44,3 +44,25 @@ Tim's review: the team map (thick coloured room outlines, big sun circles, heavy
 - **Workbench showcase:** a still of the real dashboard, built from the same shadcn components, in a white hairline frame with a soft shadow, sitting on a pale blue rounded backdrop and fading out at the bottom.
 - **One floating card:** Claude Code's run, four steps that spin and check off when the showcase comes into view, joined by a dotted connector to the action it ends in ("Ben gets the reply").
 - **Rejected from the first pass:** 3px coloured outlines, large colour fills, Outfit at 600 with -0.04em tracking (now 500, -0.025em).
+
+## Revision 2026-10-05: conversation-first application shell
+
+Research: Slack's current desktop navigation, simplified layout documentation, sidebar preferences, and settings patterns. Warren keeps its own neutral brand tokens and agent-specific concepts; the reference is used for hierarchy and interaction placement, not visual cloning.
+
+### Reference lock
+
+- **Primary direction:** Slack's conversation-first desktop shell: compact sidebar, one restrained conversation toolbar, message stream, composer, optional details rail.
+- **Preserve:** Warren's room tree, sun/coral semantic colours, person/agent shapes, Outfit only for page-level headings, Inter for dense product UI.
+- **Borrow only:** settings categories in a vertical rail; member count as the details entry point; secondary room actions behind one menu; composer controls inside one bordered writing surface.
+- **Reject:** permanent room-context toolbar, permanent right rail, four equally prominent message-kind tabs, duplicated live-status copy, decorative Slack purple.
+- **Token commitments:** neutral tinted sidebar; 58px conversation toolbar; 320px on-demand details rail; 10-12px control radii; blue remains interactive-only.
+
+### Decision ledger
+
+| Decision | Source | Role | Why |
+|---|---|---|---|
+| On-demand room details | Slack channel details + user request | Secondary context | Keeps the thread dominant and returns width when context is not needed |
+| One overflow menu in the room header | Slack conversation toolbar | Secondary actions | Removes four competing header controls without deleting capability |
+| Message type as a compact composer select | User screenshots + Slack composer hierarchy | Message metadata | Preserves Warren's typed messages without a persistent segmented bar |
+| Vertical settings navigation | Slack Preferences | Settings information architecture | Scans faster and scales to seven categories |
+| Presence dot in the account row | Slack sidebar | Connection status | Communicates live state without a detached text row |

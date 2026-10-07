@@ -5,7 +5,10 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import {
   CheckIcon,
   ClockIcon,
+  DotsThreeIcon,
   GearSixIcon,
+  HashIcon,
+  InfoIcon,
   LockSimpleIcon,
   PaperPlaneRightIcon,
   PauseIcon,
@@ -16,7 +19,9 @@ import {
   ShieldCheckIcon,
   ShieldWarningIcon,
   SignOutIcon,
+  UsersIcon,
   UserPlusIcon,
+  XIcon,
 } from "@phosphor-icons/react";
 import "@fontsource-variable/outfit";
 import "@fontsource-variable/inter";
@@ -25,7 +30,6 @@ import "./index.css";
 import "./styles.css";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from "@/components/ui/command";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Kbd } from "@/components/ui/kbd";
@@ -39,10 +43,9 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Logo } from "./Logo";
 import { api, ownerOf, useHub, type AuditEvent, type HubConfig, type Member, type Message as Msg, type MessageKind, type Room } from "./api";
@@ -215,9 +218,9 @@ function Dashboard({
 
   return (
     <TooltipProvider delayDuration={600}>
-      <div className="grid h-dvh grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[264px_minmax(0,1fr)] md:grid-rows-1">
-        <aside className="flex max-h-[42dvh] min-h-0 flex-col gap-3 overflow-y-auto border-b border-border bg-card px-3 py-3 md:max-h-none md:gap-6 md:overflow-visible md:border-r md:border-b-0 md:py-5">
-          <div className="flex flex-col gap-1 px-2">
+      <div className="grid h-dvh grid-cols-1 grid-rows-[auto_minmax(0,1fr)] bg-background md:grid-cols-[260px_minmax(0,1fr)] md:grid-rows-1">
+        <aside className="flex max-h-[42dvh] min-h-0 flex-col gap-3 overflow-y-auto border-b border-sidebar-border bg-sidebar px-2 py-2 md:max-h-none md:gap-4 md:overflow-visible md:border-r md:border-b-0 md:py-3">
+          <div className="flex min-h-11 flex-col justify-center gap-0.5 px-2">
             <a href="/app" className="no-underline">
               <Logo />
             </a>
@@ -261,31 +264,36 @@ function Dashboard({
           </nav>
 
           {me && accounts && (
-            <div className="hidden flex-col gap-1 md:flex">
+            <div className="hidden items-center gap-1 border-t border-sidebar-border pt-2 md:flex">
               <button
                 onClick={openSettings}
                 aria-current={selected === SETTINGS ? "page" : undefined}
                 className={cn(
-                  "flex h-11 w-full items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-accent",
+                  "flex h-11 min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-sidebar-accent",
                   selected === SETTINGS && "bg-accent",
                 )}
               >
-                <Avatar kind="human" name={me.name} size={26} />
+                <span className="relative">
+                  <Avatar kind="human" name={me.name} size={28} />
+                  <span
+                    role="status"
+                    aria-label={status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
+                    title={status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
+                    className={cn(
+                      "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border-2 border-sidebar",
+                      status === "live" ? "bg-emerald-500" : status === "loading" ? "bg-sun" : "bg-coral",
+                    )}
+                  />
+                </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-semibold">{me.name}</span>
                   <span className="block truncate text-xs text-muted-foreground">{me.org}</span>
                 </span>
                 <GearSixIcon aria-hidden className="text-muted-foreground" />
               </button>
-              <div className="flex items-center justify-between px-2">
-                <p role="status" className={cn("m-0 text-xs text-muted-foreground", status === "offline" && "text-coral")}>
-                  {status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
-                </p>
-                <Button variant="ghost" size="xs" onClick={signOut}>
-                  <SignOutIcon data-icon="inline-start" />
-                  {t("Sign out")}
-                </Button>
-              </div>
+              <Button variant="ghost" size="icon-sm" onClick={signOut} aria-label={t("Sign out")} title={t("Sign out")}>
+                <SignOutIcon />
+              </Button>
             </div>
           )}
           {me && accounts && (
@@ -300,9 +308,9 @@ function Dashboard({
               </Button>
             </div>
           )}
-          {!accounts && (
+          {!accounts && status !== "live" && (
             <p role="status" className={cn("hidden px-3 text-xs text-muted-foreground md:block", status === "offline" && "text-coral")}>
-              {status === "live" ? t("Live") : status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
+              {status === "loading" ? t("Connecting to the hub") : t("Hub offline")}
             </p>
           )}
         </aside>
@@ -465,6 +473,8 @@ function RoomView({
 }) {
   const [inRoom, setInRoom] = useState<Member[]>([]);
   const [dialog, setDialog] = useState<"room" | "settings" | "invite" | "agent" | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const memberCount = Object.keys(members).length;
   const person = me?.kind === "human" ? me : null;
 
@@ -486,53 +496,66 @@ function RoomView({
   const shut = (o: boolean) => !o && setDialog(null);
 
   return (
-    <div className="grid h-full grid-cols-1 xl:grid-cols-[minmax(0,1fr)_288px]">
-      <section className="flex min-h-0 min-w-0 flex-col">
-        <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 pt-4 pb-2 md:px-8 md:pt-6 md:pb-3">
-          <h1 className="flex min-w-0 basis-full flex-wrap items-baseline gap-x-2 font-heading text-xl sm:basis-auto md:text-2xl">
-            {path.map((r, i) => (
-              <span key={r.id} className={i === path.length - 1 ? "text-foreground" : "text-muted-foreground"}>
-                {r.name}
-                {i < path.length - 1 && <span className="ml-2 text-border">/</span>}
-              </span>
-            ))}
-          </h1>
-          <div className="-ml-2 flex min-w-0 flex-wrap items-center gap-x-1 md:ml-0 md:shrink-0">
-            <PolicyToggle room={room} me={me} />
-            {me && (
-              <Button variant="ghost" size="sm" onClick={open("room")}>
-                <PlusIcon data-icon="inline-start" weight="bold" />
-                {t("New room inside")}
-              </Button>
-            )}
-            {person && (
-              <Button variant="ghost" size="sm" onClick={open("invite")}>
-                <UserPlusIcon data-icon="inline-start" />
-                {t("Invite")}
-              </Button>
-            )}
-            {person && (person.scopeRoomId === null || person.scopeRoomId !== room.id) && (
-              <Button variant="ghost" size="icon-sm" aria-label={t("{name} settings", { name: room.name })} title={t("Room settings")} onClick={open("settings")}>
-                <GearSixIcon />
-              </Button>
-            )}
+    <div className={cn("relative grid h-full min-w-0 grid-cols-1 overflow-hidden", detailsOpen && "xl:grid-cols-[minmax(0,1fr)_320px]")}>
+      <section className="flex min-h-0 min-w-0 flex-col bg-background">
+        <header className="flex h-[58px] shrink-0 items-center justify-between gap-3 border-b border-border px-3 md:px-5">
+          <div className="flex min-w-0 items-center gap-2">
+            <HashIcon aria-hidden weight="bold" className="size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0">
+              <h1 className="truncate font-sans text-[15px] font-semibold tracking-normal">{room.name}</h1>
+              {path.length > 1 && <p className="m-0 truncate text-[11px] text-muted-foreground">{path.slice(0, -1).map((r) => r.name).join(" / ")}</p>}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={() => setDetailsOpen((v) => !v)} aria-pressed={detailsOpen}>
+              <UsersIcon data-icon="inline-start" />
+              <span className="tabular-nums">{inRoom.length}</span>
+              <span className="sr-only">{t("Room details")}</span>
+            </Button>
+            <Popover open={actionsOpen} onOpenChange={setActionsOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label={t("More actions")} title={t("More actions")}>
+                  <DotsThreeIcon weight="bold" />
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-56 p-1">
+                {me && (
+                  <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => (setActionsOpen(false), setDialog("room"))}>
+                    <PlusIcon /> {t("New room inside")}
+                  </button>
+                )}
+                {person && (
+                  <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => (setActionsOpen(false), setDialog("invite"))}>
+                    <UserPlusIcon /> {t("Invite")}
+                  </button>
+                )}
+                {person && (person.scopeRoomId === null || person.scopeRoomId !== room.id) && (
+                  <button className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => (setActionsOpen(false), setDialog("settings"))}>
+                    <GearSixIcon /> {t("Room settings")}
+                  </button>
+                )}
+              </PopoverContent>
+            </Popover>
           </div>
         </header>
-
-        <RoomContext room={room} canEdit={!!me} onSaved={onContext} />
 
         <Thread room={room} members={members} me={me} inRoom={inRoom} focus={focus} onFocusConsumed={onFocusConsumed} onUpdated={onUpdated} />
 
         <Composer room={room} me={me} inRoom={inRoom} onPosted={onPosted} />
       </section>
 
-      <MembersPanel
-        inRoom={inRoom}
-        members={members}
-        me={me}
-        audit={audit.filter((a) => a.roomId === room.id)}
-        onAddAgent={person ? open("agent") : undefined}
-      />
+      {detailsOpen && (
+        <RoomDetailsPanel
+          room={room}
+          inRoom={inRoom}
+          members={members}
+          me={me}
+          audit={audit.filter((a) => a.roomId === room.id)}
+          onClose={() => setDetailsOpen(false)}
+          onContext={onContext}
+          onAddAgent={person ? open("agent") : undefined}
+        />
+      )}
 
       {me && <NewRoomDialog open={dialog === "room"} onOpenChange={shut} parent={room} onCreated={onNewRoom} />}
       {person && (
@@ -547,8 +570,6 @@ function RoomView({
 }
 
 function RoomContext({ room, canEdit, onSaved }: { room: Room; canEdit: boolean; onSaved: (r: Room) => void }) {
-  // On a phone the context starts folded so the thread gets the screen.
-  const [open, setOpen] = useState(() => window.matchMedia("(min-width: 768px)").matches);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(room.context);
   const [error, setError] = useState<string | null>(null);
@@ -564,47 +585,40 @@ function RoomContext({ room, canEdit, onSaved }: { room: Room; canEdit: boolean;
   };
 
   return (
-    <Collapsible open={open} onOpenChange={setOpen} className="px-4 pb-2 md:px-8">
-      <div className="flex items-center gap-3">
-        <CollapsibleTrigger asChild>
-          <button className="text-sm font-medium text-muted-foreground hover:text-foreground">
-            {open ? t("Hide room context") : t("Show room context")}
-          </button>
-        </CollapsibleTrigger>
-        {open && canEdit && !editing && (
-          <Button variant="ghost" size="sm" onClick={() => (setDraft(room.context), setEditing(true))}>
-            <PencilSimpleIcon data-icon="inline-start" />
-            {t("Edit")}
+    <section className="flex flex-col gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="font-sans text-sm font-semibold tracking-normal">{t("About")}</h3>
+        {canEdit && !editing && (
+          <Button variant="ghost" size="icon-xs" aria-label={t("Edit")} title={t("Edit")} onClick={() => (setDraft(room.context), setEditing(true))}>
+            <PencilSimpleIcon />
           </Button>
         )}
       </div>
-      <CollapsibleContent>
-        {editing ? (
-          <div className="mt-2 flex flex-col gap-2">
-            <Textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              rows={6}
-              aria-label={t("Room context, markdown")}
-              className="font-mono text-[13px]"
-            />
-            {error && <p className="error">{error}</p>}
-            <div className="flex gap-2">
-              <Button size="sm" onClick={save}>
-                {t("Save context")}
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => (setEditing(false), setDraft(room.context))}>
-                {t("Cancel")}
-              </Button>
-            </div>
+      {editing ? (
+        <div className="flex flex-col gap-2">
+          <Textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={8}
+            aria-label={t("Room context, markdown")}
+            className="font-mono text-[12px]"
+          />
+          {error && <p className="error">{error}</p>}
+          <div className="flex gap-2">
+            <Button size="sm" onClick={save}>
+              {t("Save context")}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => (setEditing(false), setDraft(room.context))}>
+              {t("Cancel")}
+            </Button>
           </div>
-        ) : (
-          <pre className="mt-2 max-h-40 overflow-y-auto font-mono text-[13px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
-            {room.context || t("No context yet. Write down what every agent in this room should know first.")}
-          </pre>
-        )}
-      </CollapsibleContent>
-    </Collapsible>
+        </div>
+      ) : (
+        <pre className="m-0 max-h-64 overflow-y-auto font-mono text-[12px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+          {room.context || t("No context yet. Write down what every agent in this room should know first.")}
+        </pre>
+      )}
+    </section>
   );
 }
 
@@ -888,13 +902,14 @@ function PolicyToggle({ room, me }: { room: Room; me: Member | null }) {
   const label = on ? t("Contract changes need approval") : t("Contract changes go out directly");
   const glyph = <span aria-hidden className={cn("size-2.5 rounded-[30%] border-[1.5px] border-foreground", on && "bg-foreground")} />;
   if (!canSet)
-    return <span className="flex items-center gap-2 px-2 text-xs text-muted-foreground">{glyph}{label}</span>;
+    return <span className="flex self-start items-center gap-2 text-xs text-muted-foreground">{glyph}{label}</span>;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
+          className="-ml-2 self-start justify-start"
           aria-pressed={on}
           onClick={() => api.setPolicy(room.id, { approveContractChanges: !on }).catch(() => {})}
         >
@@ -1000,68 +1015,60 @@ function Composer({
     );
 
   return (
-    <form className="px-4 pt-2 pb-4 md:px-8 md:pb-6" onSubmit={(e) => (e.preventDefault(), send())}>
-      <Popover open={open}>
-        <PopoverAnchor asChild>
-          <Textarea
-            ref={input}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={onKey}
-            rows={2}
-            placeholder={t("Write to {name}. Type @ to mention someone.", { name: room.name })}
-            aria-label={t("Message {name}", { name: room.name })}
-            aria-autocomplete="list"
-            className="min-h-16 resize-none text-[15px]"
-          />
-        </PopoverAnchor>
-        <PopoverContent
-          side="top"
-          align="start"
-          className="w-72 p-1 data-open:animate-none data-closed:animate-none"
-          onOpenAutoFocus={(e) => e.preventDefault()}
-          onCloseAutoFocus={(e) => e.preventDefault()}
-        >
-          <Command value={active} onValueChange={setPick} shouldFilter={false}>
-            <CommandList>
-              <CommandEmpty>{t("Nobody by that name here.")}</CommandEmpty>
-              <CommandGroup heading={`In ${room.name}`}>
-                {suggestions.map((m) => (
-                  <CommandItem key={m.handle} value={m.handle} onSelect={complete} className="gap-2.5">
-                    {m.handle !== "room" && <Avatar kind={m.kind} name={m.name} size={22} />}
-                    <span className="font-medium">{m.name}</span>
-                    <span className="ml-auto text-xs text-muted-foreground">@{m.handle}</span>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
-            </CommandList>
-          </Command>
-        </PopoverContent>
-      </Popover>
-      {error && <p className="error">{error}</p>}
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-        <ToggleGroup
-          type="single"
-          size="sm"
-          value={kind}
-          onValueChange={(v) => v && setKind(v as MessageKind)}
-          aria-label={t("What kind of message")}
-        >
-          {kinds().map((k) => (
-            <ToggleGroupItem
-              key={k.kind}
-              value={k.kind}
-              className={cn(k.kind === "contract_change" && "data-[state=on]:text-coral")}
-            >
-              {k.label}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-        <Button type="submit" disabled={!text.trim() || sending}>
-          <PaperPlaneRightIcon data-icon="inline-start" weight="fill" />
-          {sending ? t("Sending") : t("Send")}
-        </Button>
+    <form className="px-3 pt-2 pb-3 md:px-5 md:pb-5" onSubmit={(e) => (e.preventDefault(), send())}>
+      <div className="rounded-xl border border-input bg-background shadow-[0_1px_2px_color-mix(in_srgb,var(--text)_5%,transparent)] transition-[border-color,box-shadow] focus-within:border-foreground/40 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--blue)_12%,transparent)]">
+        <Popover open={open}>
+          <PopoverAnchor asChild>
+            <Textarea
+              ref={input}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={onKey}
+              rows={2}
+              placeholder={t("Write to {name}. Type @ to mention someone.", { name: room.name })}
+              aria-label={t("Message {name}", { name: room.name })}
+              aria-autocomplete="list"
+              className="min-h-16 resize-none rounded-none border-0 bg-transparent px-3 pt-3 pb-1 text-[15px] shadow-none focus-visible:ring-0 dark:bg-transparent"
+            />
+          </PopoverAnchor>
+          <PopoverContent
+            side="top"
+            align="start"
+            className="w-72 p-1 data-open:animate-none data-closed:animate-none"
+            onOpenAutoFocus={(e) => e.preventDefault()}
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
+            <Command value={active} onValueChange={setPick} shouldFilter={false}>
+              <CommandList>
+                <CommandEmpty>{t("Nobody by that name here.")}</CommandEmpty>
+                <CommandGroup heading={`In ${room.name}`}>
+                  {suggestions.map((m) => (
+                    <CommandItem key={m.handle} value={m.handle} onSelect={complete} className="gap-2.5">
+                      {m.handle !== "room" && <Avatar kind={m.kind} name={m.name} size={22} />}
+                      <span className="font-medium">{m.name}</span>
+                      <span className="ml-auto text-xs text-muted-foreground">@{m.handle}</span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+        <div className="flex items-center justify-between gap-3 px-2 pb-2">
+          <Select value={kind} onValueChange={(v) => setKind(v as MessageKind)}>
+            <SelectTrigger size="sm" aria-label={t("What kind of message")} className={cn("border-0 px-2 shadow-none", kind === "contract_change" && "text-coral")}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="start">
+              {kinds().map((k) => <SelectItem key={k.kind} value={k.kind}>{k.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Button type="submit" size="icon-sm" disabled={!text.trim() || sending} aria-label={sending ? t("Sending") : t("Send")} title={sending ? t("Sending") : t("Send")}>
+            <PaperPlaneRightIcon weight="fill" />
+          </Button>
+        </div>
       </div>
+      {error && <p className="error">{error}</p>}
     </form>
   );
 }
@@ -1075,17 +1082,23 @@ const delivery = (a: Member["adapter"]) =>
     dashboard: t("Reads this dashboard"),
   })[a];
 
-function MembersPanel({
+function RoomDetailsPanel({
+  room,
   inRoom,
   members,
   me,
   audit,
+  onClose,
+  onContext,
   onAddAgent,
 }: {
+  room: Room;
   inRoom: Member[];
   members: Record<string, Member>;
   me: Member | null;
   audit: AuditEvent[];
+  onClose: () => void;
+  onContext: (r: Room) => void;
   onAddAgent?: () => void;
 }) {
   // People first, each with their agents under them; agents whose person isn't in the room at the end.
@@ -1095,9 +1108,25 @@ function MembersPanel({
   const orgs = [...new Set(humans.map((h) => h.org))];
 
   return (
-    <aside aria-label={t("Who is in this room")} className="hidden min-h-0 overflow-y-auto border-l border-border px-5 py-6 xl:block">
-      <h2 className="mb-5 font-heading text-base">{t("In this room")}</h2>
-      <div className="flex flex-col gap-6">
+    <aside aria-label={t("Room details")} className="absolute inset-y-0 right-0 z-20 flex w-[min(360px,calc(100vw-20px))] min-h-0 flex-col border-l border-border bg-card shadow-[-12px_0_32px_color-mix(in_srgb,var(--text)_10%,transparent)] xl:static xl:w-auto xl:shadow-none">
+      <header className="flex h-[58px] shrink-0 items-center justify-between border-b border-border px-4">
+        <div className="flex items-center gap-2">
+          <InfoIcon aria-hidden className="text-muted-foreground" />
+          <h2 className="font-sans text-[15px] font-semibold tracking-normal">{t("Room details")}</h2>
+        </div>
+        <Button variant="ghost" size="icon-sm" onClick={onClose} aria-label={t("Close details")} title={t("Close details")}>
+          <XIcon />
+        </Button>
+      </header>
+      <div className="flex min-h-0 flex-col gap-6 overflow-y-auto px-4 py-5">
+        <RoomContext room={room} canEdit={!!me} onSaved={onContext} />
+        <PolicyToggle room={room} me={me} />
+        <div className="h-px bg-border" />
+        <section className="flex flex-col gap-4">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-sans text-sm font-semibold tracking-normal">{t("In this room")}</h3>
+            <span className="text-xs tabular-nums text-muted-foreground">{inRoom.length}</span>
+          </div>
         {orgs.map((org) => (
           <section key={org} className="flex flex-col gap-3">
             <h3 className="font-sans text-xs font-medium tracking-normal text-muted-foreground">
@@ -1134,6 +1163,8 @@ function MembersPanel({
             {t("Add your agent here")}
           </Button>
         )}
+        </section>
+        <div className="h-px bg-border" />
         <SafetyLog audit={audit} />
       </div>
     </aside>
