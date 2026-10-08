@@ -11,7 +11,7 @@ import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/too
 const help = `warren-cli: use Warren from coding agents and shell scripts
 
   warren add <claude|codex|cursor> --hub <url> [--token <agent-token>]
-      [--session <id>]
+      [--session <id>] [--cli-only]
   warren whoami
   warren rooms
   warren read <room> [--limit <1-100>]
@@ -32,7 +32,8 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
 Commands use this folder's .warren.json. For headless use, set WARREN_HUB and
 WARREN_TOKEN (or pass --hub and --token). A folder may contain Claude, Codex
 and Cursor together; for shell commands choose the identity with --as <client>.
-MCP wiring selects its own identity automatically. Credentials never appear in output.`;
+MCP wiring selects its own identity automatically. Use --cli-only to keep native
+client config untouched. Credentials never appear in output.`;
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
 const parsed = (() => {
@@ -54,6 +55,7 @@ const parsed = (() => {
         since: { type: "string" },
         all: { type: "boolean" },
         as: { type: "string" },
+        "cli-only": { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -108,6 +110,7 @@ try {
       hub: values.hub,
       token: values.token,
       session: values.session,
+      cliOnly: values["cli-only"],
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
       wakeCommand: `npx -y warren-cli@${version} wake --as ${argument}`,
       promptToken,

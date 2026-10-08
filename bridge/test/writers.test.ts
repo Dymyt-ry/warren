@@ -197,6 +197,64 @@ test("adding Claude migrates a legacy Codex config without exposing either token
   }
 });
 
+test("CLI-only Claude can join a legacy Codex identity whose project MCP config was removed", () => {
+  const { dir, done } = folder();
+  try {
+    writeFileSync(
+      join(dir, ".warren.json"),
+      JSON.stringify({ tool: "codex", hub: "https://warren.example.com", token: secret, handle: "codex-agent" }),
+      { mode: 0o600 },
+    );
+
+    wireFolder(
+      dir,
+      {
+        tool: "claude",
+        hub: "https://warren.example.com",
+        token: `${secret}_claude`,
+        handle: "claude-agent",
+        bridge,
+      },
+      { cliOnly: true },
+    );
+
+    assert.equal(existsSync(join(dir, ".codex/config.toml")), false);
+    assert.equal(existsSync(join(dir, ".mcp.json")), false);
+    assert.deepEqual(
+      readFolderAgents(dir)?.map(({ tool, cliOnly }) => ({ tool, cliOnly })),
+      [
+        { tool: "claude", cliOnly: true },
+        { tool: "codex", cliOnly: true },
+      ],
+    );
+
+    unwireFolder(dir, readFolder(dir, undefined, "claude")!);
+    assert.equal(existsSync(join(dir, ".mcp.json")), false);
+    assert.equal(readFolder(dir)?.tool, "codex");
+  } finally {
+    done();
+  }
+});
+
+test("a wired agent can join an existing CLI-only identity without creating config for it", () => {
+  const { dir, done } = folder();
+  try {
+    wireFolder(
+      dir,
+      { tool: "codex", hub: "https://warren.example.com", token: `${secret}_codex`, handle: "codex-agent", bridge },
+      { cliOnly: true },
+    );
+    wire(dir, "claude");
+
+    assert.equal(existsSync(join(dir, ".codex/config.toml")), false);
+    assert.equal(JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8")).mcpServers.warren.env.WARREN_AGENT, "claude");
+    assert.equal(readFolder(dir, undefined, "codex")?.cliOnly, true);
+    assert.equal(readFolder(dir, undefined, "claude")?.cliOnly, undefined);
+  } finally {
+    done();
+  }
+});
+
 test("adding Codex migrates legacy Claude MCP wiring", () => {
   const { dir, done } = folder();
   try {

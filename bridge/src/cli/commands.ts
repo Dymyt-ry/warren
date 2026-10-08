@@ -29,7 +29,15 @@ function asTool(value: string | undefined): Tool {
 export async function add(
   dir: string,
   toolValue: string | undefined,
-  options: { hub?: string; token?: string; session?: string; bridge: Wiring["bridge"]; wakeCommand: string; promptToken?: () => Promise<string> },
+  options: {
+    hub?: string;
+    token?: string;
+    session?: string;
+    cliOnly?: boolean;
+    bridge: Wiring["bridge"];
+    wakeCommand: string;
+    promptToken?: () => Promise<string>;
+  },
 ) {
   const tool = asTool(toolValue);
   if ((readFolderAgents(dir) ?? []).some((agent) => agent.tool === tool))
@@ -42,16 +50,21 @@ export async function add(
   const expected = tool === "claude" ? "channel" : "exec";
   if (member.adapter !== expected)
     throw new Error(`@${member.handle} uses the ${member.adapter ?? "unknown"} adapter; create or update it as ${expected} for ${tool}`);
-  wireFolder(dir, {
-    tool,
-    hub,
-    token,
-    handle: member.handle,
-    session: options.session,
-    bridge: options.bridge,
-  });
+  wireFolder(
+    dir,
+    {
+      tool,
+      hub,
+      token,
+      handle: member.handle,
+      session: options.session,
+      bridge: options.bridge,
+    },
+    { cliOnly: options.cliOnly },
+  );
   console.log(`This folder's ${tool} is now @${member.handle}.`);
-  if (tool === "claude") console.log("Start Claude Code with: claude --dangerously-load-development-channels server:warren");
+  if (options.cliOnly) console.log(`Use Warren shell commands with \`--as ${tool}\`; no ${tool} project config was changed.`);
+  else if (tool === "claude") console.log("Start Claude Code with: claude --dangerously-load-development-channels server:warren");
   else console.log(`For always-on mention delivery, keep this running in a second terminal:\n  ${options.wakeCommand}`);
 }
 

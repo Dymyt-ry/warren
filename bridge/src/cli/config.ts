@@ -8,6 +8,7 @@ export interface FolderAgent {
   token: string;
   handle: string;
   session?: string;
+  cliOnly?: boolean;
   managedMcp?: { command: string; args: string[]; env: { WARREN_CONFIG: string; WARREN_AGENT?: string } };
   cursorPermissionAdded?: boolean;
 }
@@ -60,7 +61,8 @@ function validAgent(value: unknown, file: string, expectedTool?: Tool): FolderAg
     !agent.hub ||
     !agent.token ||
     !agent.handle ||
-    (agent.session !== undefined && typeof agent.session !== "string")
+    (agent.session !== undefined && typeof agent.session !== "string") ||
+    (agent.cliOnly !== undefined && typeof agent.cliOnly !== "boolean")
   )
     throw new Error(`${file} is not a valid Warren agent config`);
   if (expectedTool && agent.tool !== expectedTool) throw new Error(`${file} has a Warren agent under the wrong client key`);

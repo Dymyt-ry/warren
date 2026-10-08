@@ -395,7 +395,7 @@ try {
       reviewerMe.org === "firmab" &&
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
-      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.0 add codex --hub "${HUB}"` &&
+      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.1 add codex --hub "${HUB}"` &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
     "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
   );

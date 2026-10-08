@@ -566,9 +566,9 @@ class BrowserHub implements Transport {
     const hub = "https://warren.example.com";
     return {
       cli: {
-        claude: `npx -y warren-cli@0.6.0 add claude --hub "${hub}"`,
-        codex: `npx -y warren-cli@0.6.0 add codex --hub "${hub}"`,
-        cursor: `npx -y warren-cli@0.6.0 add cursor --hub "${hub}"`,
+        claude: `npx -y warren-cli@0.6.1 add claude --hub "${hub}"`,
+        codex: `npx -y warren-cli@0.6.1 add codex --hub "${hub}"`,
+        cursor: `npx -y warren-cli@0.6.1 add cursor --hub "${hub}"`,
       },
       claudeCode: {
         mcpJson: { mcpServers: { warren: { command: "npx", args: ["warren-bridge"], env: { WARREN_HUB: hub, WARREN_TOKEN: token } } } },

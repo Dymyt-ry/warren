@@ -48,7 +48,7 @@ const codexBlock = (managedMcp: ReturnType<typeof managedBridge>) => [
   END,
 ];
 
-export function wireFolder(dir: string, wiring: Wiring) {
+export function wireFolder(dir: string, wiring: Wiring, options: { cliOnly?: boolean } = {}) {
   const releaseLock = acquireFolderLock(dir);
   try {
     assertCredentialUntracked(dir);
@@ -58,11 +58,14 @@ export function wireFolder(dir: string, wiring: Wiring) {
     if (existing.some((agent) => agent.handle === wiring.handle || agent.token === wiring.token))
       throw new Error(`@${wiring.handle} is already configured here; create a separate Warren agent for ${wiring.tool}`);
     const mutations: Mutation[] = [];
-    const migrated = existing.map((agent) => migrateManagedWiring(dir, agent, wiring.bridge, mutations));
+    const migrated = existing.map((agent) => migrateManagedWiring(dir, agent, wiring.bridge, mutations, options.cliOnly ?? false));
     const managedMcp = managedBridge(wiring.bridge, wiring.tool);
     let cursorPermissionAdded = false;
 
-    if (wiring.tool === "claude") {
+    if (options.cliOnly) {
+      // The credential file and gitignore entry below are the only project
+      // files CLI-only mode owns.
+    } else if (wiring.tool === "claude") {
       const file = join(dir, ".mcp.json");
       assertProjectPath(dir, file);
       const config = readJson(file);
@@ -112,8 +115,9 @@ export function wireFolder(dir: string, wiring: Wiring) {
     const { bridge: _bridge, ...base } = wiring;
     const agent: FolderAgent = {
       ...base,
-      ...(wiring.tool === "claude" || wiring.tool === "cursor" ? { managedMcp } : {}),
-      ...(wiring.tool === "cursor" ? { cursorPermissionAdded } : {}),
+      ...(options.cliOnly ? { cliOnly: true } : {}),
+      ...(!options.cliOnly && (wiring.tool === "claude" || wiring.tool === "cursor") ? { managedMcp } : {}),
+      ...(!options.cliOnly && wiring.tool === "cursor" ? { cursorPermissionAdded } : {}),
     };
     const folderFile = join(dir, FOLDER_FILE);
     assertProjectPath(dir, folderFile);
@@ -124,30 +128,54 @@ export function wireFolder(dir: string, wiring: Wiring) {
   }
 }
 
-function migrateManagedWiring(dir: string, agent: FolderAgent, bridge: Wiring["bridge"], mutations: Mutation[]): FolderAgent {
+function migrateManagedWiring(
+  dir: string,
+  agent: FolderAgent,
+  bridge: Wiring["bridge"],
+  mutations: Mutation[],
+  allowMissing: boolean,
+): FolderAgent {
+  if (agent.cliOnly) return agent;
   const managedMcp = managedBridge(bridge, agent.tool);
   if (agent.tool === "codex") {
     const file = join(dir, CODEX_FILE);
     assertProjectPath(dir, file);
-    if (!existsSync(file)) throw new Error(`${CODEX_FILE} is missing Warren's managed server; restore it before adding another agent`);
+    if (!existsSync(file)) {
+      if (allowMissing) return { ...agent, cliOnly: true };
+      throw new Error(`${CODEX_FILE} is missing Warren's managed server; restore it before adding another agent`);
+    }
     const text = readText(file);
-    if (!text.includes(BEGIN)) throw new Error(`${CODEX_FILE} no longer has Warren's managed server; restore it before adding another agent`);
+    if (!text.includes(BEGIN)) {
+      if (/^\s*\[\s*mcp_servers\s*\.\s*["']?warren["']?\s*\]/m.test(text))
+        throw new Error(`${CODEX_FILE} has a Warren server not managed by warren-cli; remove it before adding another agent`);
+      if (allowMissing) return { ...agent, cliOnly: true };
+      throw new Error(`${CODEX_FILE} no longer has Warren's managed server; restore it before adding another agent`);
+    }
     const rest = stripBlock(text, BEGIN, END, CODEX_FILE);
     if (/^\s*\[\s*mcp_servers\s*\.\s*["']?warren["']?\s*\]/m.test(rest))
       throw new Error(`${CODEX_FILE} also has a Warren server outside warren-cli's managed block; remove it before adding another agent`);
     mutations.push({ file, text: `${rest}${rest && !rest.endsWith("\n") ? "\n" : ""}${codexBlock(managedMcp).join("\n")}\n` });
-    return agent;
+    const { cliOnly: _cliOnly, ...wired } = agent;
+    return wired;
   }
 
   const file = join(dir, agent.tool === "claude" ? ".mcp.json" : ".cursor/mcp.json");
   assertProjectPath(dir, file);
-  if (!existsSync(file)) throw new Error(`${file} is missing Warren's managed server; restore it before adding another agent`);
+  if (!existsSync(file)) {
+    if (allowMissing) return { ...agent, cliOnly: true };
+    throw new Error(`${file} is missing Warren's managed server; restore it before adding another agent`);
+  }
   const config = readJson(file, false);
   const servers = mcpServers(config, file);
+  if (!("warren" in servers)) {
+    if (allowMissing) return { ...agent, cliOnly: true };
+    throw new Error(`${file} is missing Warren's managed server; restore it before adding another agent`);
+  }
   if (!agent.managedMcp || JSON.stringify(servers.warren) !== JSON.stringify(agent.managedMcp))
     throw new Error(`${file}'s Warren server changed after warren-cli added it; restore the managed entry before adding another agent`);
   mutations.push(jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }));
-  return { ...agent, managedMcp };
+  const { cliOnly: _cliOnly, ...wired } = agent;
+  return { ...wired, managedMcp };
 }
 
 /**
@@ -272,6 +300,7 @@ function processIsAlive(pid: number): boolean {
 
 function buildUnwireMutations(dir: string, agent: FolderAgent): Mutation[] {
   const mutations: Mutation[] = [];
+  if (agent.cliOnly) return mutations;
   if (agent.tool === "claude") {
     const file = join(dir, ".mcp.json");
     assertProjectPath(dir, file);
