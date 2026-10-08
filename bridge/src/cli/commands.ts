@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { applyAgentEnv, configPath, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
 import { prepareUnwireFolder, TOOLS, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
 
@@ -34,6 +34,7 @@ export async function add(
     token?: string;
     session?: string;
     cliOnly?: boolean;
+    profile?: string;
     bridge: Wiring["bridge"];
     wakeCommand: string;
     bindCommand?: string;
@@ -42,8 +43,12 @@ export async function add(
   },
 ) {
   const tool = asTool(toolValue);
-  if ((readFolderAgents(dir) ?? []).some((agent) => agent.tool === tool))
-    throw new Error(`this folder already has a ${tool} agent; run \`warren leave --as ${tool}\` first`);
+  const configured = readFolderAgents(dir) ?? [];
+  const profile = options.profile ?? tool;
+  if (configured.some((agent) => agent.profile === profile))
+    throw new Error(`this folder already has the Warren profile ${profile}`);
+  if (!options.profile && configured.some((agent) => agent.tool === tool))
+    throw new Error(`this folder already has a ${tool} agent; add another with --profile <name>`);
   const hub = hubOrigin(options.hub ?? process.env.WARREN_HUB ?? "");
   const token = options.token ?? process.env.WARREN_TOKEN ?? (await options.promptToken?.());
   if (!token) throw new Error("pass --token <agent-token> or set WARREN_TOKEN");
@@ -59,20 +64,21 @@ export async function add(
       hub,
       token,
       handle: member.handle,
+      profile: options.profile,
       session: options.session,
       bridge: options.bridge,
     },
     { cliOnly: options.cliOnly },
   );
   console.log(`This folder's ${tool} is now @${member.handle}.`);
-  if (options.cliOnly && tool === "claude")
-    console.log(`No Claude project config was changed. Start a push-enabled session with:\n  ${options.launchCommand ?? "warren launch claude"}`);
+  if (options.cliOnly && (tool === "claude" || tool === "codex"))
+    console.log(`No ${tool === "claude" ? "Claude" : "Codex"} project config was changed. Start a connected session with:\n  ${options.launchCommand ?? `warren ${tool}`}`);
   else if (options.cliOnly)
     console.log(
       `No ${tool} project config was changed. Bind from inside the session, then listen in another terminal:\n` +
         `  ${options.bindCommand ?? `warren bind --as ${tool}`}\n  ${options.wakeCommand}`,
     );
-  else if (tool === "claude") console.log("Start Claude Code with: claude --dangerously-load-development-channels server:warren");
+  else if (tool === "claude" || tool === "codex") console.log(`Start a connected session with: ${options.launchCommand ?? `warren ${tool}`}`);
   else console.log(`For always-on mention delivery, keep this running in a second terminal:\n  ${options.wakeCommand}`);
 }
 
@@ -149,6 +155,7 @@ export function bindSession(
   selector?: string,
   session?: string,
   environment: Record<string, string | undefined> = process.env,
+  options: { quiet?: boolean } = {},
 ) {
   const agent = readFolder(dir, undefined, selector);
   if (!agent) throw new Error("this folder has no Warren agent");
@@ -161,15 +168,36 @@ export function bindSession(
   )?.trim();
   if (!detected) throw new Error(`no ${agent.tool} session detected; run this inside the agent session or pass --session <id>`);
   writeFolder(dir, { ...agent, session: detected });
-  console.log(`@${agent.handle} is bound to ${agent.tool} session ${detected}.`);
+  if (!options.quiet) console.log(`@${agent.handle} is bound to ${agent.tool} session ${detected}.`);
 }
 
-export function claudeLaunchArgs(configFile: string, bridgeCommand: Wiring["bridge"], session?: string): string[] {
+interface CodexHookEvent {
+  hook_event_name?: unknown;
+  session_id?: unknown;
+  cwd?: unknown;
+}
+
+/** Bind the exact Codex thread announced by the SessionStart hook. */
+export function bindCodexHook(dir: string, selector: string | undefined, input: string) {
+  let event: CodexHookEvent;
+  try {
+    event = JSON.parse(input) as CodexHookEvent;
+  } catch {
+    throw new Error("Codex hook input is not valid JSON");
+  }
+  if (event.hook_event_name !== "SessionStart" || typeof event.session_id !== "string" || !event.session_id.trim())
+    throw new Error("Codex hook did not provide a SessionStart session_id");
+  if (typeof event.cwd === "string" && event.cwd && event.cwd !== dir)
+    throw new Error(`Codex hook cwd ${event.cwd} does not match ${dir}`);
+  bindSession(dir, selector, event.session_id, {}, { quiet: true });
+}
+
+export function claudeLaunchArgs(configFile: string, bridgeCommand: Wiring["bridge"], selector = "claude", session?: string): string[] {
   const config = {
     mcpServers: {
       warren: {
         ...bridgeCommand,
-        env: { WARREN_CONFIG: configFile, WARREN_AGENT: "claude" },
+        env: { WARREN_CONFIG: configFile, WARREN_AGENT: selector },
       },
     },
   };
@@ -182,28 +210,121 @@ export function claudeLaunchArgs(configFile: string, bridgeCommand: Wiring["brid
   ];
 }
 
+const tomlString = (value: string) => JSON.stringify(value);
+const shellWord = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+
+function bridgeCliArgs(bridgeCommand: Wiring["bridge"], command: string, extra: string[] = []): string[] {
+  if (bridgeCommand.args.at(-1) !== "bridge") throw new Error("Warren bridge command is malformed");
+  return [...bridgeCommand.args.slice(0, -1), command, ...extra];
+}
+
+/** Start Codex with token-free inline MCP wiring and an exact SessionStart binding hook. */
+export function codexLaunchArgs(
+  configFile: string,
+  bridgeCommand: Wiring["bridge"],
+  selector = "codex",
+  session?: string,
+): string[] {
+  const hookCommand = [bridgeCommand.command, ...bridgeCliArgs(bridgeCommand, "codex-hook", ["--as", selector])]
+    .map(shellWord)
+    .join(" ");
+  const hook =
+    `[{ matcher = "^(startup|resume)$", hooks = [` +
+    `{ type = "command", command = ${tomlString(hookCommand)}, timeout = 10, statusMessage = "Connecting Warren" }` +
+    `] }]`;
+  return [
+    "-c",
+    `mcp_servers.warren.command=${tomlString(bridgeCommand.command)}`,
+    "-c",
+    `mcp_servers.warren.args=${JSON.stringify(bridgeCommand.args)}`,
+    "-c",
+    `mcp_servers.warren.env={ WARREN_CONFIG = ${tomlString(configFile)}, WARREN_AGENT = ${tomlString(selector)} }`,
+    "-c",
+    `hooks.SessionStart=${hook}`,
+    "--dangerously-bypass-hook-trust",
+    ...(session ? ["resume", session] : []),
+  ];
+}
+
+function waitForCodexBinding(
+  dir: string,
+  selector: string,
+  previousSession: string | undefined,
+  onBound: (session: string) => void,
+): () => void {
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (stopped) return;
+    try {
+      const next = readFolder(dir, undefined, selector)?.session;
+      if (next && next !== previousSession) {
+        stopped = true;
+        clearInterval(timer);
+        onBound(next);
+      }
+    } catch {
+      // A config write may be between its atomic rename steps. Retry shortly.
+    }
+  }, 100);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+function startCodexListener(
+  dir: string,
+  selector: string,
+  session: string,
+  bridgeCommand: Wiring["bridge"],
+): ChildProcess {
+  return spawn(bridgeCommand.command, bridgeCliArgs(bridgeCommand, "listen", ["--as", selector, "--session", session]), {
+    cwd: dir,
+    stdio: ["ignore", "ignore", "inherit"],
+  });
+}
+
 export async function launch(
   dir: string,
   toolValue: string | undefined,
-  options: { session?: string; bridge: Wiring["bridge"]; command?: string },
+  options: { session?: string; bridge: Wiring["bridge"]; command?: string; selector?: string },
 ) {
   const tool = asTool(toolValue);
-  if (tool !== "claude") throw new Error("`warren launch` currently supports Claude; use `warren listen --as codex` for Codex");
-  const agent = readFolder(dir, undefined, tool);
-  if (!agent) throw new Error("this folder has no Claude Warren agent");
-  if (!agent.cliOnly)
-    throw new Error("this Claude agent already has project MCP wiring; start it with `claude --dangerously-load-development-channels server:warren`");
+  const agent = readFolder(dir, undefined, options.selector ?? tool);
+  if (!agent) throw new Error(`this folder has no ${tool} Warren agent`);
+  if (agent.tool !== tool) throw new Error(`@${agent.handle} is a ${agent.tool} agent, not ${tool}`);
   const requestedSession = options.session?.trim();
-  if (options.session !== undefined && !requestedSession) throw new Error("Claude session id must not be empty");
+  if (options.session !== undefined && !requestedSession) throw new Error(`${tool} session id must not be empty`);
   const nextSession = requestedSession ?? agent.session;
   if (requestedSession && requestedSession !== agent.session) writeFolder(dir, { ...agent, session: requestedSession });
-  const args = claudeLaunchArgs(configPath(dir), options.bridge, nextSession);
+  const selector = agent.profile ?? agent.tool;
+  const args =
+    tool === "claude"
+      ? agent.cliOnly
+        ? claudeLaunchArgs(configPath(dir), options.bridge, selector, nextSession)
+        : [...(nextSession ? ["--resume", nextSession] : []), "--dangerously-load-development-channels", "server:warren"]
+      : codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(options.command ?? process.env.WARREN_CLAUDE_CMD ?? "claude", args, { cwd: dir, stdio: "inherit" });
-    child.once("error", (error) => reject(new Error(`cannot launch Claude Code (${error.message})`)));
+    const command =
+      options.command ?? (tool === "claude" ? process.env.WARREN_CLAUDE_CMD ?? "claude" : process.env.WARREN_CODEX_CMD ?? "codex");
+    let listener: ChildProcess | undefined;
+    const startListener = (session: string) => {
+      if (!listener) listener = startCodexListener(dir, selector, session, options.bridge);
+    };
+    const stopWaiting =
+      tool === "codex" && !requestedSession ? waitForCodexBinding(dir, selector, agent.session, startListener) : () => {};
+    if (tool === "codex" && requestedSession) startListener(requestedSession);
+    const child = spawn(command, args, { cwd: dir, stdio: "inherit" });
+    child.once("error", (error) => {
+      stopWaiting();
+      listener?.kill("SIGTERM");
+      reject(new Error(`cannot launch ${tool === "claude" ? "Claude Code" : "Codex"} (${error.message})`));
+    });
     child.once("exit", (code, signal) => {
+      stopWaiting();
+      listener?.kill("SIGTERM");
       if (code === 0 || signal === "SIGINT") resolve();
-      else reject(new Error(`Claude Code exited with ${code ?? signal}`));
+      else reject(new Error(`${tool === "claude" ? "Claude Code" : "Codex"} exited with ${code ?? signal}`));
     });
   });
 }

@@ -398,11 +398,10 @@ try {
       reviewerMe.org === "firmab" &&
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
-      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.2 add codex --hub "${HUB}" --cli-only` &&
-      reviewer.setup.codex.wake.includes("warren-cli@0.6.2 bind --as codex") &&
-      reviewer.setup.codex.wake.includes("warren-cli@0.6.2 listen --as codex") &&
+      reviewer.setup.cli.codex === `warren add codex --hub "${HUB}" --cli-only` &&
+      reviewer.setup.codex.wake === "warren codex" &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
-    "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
+    "ben's new agent belongs to ben and firmab, with a token-free global CLI setup",
   );
   const reserved = await api("/api/invites", undefined, { name: "x", handle: "here", org: "acme", room: "shop" });
   check(reserved.status === 400, "@here, @all and @room are reserved handles");

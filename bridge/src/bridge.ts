@@ -21,6 +21,12 @@ export async function runBridge() {
     }),
   );
 
+  // Preflight and cache tool discovery before exposing the local channel to
+  // Claude Code. If this request fails during startup, the MCP server now
+  // fails visibly instead of leaving a misleading half-connected session
+  // where channel pushes work but Warren's reply tools are absent.
+  const { tools: hubTools } = await hub.listTools();
+
   const mcp = new Server(
     { name: "warren", version: "0.3.0" },
     {
@@ -40,10 +46,7 @@ export async function runBridge() {
       "Show your person a held Warren message so they can release or reject it. You never see the text; a released message arrives normally.",
     inputSchema: { type: "object" as const, properties: { msg_id: { type: "string" } }, required: ["msg_id"] },
   };
-  mcp.setRequestHandler(ListToolsRequestSchema, async () => {
-    const { tools } = await hub.listTools();
-    return { tools: [...tools, reviewTool] };
-  });
+  mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [...hubTools, reviewTool] }));
   mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (req.params.name === reviewTool.name) {
       const id = String((req.params.arguments as { msg_id?: unknown } | undefined)?.msg_id ?? "");

@@ -1461,14 +1461,13 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 // PUBLIC_URL is a validated origin and generated tokens use a URL-safe alphabet,
 // so JSON's double quotes are portable across POSIX shells, PowerShell and cmd.exe.
 const shellArg = (value: string) => JSON.stringify(value);
-const CLI_PACKAGE = "warren-cli@0.6.2";
 
 function setupSnippets(m: store.Member, token: string) {
   return {
     cli: {
-      claude: `npx -y ${CLI_PACKAGE} add claude --hub ${shellArg(PUBLIC_URL)} --cli-only`,
-      codex: `npx -y ${CLI_PACKAGE} add codex --hub ${shellArg(PUBLIC_URL)} --cli-only`,
-      cursor: `npx -y ${CLI_PACKAGE} add cursor --hub ${shellArg(PUBLIC_URL)}`,
+      claude: `warren add claude --hub ${shellArg(PUBLIC_URL)} --cli-only`,
+      codex: `warren add codex --hub ${shellArg(PUBLIC_URL)} --cli-only`,
+      cursor: `warren add cursor --hub ${shellArg(PUBLIC_URL)}`,
     },
     claudeCode: {
       mcpJson: {
@@ -1480,11 +1479,11 @@ function setupSnippets(m: store.Member, token: string) {
           },
         },
       },
-      launch: `npx -y ${CLI_PACKAGE} launch claude`,
+      launch: "warren claude",
     },
     codex: {
       mcp: `WARREN_TOKEN=${token} codex mcp add warren --url ${PUBLIC_URL}/mcp --bearer-token-env-var WARREN_TOKEN`,
-      wake: `# Run inside Codex once:\nnpx -y ${CLI_PACKAGE} bind --as codex\n# Then keep this running in another terminal:\nnpx -y ${CLI_PACKAGE} listen --as codex`,
+      wake: "warren codex",
     },
     cursor: {
       mcpJson: { mcpServers: { warren: { url: `${PUBLIC_URL}/mcp`, headers: { Authorization: `Bearer ${token}` } } } },

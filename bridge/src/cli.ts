@@ -4,14 +4,14 @@ import { Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { bridge, add, bindSession, launch, leave, status, wake } from "./cli/commands.js";
+import { bridge, add, bindCodexHook, bindSession, launch, leave, status, wake } from "./cli/commands.js";
 import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
 
 const help = `warren-cli: use Warren from coding agents and shell scripts
 
   warren add <claude|codex|cursor> --hub <url> [--token <agent-token>]
-      [--session <id>] [--cli-only]
+      [--session <id>] [--cli-only] [--profile <local-name>]
   warren whoami
   warren rooms
   warren read <room> [--limit <1-100>]
@@ -26,8 +26,10 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
   warren call <tool> --input <json>  call any MCP tool; output is JSON/text
   warren bind --as codex             bind the current Codex session
   warren listen [--session <id>]     push mentions into Codex/Cursor
-  warren launch claude [--session <id>]
-                                     launch Claude with live channel push
+  warren claude [--session <id>] [--as <profile>]
+  warren codex [--session <id>] [--as <profile>]
+                                     launch a client with live message delivery
+  warren launch <claude|codex>       long form of the two commands above
   warren wake [--session <id>]       alias for listen
   warren status                      inspect this folder's agents
   warren leave                       remove one agent and its local wiring
@@ -60,6 +62,7 @@ const parsed = (() => {
         all: { type: "boolean" },
         as: { type: "string" },
         "cli-only": { type: "boolean" },
+        profile: { type: "string" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -83,6 +86,12 @@ const noArguments = (name: string) => {
   if (arguments_.length) throw new Error(`${name} takes no positional arguments${name === "leave" ? "; use --as <client-or-handle>" : ""}`);
 };
 const auth = { hub: values.hub, token: values.token, agent: values.as };
+
+async function stdinText(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
+}
 
 async function promptToken(): Promise<string> {
   if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -115,10 +124,11 @@ try {
       token: values.token,
       session: values.session,
       cliOnly: values["cli-only"],
+      profile: values.profile,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
-      wakeCommand: `npx -y warren-cli@${version} listen --as ${argument}`,
-      bindCommand: `npx -y warren-cli@${version} bind --as ${argument}`,
-      launchCommand: `npx -y warren-cli@${version} launch ${argument}`,
+      wakeCommand: `warren listen --as ${values.profile ?? argument}`,
+      bindCommand: `warren bind --as ${values.profile ?? argument}`,
+      launchCommand: `warren ${argument} --as ${values.profile ?? argument}`,
       promptToken,
     });
   else if (command === "wake") {
@@ -130,10 +140,21 @@ try {
   } else if (command === "bind") {
     noArguments("bind");
     bindSession(dir, values.as, values.session);
+  } else if (command === "codex-hook") {
+    noArguments("codex-hook");
+    bindCodexHook(dir, values.as, await stdinText());
   } else if (command === "launch") {
-    if (arguments_.length !== 1) throw new Error("launch requires exactly one client: claude");
+    if (arguments_.length !== 1) throw new Error("launch requires exactly one client: claude or codex");
     await launch(dir, argument, {
       session: values.session,
+      selector: values.as,
+      bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
+    });
+  } else if (command === "claude" || command === "codex") {
+    noArguments(command);
+    await launch(dir, command, {
+      session: values.session,
+      selector: values.as,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
     });
   } else if (command === "status") {

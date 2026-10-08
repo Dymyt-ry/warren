@@ -3,6 +3,8 @@ import { resolve } from "node:path";
 import type { Tool } from "./writers.js";
 
 export interface FolderAgent {
+  /** Local selector; never sent to the hub. Defaults to the client name. */
+  profile?: string;
   tool: Tool;
   hub: string;
   token: string;
@@ -15,7 +17,7 @@ export interface FolderAgent {
 
 export interface FolderAgents {
   version: 2;
-  agents: Partial<Record<Tool, FolderAgent>>;
+  agents: Record<string, Omit<FolderAgent, "profile">>;
 }
 
 export const FOLDER_FILE = ".warren.json";
@@ -77,11 +79,15 @@ export function readFolderAgents(dir: string, asked?: string): FolderAgent[] | u
   const collection = value as Partial<FolderAgents>;
   if (collection?.version !== 2 || !collection.agents || typeof collection.agents !== "object" || Array.isArray(collection.agents))
     return [validAgent(value, file)];
-  const unknown = Object.keys(collection.agents).filter((tool) => !["claude", "codex", "cursor"].includes(tool));
-  if (unknown.length) throw new Error(`${file} has unknown Warren client keys: ${unknown.join(", ")}`);
-  const agents = (["claude", "codex", "cursor"] as Tool[])
-    .filter((tool) => collection.agents?.[tool] !== undefined)
-    .map((tool) => validAgent(collection.agents![tool], file, tool));
+  const profiles = Object.keys(collection.agents);
+  const invalid = profiles.filter((profile) => !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(profile));
+  if (invalid.length) throw new Error(`${file} has invalid Warren profile names: ${invalid.join(", ")}`);
+  const agents = profiles.map((profile) => ({
+    ...validAgent(collection.agents![profile], file, (["claude", "codex", "cursor"] as string[]).includes(profile) ? (profile as Tool) : undefined),
+    profile,
+  }));
+  const toolOrder: Tool[] = ["claude", "codex", "cursor"];
+  agents.sort((left, right) => toolOrder.indexOf(left.tool) - toolOrder.indexOf(right.tool) || left.profile.localeCompare(right.profile));
   if (!agents.length) throw new Error(`${file} is not a valid Warren agent config`);
   if (new Set(agents.map((agent) => agent.handle)).size !== agents.length)
     throw new Error(`${file} assigns the same Warren agent to more than one client`);
@@ -96,12 +102,17 @@ export function selectFolderAgent(agents: FolderAgent[], selector?: string): Fol
     // fall back to handles so an agent named "codex" cannot steal --as codex;
     // an explicit @handle still selects that handle.
     const byHandle = agents.find((candidate) => candidate.handle === selected);
-    const agent = handleOnly ? byHandle : agents.find((candidate) => candidate.tool === selected) ?? byHandle;
-    if (!agent) throw new Error(`no ${selector} agent is configured here; choose one of: ${agents.map((a) => a.tool).join(", ")}`);
+    const byProfile = agents.find((candidate) => candidate.profile === selected);
+    const byTool = agents.filter((candidate) => candidate.tool === selected);
+    if (!handleOnly && !byProfile && byTool.length > 1)
+      throw new Error(`multiple ${selected} agents are configured here; choose one with --as ${byTool.map((a) => a.profile).join("|--as ")}`);
+    const agent = handleOnly ? byHandle : byProfile ?? (byTool.length === 1 ? byTool[0] : undefined) ?? byHandle;
+    if (!agent)
+      throw new Error(`no ${selector} agent is configured here; choose one of: ${agents.map((a) => a.profile ?? a.tool).join(", ")}`);
     return agent;
   }
   if (agents.length === 1) return agents[0];
-  throw new Error(`multiple Warren agents are configured here; choose one with --as ${agents.map((a) => a.tool).join("|--as ")}`);
+  throw new Error(`multiple Warren agents are configured here; choose one with --as ${agents.map((a) => a.profile ?? a.tool).join("|--as ")}`);
 }
 
 export function readFolder(dir: string, asked?: string, selector?: string): FolderAgent | undefined {
@@ -112,7 +123,12 @@ export function readFolder(dir: string, asked?: string, selector?: string): Fold
 export function folderConfig(agents: FolderAgent[]): FolderAgents {
   return {
     version: 2,
-    agents: Object.fromEntries(agents.map((agent) => [agent.tool, agent])) as FolderAgents["agents"],
+    agents: Object.fromEntries(
+      agents.map((agent) => {
+        const { profile, ...stored } = agent;
+        return [profile ?? agent.tool, stored];
+      }),
+    ),
   };
 }
 

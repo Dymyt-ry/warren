@@ -34,9 +34,9 @@ const LOCK_FILE = `${FOLDER_FILE}.lock`;
 const BEGIN = "# >>> warren (managed by warren-cli; `warren leave` removes it)";
 const END = "# <<< warren";
 
-const managedBridge = (bridge: Wiring["bridge"], tool: Tool) => ({
+const managedBridge = (bridge: Wiring["bridge"], selector: string) => ({
   ...bridge,
-  env: { WARREN_CONFIG: FOLDER_FILE, WARREN_AGENT: tool },
+  env: { WARREN_CONFIG: FOLDER_FILE, WARREN_AGENT: selector },
 });
 
 const codexBlock = (managedMcp: ReturnType<typeof managedBridge>) => [
@@ -53,13 +53,18 @@ export function wireFolder(dir: string, wiring: Wiring, options: { cliOnly?: boo
   try {
     assertCredentialUntracked(dir);
     const existing = readFolderAgents(dir) ?? [];
-    if (existing.some((agent) => agent.tool === wiring.tool))
-      throw new Error(`this folder already has a ${wiring.tool} agent; run \`warren leave --as ${wiring.tool}\` first`);
+    const profile = wiring.profile ?? wiring.tool;
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(profile))
+      throw new Error("profile must use 1-64 letters, digits, underscores or hyphens");
+    if (existing.some((agent) => agent.profile === profile))
+      throw new Error(`this folder already has the Warren profile ${profile}`);
+    if (existing.some((agent) => agent.tool === wiring.tool) && !options.cliOnly)
+      throw new Error(`multiple ${wiring.tool} agents require --cli-only and distinct --profile names`);
     if (existing.some((agent) => agent.handle === wiring.handle || agent.token === wiring.token))
       throw new Error(`@${wiring.handle} is already configured here; create a separate Warren agent for ${wiring.tool}`);
     const mutations: Mutation[] = [];
     const migrated = existing.map((agent) => migrateManagedWiring(dir, agent, wiring.bridge, mutations, options.cliOnly ?? false));
-    const managedMcp = managedBridge(wiring.bridge, wiring.tool);
+    const managedMcp = managedBridge(wiring.bridge, profile);
     let cursorPermissionAdded = false;
 
     if (options.cliOnly) {
@@ -115,6 +120,7 @@ export function wireFolder(dir: string, wiring: Wiring, options: { cliOnly?: boo
     const { bridge: _bridge, ...base } = wiring;
     const agent: FolderAgent = {
       ...base,
+      profile,
       ...(options.cliOnly ? { cliOnly: true } : {}),
       ...(!options.cliOnly && (wiring.tool === "claude" || wiring.tool === "cursor") ? { managedMcp } : {}),
       ...(!options.cliOnly && wiring.tool === "cursor" ? { cursorPermissionAdded } : {}),
@@ -136,7 +142,7 @@ function migrateManagedWiring(
   allowMissing: boolean,
 ): FolderAgent {
   if (agent.cliOnly) return agent;
-  const managedMcp = managedBridge(bridge, agent.tool);
+  const managedMcp = managedBridge(bridge, agent.profile ?? agent.tool);
   if (agent.tool === "codex") {
     const file = join(dir, CODEX_FILE);
     assertProjectPath(dir, file);
@@ -189,10 +195,10 @@ export function prepareUnwireFolder(dir: string, agent: FolderAgent): PreparedMu
     const folderFile = join(dir, FOLDER_FILE);
     assertProjectPath(dir, folderFile);
     const configured = readFolderAgents(dir) ?? [];
-    const current = configured.find((candidate) => candidate.tool === agent.tool);
+    const current = configured.find((candidate) => candidate.profile === agent.profile && candidate.handle === agent.handle);
     if (!current || current.handle !== agent.handle || current.token !== agent.token || current.hub !== agent.hub)
       throw new Error(`the ${agent.tool} agent changed while this command was starting; retry with its current identity`);
-    const remaining = configured.filter((candidate) => candidate.tool !== agent.tool);
+    const remaining = configured.filter((candidate) => candidate.profile !== agent.profile || candidate.handle !== agent.handle);
     const prepared = prepareMutations([
       ...buildUnwireMutations(dir, agent),
       remaining.length
@@ -216,7 +222,7 @@ export function writeFolder(dir: string, agent: FolderAgent) {
     const file = join(dir, FOLDER_FILE);
     assertProjectPath(dir, file);
     const configured = readFolderAgents(dir) ?? [];
-    const index = configured.findIndex((candidate) => candidate.tool === agent.tool);
+    const index = configured.findIndex((candidate) => candidate.profile === agent.profile && candidate.handle === agent.handle);
     if (index === -1 || configured[index].handle !== agent.handle || configured[index].token !== agent.token || configured[index].hub !== agent.hub)
       throw new Error(`the ${agent.tool} agent changed while this command was starting; retry with its current identity`);
     configured[index] = agent;

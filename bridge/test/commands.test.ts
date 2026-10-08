@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { add, bindSession, claudeLaunchArgs } from "../src/cli/commands.js";
+import { add, bindCodexHook, bindSession, claudeLaunchArgs, codexLaunchArgs } from "../src/cli/commands.js";
 import { readFolderAgents } from "../src/cli/config.js";
 
 const options = {
@@ -83,6 +83,23 @@ test("add keeps an existing Codex identity when Claude joins the same folder", a
   assert.deepEqual(readFolderAgents(dir)?.map((agent) => agent.tool), ["claude", "codex"]);
 });
 
+test("add supports multiple agents of the same client with distinct profiles", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async (_input, init) => {
+    const token = (init?.headers as Record<string, string>).Authorization;
+    const handle = token.endsWith("_two") ? "codex-two" : "codex-one";
+    return new Response(JSON.stringify({ handle, kind: "agent", adapter: "exec" }), { status: 200 });
+  };
+
+  await add(dir, "codex", { ...options, cliOnly: true, profile: "codex-api" });
+  await add(dir, "codex", { ...options, token: `${options.token}_two`, cliOnly: true, profile: "codex-ui" });
+
+  assert.deepEqual(readFolderAgents(dir)?.map((agent) => agent.profile), ["codex-api", "codex-ui"]);
+});
+
 test("destructive commands reject ignored positional arguments", () => {
   const cli = new URL("../src/cli.ts", import.meta.url);
   const result = spawnSync(process.execPath, ["--import", "tsx", cli.pathname, "leave", "codex"], { encoding: "utf8" });
@@ -144,7 +161,8 @@ test("bind directs Claude to its channel launcher", async (t) => {
 test("Claude launch uses an inline token-free channel config", () => {
   const args = claudeLaunchArgs(
     "/repo/.warren.json",
-    { command: "npx", args: ["-y", "warren-cli@0.6.2", "bridge"] },
+    { command: "npx", args: ["-y", "warren-cli@0.6.3", "bridge"] },
+    "claude",
     "claude-session",
   );
   const config = JSON.parse(args[1]);
@@ -154,4 +172,33 @@ test("Claude launch uses an inline token-free channel config", () => {
   assert.equal(config.mcpServers.warren.env.WARREN_CONFIG, "/repo/.warren.json");
   assert.equal(config.mcpServers.warren.env.WARREN_AGENT, "claude");
   assert.doesNotMatch(JSON.stringify(config), /wr_/);
+});
+
+test("Codex launch injects token-free MCP wiring and an exact SessionStart hook", () => {
+  const args = codexLaunchArgs(
+    "/repo/.warren.json",
+    { command: "/usr/bin/node", args: ["/opt/warren/cli.js", "bridge"] },
+    "codex-api",
+    "thread-123",
+  );
+  const rendered = args.join("\n");
+
+  assert.match(rendered, /mcp_servers\.warren/);
+  assert.match(rendered, /codex-hook/);
+  assert.match(rendered, /codex-api/);
+  assert.deepEqual(args.slice(-2), ["resume", "thread-123"]);
+  assert.doesNotMatch(rendered, /wr_/);
+});
+
+test("Codex SessionStart hook binds the announced thread without model-visible output", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async () => new Response(JSON.stringify({ handle: "codex-owner", kind: "agent", adapter: "exec" }), { status: 200 });
+  await add(dir, "codex", { ...options, cliOnly: true });
+
+  bindCodexHook(dir, "codex", JSON.stringify({ hook_event_name: "SessionStart", session_id: "thread-hook", cwd: dir }));
+
+  assert.equal(readFolderAgents(dir)?.[0].session, "thread-hook");
 });
