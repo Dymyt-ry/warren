@@ -8,8 +8,13 @@ export interface FolderAgent {
   token: string;
   handle: string;
   session?: string;
-  managedMcp?: { command: string; args: string[]; env: { WARREN_CONFIG: string } };
+  managedMcp?: { command: string; args: string[]; env: { WARREN_CONFIG: string; WARREN_AGENT?: string } };
   cursorPermissionAdded?: boolean;
+}
+
+export interface FolderAgents {
+  version: 2;
+  agents: Partial<Record<Tool, FolderAgent>>;
 }
 
 export const FOLDER_FILE = ".warren.json";
@@ -33,20 +38,80 @@ export function configPath(dir: string, asked?: string): string {
   return resolve(dir, asked ?? process.env.WARREN_CONFIG ?? FOLDER_FILE);
 }
 
-export function readFolder(dir: string, asked?: string): FolderAgent | undefined {
+function readConfigValue(dir: string, asked?: string): unknown | undefined {
   const file = configPath(dir, asked);
   if (!existsSync(file)) return undefined;
   if (lstatSync(file).isSymbolicLink()) throw new Error(`${file} is a symbolic link; Warren refuses to read credentials through links`);
-  let value: unknown;
   try {
-    value = JSON.parse(readFileSync(file, "utf8"));
+    return JSON.parse(readFileSync(file, "utf8"));
   } catch (error) {
     throw new Error(`${file} is not valid JSON (${(error as Error).message})`);
   }
+}
+
+function validAgent(value: unknown, file: string, expectedTool?: Tool): FolderAgent {
   const agent = value as Partial<FolderAgent>;
-  if (!agent || !["claude", "codex", "cursor"].includes(String(agent.tool)) || !agent.hub || !agent.token || !agent.handle)
+  if (
+    !agent ||
+    !["claude", "codex", "cursor"].includes(String(agent.tool)) ||
+    typeof agent.hub !== "string" ||
+    typeof agent.token !== "string" ||
+    typeof agent.handle !== "string" ||
+    !agent.hub ||
+    !agent.token ||
+    !agent.handle ||
+    (agent.session !== undefined && typeof agent.session !== "string")
+  )
     throw new Error(`${file} is not a valid Warren agent config`);
+  if (expectedTool && agent.tool !== expectedTool) throw new Error(`${file} has a Warren agent under the wrong client key`);
   return { ...agent, hub: hubOrigin(agent.hub) } as FolderAgent;
+}
+
+/** Read every configured identity, accepting the original single-agent format. */
+export function readFolderAgents(dir: string, asked?: string): FolderAgent[] | undefined {
+  const file = configPath(dir, asked);
+  const value = readConfigValue(dir, asked);
+  if (value === undefined) return undefined;
+  const collection = value as Partial<FolderAgents>;
+  if (collection?.version !== 2 || !collection.agents || typeof collection.agents !== "object" || Array.isArray(collection.agents))
+    return [validAgent(value, file)];
+  const unknown = Object.keys(collection.agents).filter((tool) => !["claude", "codex", "cursor"].includes(tool));
+  if (unknown.length) throw new Error(`${file} has unknown Warren client keys: ${unknown.join(", ")}`);
+  const agents = (["claude", "codex", "cursor"] as Tool[])
+    .filter((tool) => collection.agents?.[tool] !== undefined)
+    .map((tool) => validAgent(collection.agents![tool], file, tool));
+  if (!agents.length) throw new Error(`${file} is not a valid Warren agent config`);
+  if (new Set(agents.map((agent) => agent.handle)).size !== agents.length)
+    throw new Error(`${file} assigns the same Warren agent to more than one client`);
+  return agents;
+}
+
+export function selectFolderAgent(agents: FolderAgent[], selector?: string): FolderAgent {
+  const handleOnly = selector?.startsWith("@") ?? false;
+  const selected = selector?.replace(/^@/, "");
+  if (selected) {
+    // Client names are the stable selectors used by managed MCP wiring. Only
+    // fall back to handles so an agent named "codex" cannot steal --as codex;
+    // an explicit @handle still selects that handle.
+    const byHandle = agents.find((candidate) => candidate.handle === selected);
+    const agent = handleOnly ? byHandle : agents.find((candidate) => candidate.tool === selected) ?? byHandle;
+    if (!agent) throw new Error(`no ${selector} agent is configured here; choose one of: ${agents.map((a) => a.tool).join(", ")}`);
+    return agent;
+  }
+  if (agents.length === 1) return agents[0];
+  throw new Error(`multiple Warren agents are configured here; choose one with --as ${agents.map((a) => a.tool).join("|--as ")}`);
+}
+
+export function readFolder(dir: string, asked?: string, selector?: string): FolderAgent | undefined {
+  const agents = readFolderAgents(dir, asked);
+  return agents ? selectFolderAgent(agents, selector) : undefined;
+}
+
+export function folderConfig(agents: FolderAgent[]): FolderAgents {
+  return {
+    version: 2,
+    agents: Object.fromEntries(agents.map((agent) => [agent.tool, agent])) as FolderAgents["agents"],
+  };
 }
 
 export function bridgeCommand(cliPath: string, node: string, version: string): { command: string; args: string[] } {

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { FOLDER_FILE, type FolderAgent } from "./config.js";
+import { FOLDER_FILE, folderConfig, readFolderAgents, type FolderAgent } from "./config.js";
 
 export const TOOLS = ["claude", "codex", "cursor"] as const;
 export type Tool = (typeof TOOLS)[number];
@@ -30,78 +30,124 @@ export interface PreparedMutation {
 }
 
 const CODEX_FILE = ".codex/config.toml";
+const LOCK_FILE = `${FOLDER_FILE}.lock`;
 const BEGIN = "# >>> warren (managed by warren-cli; `warren leave` removes it)";
 const END = "# <<< warren";
 
-export function wireFolder(dir: string, wiring: Wiring) {
-  assertCredentialUntracked(dir);
-  const managedMcp = { ...wiring.bridge, env: { WARREN_CONFIG: FOLDER_FILE } };
-  const mutations: Mutation[] = [];
-  let cursorPermissionAdded = false;
+const managedBridge = (bridge: Wiring["bridge"], tool: Tool) => ({
+  ...bridge,
+  env: { WARREN_CONFIG: FOLDER_FILE, WARREN_AGENT: tool },
+});
 
-  if (wiring.tool === "claude") {
-    const file = join(dir, ".mcp.json");
-    assertProjectPath(dir, file);
-    const config = readJson(file);
-    const servers = mcpServers(config, file);
-    refuseCollision(servers, file);
-    mutations.push(jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }));
-  } else if (wiring.tool === "codex") {
+const codexBlock = (managedMcp: ReturnType<typeof managedBridge>) => [
+  BEGIN,
+  "[mcp_servers.warren]",
+  `command = ${tomlString(managedMcp.command)}`,
+  `args = ${JSON.stringify(managedMcp.args)}`,
+  `env = { "WARREN_CONFIG" = ${tomlString(FOLDER_FILE)}, "WARREN_AGENT" = "codex" }`,
+  END,
+];
+
+export function wireFolder(dir: string, wiring: Wiring) {
+  const releaseLock = acquireFolderLock(dir);
+  try {
+    assertCredentialUntracked(dir);
+    const existing = readFolderAgents(dir) ?? [];
+    if (existing.some((agent) => agent.tool === wiring.tool))
+      throw new Error(`this folder already has a ${wiring.tool} agent; run \`warren leave --as ${wiring.tool}\` first`);
+    if (existing.some((agent) => agent.handle === wiring.handle || agent.token === wiring.token))
+      throw new Error(`@${wiring.handle} is already configured here; create a separate Warren agent for ${wiring.tool}`);
+    const mutations: Mutation[] = [];
+    const migrated = existing.map((agent) => migrateManagedWiring(dir, agent, wiring.bridge, mutations));
+    const managedMcp = managedBridge(wiring.bridge, wiring.tool);
+    let cursorPermissionAdded = false;
+
+    if (wiring.tool === "claude") {
+      const file = join(dir, ".mcp.json");
+      assertProjectPath(dir, file);
+      const config = readJson(file);
+      const servers = mcpServers(config, file);
+      refuseCollision(servers, file);
+      mutations.push(jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }));
+    } else if (wiring.tool === "codex") {
+      const file = join(dir, CODEX_FILE);
+      assertProjectPath(dir, file);
+      const rest = stripBlock(readText(file), BEGIN, END, CODEX_FILE);
+      if (/^\s*\[\s*mcp_servers\s*\.\s*["']?warren["']?\s*\]/m.test(rest))
+        throw new Error(`${CODEX_FILE} already has a Warren server not managed by warren-cli; remove it first`);
+      const block = codexBlock(managedMcp);
+      mutations.push({ file, text: `${rest}${rest && !rest.endsWith("\n") ? "\n" : ""}${block.join("\n")}\n` });
+    } else {
+      const mcpFile = join(dir, ".cursor/mcp.json");
+      assertProjectPath(dir, mcpFile);
+      const mcp = readJson(mcpFile);
+      const servers = mcpServers(mcp, mcpFile);
+      refuseCollision(servers, mcpFile);
+
+      const cliFile = join(dir, ".cursor/cli.json");
+      assertProjectPath(dir, cliFile);
+      const cli = readJson(cliFile);
+      const permissions = objectValue(cli.permissions, `${cliFile}: permissions`);
+      const allow = stringArray(permissions.allow, `${cliFile}: permissions.allow`);
+      const deny = stringArray(permissions.deny, `${cliFile}: permissions.deny`);
+      cursorPermissionAdded = !allow.includes("Mcp(warren:*)");
+
+      mutations.push(
+        jsonMutation(mcpFile, { ...mcp, mcpServers: { ...servers, warren: managedMcp } }),
+        jsonMutation(cliFile, {
+          ...cli,
+          permissions: {
+            ...permissions,
+            allow: cursorPermissionAdded ? [...allow, "Mcp(warren:*)"] : allow,
+            deny,
+          },
+        }),
+      );
+    }
+
+    const ignoreFile = join(dir, ".gitignore");
+    assertProjectPath(dir, ignoreFile);
+    const ignored = withGitignoreEntries(readText(ignoreFile), [FOLDER_FILE, LOCK_FILE]);
+    mutations.push({ file: ignoreFile, text: ignored });
+    const { bridge: _bridge, ...base } = wiring;
+    const agent: FolderAgent = {
+      ...base,
+      ...(wiring.tool === "claude" || wiring.tool === "cursor" ? { managedMcp } : {}),
+      ...(wiring.tool === "cursor" ? { cursorPermissionAdded } : {}),
+    };
+    const folderFile = join(dir, FOLDER_FILE);
+    assertProjectPath(dir, folderFile);
+    mutations.push({ file: folderFile, text: JSON.stringify(folderConfig([...migrated, agent]), null, 2) + "\n", mode: 0o600 });
+    applyMutations(mutations);
+  } finally {
+    releaseLock();
+  }
+}
+
+function migrateManagedWiring(dir: string, agent: FolderAgent, bridge: Wiring["bridge"], mutations: Mutation[]): FolderAgent {
+  const managedMcp = managedBridge(bridge, agent.tool);
+  if (agent.tool === "codex") {
     const file = join(dir, CODEX_FILE);
     assertProjectPath(dir, file);
-    const rest = stripBlock(readText(file), BEGIN, END, CODEX_FILE);
+    if (!existsSync(file)) throw new Error(`${CODEX_FILE} is missing Warren's managed server; restore it before adding another agent`);
+    const text = readText(file);
+    if (!text.includes(BEGIN)) throw new Error(`${CODEX_FILE} no longer has Warren's managed server; restore it before adding another agent`);
+    const rest = stripBlock(text, BEGIN, END, CODEX_FILE);
     if (/^\s*\[\s*mcp_servers\s*\.\s*["']?warren["']?\s*\]/m.test(rest))
-      throw new Error(`${CODEX_FILE} already has a Warren server not managed by warren-cli; remove it first`);
-    const block = [
-      BEGIN,
-      "[mcp_servers.warren]",
-      `command = ${tomlString(managedMcp.command)}`,
-      `args = ${JSON.stringify(managedMcp.args)}`,
-      `env = { "WARREN_CONFIG" = ${tomlString(FOLDER_FILE)} }`,
-      END,
-    ];
-    mutations.push({ file, text: `${rest}${rest && !rest.endsWith("\n") ? "\n" : ""}${block.join("\n")}\n` });
-  } else {
-    const mcpFile = join(dir, ".cursor/mcp.json");
-    assertProjectPath(dir, mcpFile);
-    const mcp = readJson(mcpFile);
-    const servers = mcpServers(mcp, mcpFile);
-    refuseCollision(servers, mcpFile);
-
-    const cliFile = join(dir, ".cursor/cli.json");
-    assertProjectPath(dir, cliFile);
-    const cli = readJson(cliFile);
-    const permissions = objectValue(cli.permissions, `${cliFile}: permissions`);
-    const allow = stringArray(permissions.allow, `${cliFile}: permissions.allow`);
-    const deny = stringArray(permissions.deny, `${cliFile}: permissions.deny`);
-    cursorPermissionAdded = !allow.includes("Mcp(warren:*)");
-
-    mutations.push(
-      jsonMutation(mcpFile, { ...mcp, mcpServers: { ...servers, warren: managedMcp } }),
-      jsonMutation(cliFile, {
-        ...cli,
-        permissions: {
-          ...permissions,
-          allow: cursorPermissionAdded ? [...allow, "Mcp(warren:*)"] : allow,
-          deny,
-        },
-      }),
-    );
+      throw new Error(`${CODEX_FILE} also has a Warren server outside warren-cli's managed block; remove it before adding another agent`);
+    mutations.push({ file, text: `${rest}${rest && !rest.endsWith("\n") ? "\n" : ""}${codexBlock(managedMcp).join("\n")}\n` });
+    return agent;
   }
 
-  const ignoreFile = join(dir, ".gitignore");
-  assertProjectPath(dir, ignoreFile);
-  mutations.push({ file: ignoreFile, text: withGitignoreEntry(readText(ignoreFile), FOLDER_FILE) });
-  const { bridge: _bridge, ...base } = wiring;
-  const agent: FolderAgent = {
-    ...base,
-    ...(wiring.tool === "claude" || wiring.tool === "cursor" ? { managedMcp } : {}),
-    ...(wiring.tool === "cursor" ? { cursorPermissionAdded } : {}),
-  };
-  const folderFile = join(dir, FOLDER_FILE);
-  assertProjectPath(dir, folderFile);
-  mutations.push({ file: folderFile, text: JSON.stringify(agent, null, 2) + "\n", mode: 0o600 });
-  applyMutations(mutations);
+  const file = join(dir, agent.tool === "claude" ? ".mcp.json" : ".cursor/mcp.json");
+  assertProjectPath(dir, file);
+  if (!existsSync(file)) throw new Error(`${file} is missing Warren's managed server; restore it before adding another agent`);
+  const config = readJson(file, false);
+  const servers = mcpServers(config, file);
+  if (!agent.managedMcp || JSON.stringify(servers.warren) !== JSON.stringify(agent.managedMcp))
+    throw new Error(`${file}'s Warren server changed after warren-cli added it; restore the managed entry before adding another agent`);
+  mutations.push(jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }));
+  return { ...agent, managedMcp };
 }
 
 /**
@@ -110,9 +156,26 @@ export function wireFolder(dir: string, wiring: Wiring) {
  * retry after remote success sees 401 and commits the already-valid local plan.
  */
 export function prepareUnwireFolder(dir: string, agent: FolderAgent): PreparedMutation {
-  const folderFile = join(dir, FOLDER_FILE);
-  assertProjectPath(dir, folderFile);
-  return prepareMutations([...buildUnwireMutations(dir, agent), { file: folderFile, remove: true }]);
+  const releaseLock = acquireFolderLock(dir);
+  try {
+    const folderFile = join(dir, FOLDER_FILE);
+    assertProjectPath(dir, folderFile);
+    const configured = readFolderAgents(dir) ?? [];
+    const current = configured.find((candidate) => candidate.tool === agent.tool);
+    if (!current || current.handle !== agent.handle || current.token !== agent.token || current.hub !== agent.hub)
+      throw new Error(`the ${agent.tool} agent changed while this command was starting; retry with its current identity`);
+    const remaining = configured.filter((candidate) => candidate.tool !== agent.tool);
+    const prepared = prepareMutations([
+      ...buildUnwireMutations(dir, agent),
+      remaining.length
+        ? { file: folderFile, text: JSON.stringify(folderConfig(remaining), null, 2) + "\n", mode: 0o600 }
+        : { file: folderFile, remove: true },
+    ]);
+    return lockedMutation(prepared, releaseLock);
+  } catch (error) {
+    releaseLock();
+    throw error;
+  }
 }
 
 export function unwireFolder(dir: string, agent: FolderAgent) {
@@ -120,9 +183,91 @@ export function unwireFolder(dir: string, agent: FolderAgent) {
 }
 
 export function writeFolder(dir: string, agent: FolderAgent) {
-  const file = join(dir, FOLDER_FILE);
+  const releaseLock = acquireFolderLock(dir);
+  try {
+    const file = join(dir, FOLDER_FILE);
+    assertProjectPath(dir, file);
+    const configured = readFolderAgents(dir) ?? [];
+    const index = configured.findIndex((candidate) => candidate.tool === agent.tool);
+    if (index === -1 || configured[index].handle !== agent.handle || configured[index].token !== agent.token || configured[index].hub !== agent.hub)
+      throw new Error(`the ${agent.tool} agent changed while this command was starting; retry with its current identity`);
+    configured[index] = agent;
+    applyMutations([{ file, text: JSON.stringify(folderConfig(configured), null, 2) + "\n", mode: 0o600 }]);
+  } finally {
+    releaseLock();
+  }
+}
+
+function lockedMutation(prepared: PreparedMutation, releaseLock: () => void): PreparedMutation {
+  let finished = false;
+  const finish = (action: () => void) => {
+    if (finished) return action();
+    try {
+      return action();
+    } finally {
+      finished = true;
+      releaseLock();
+    }
+  };
+  return { commit: () => finish(() => prepared.commit()), cancel: () => finish(() => prepared.cancel()) };
+}
+
+function acquireFolderLock(dir: string): () => void {
+  const file = join(dir, LOCK_FILE);
   assertProjectPath(dir, file);
-  applyMutations([{ file, text: JSON.stringify(agent, null, 2) + "\n", mode: 0o600 }]);
+  const owner = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let descriptor: number | undefined;
+    let created = false;
+    try {
+      descriptor = openSync(file, "wx", 0o600);
+      created = true;
+      writeFileSync(descriptor, owner);
+      closeSync(descriptor);
+      descriptor = undefined;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          if (readFileSync(file, "utf8") === owner) rmSync(file, { force: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      };
+    } catch (error) {
+      if (descriptor !== undefined) closeSync(descriptor);
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        if (created) rmSync(file, { force: true });
+        throw error;
+      }
+      try {
+        if (lstatSync(file).isSymbolicLink()) throw new Error(`${file} is a symbolic link; Warren refuses to use it as a lock`);
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw statError;
+      }
+      let pid: number | undefined;
+      try {
+        pid = (JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown }).pid as number | undefined;
+      } catch {}
+      if (Number.isInteger(pid) && pid! > 0 && !processIsAlive(pid!))
+        throw new Error(`${LOCK_FILE} was left by stopped process ${pid}; remove that lock file and retry`);
+      if (!Number.isInteger(pid) || pid! <= 0)
+        throw new Error(`${LOCK_FILE} is incomplete or stale; if no Warren command is running, remove that lock file and retry`);
+      throw new Error(`another Warren command is updating this folder (${LOCK_FILE} is locked)`);
+    }
+  }
+  throw new Error(`cannot acquire ${LOCK_FILE}`);
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }
 
 function buildUnwireMutations(dir: string, agent: FolderAgent): Mutation[] {
@@ -216,13 +361,15 @@ function jsonMutation(file: string, value: Record<string, unknown>): Mutation {
   return { file, text: JSON.stringify(value, null, 2) + "\n" };
 }
 
-function withGitignoreEntry(text: string, entry: string): string {
+function withGitignoreEntries(text: string, entries: string[]): string {
   const rules = text
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"));
-  if ([entry, `/${entry}`].includes(rules.at(-1) ?? "")) return text;
-  return `${text}${text && !text.endsWith("\n") ? "\n" : ""}# warren agent credential\n/${entry}\n`;
+  const wanted = entries.map((entry) => `/${entry}`);
+  const suffix = rules.slice(-wanted.length).map((rule) => (rule.startsWith("/") ? rule : `/${rule}`));
+  if (JSON.stringify(suffix) === JSON.stringify(wanted)) return text;
+  return `${text}${text && !text.endsWith("\n") ? "\n" : ""}# warren agent credentials and lock\n${wanted.join("\n")}\n`;
 }
 
 function assertCredentialUntracked(dir: string) {

@@ -25,34 +25,45 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
   warren tools                       list the live hub's MCP tools as JSON
   warren call <tool> --input <json>  call any MCP tool; output is JSON/text
   warren wake [--session <id>]       wake Codex/Cursor on mentions
-  warren status                      inspect this folder's agent
-  warren leave                       remove the agent and local wiring
+  warren status                      inspect this folder's agents
+  warren leave                       remove one agent and its local wiring
   warren bridge [--config <file>]    run the local MCP/push bridge
 
 Commands use this folder's .warren.json. For headless use, set WARREN_HUB and
-WARREN_TOKEN (or pass --hub and --token). Credentials never appear in output.`;
+WARREN_TOKEN (or pass --hub and --token). A folder may contain Claude, Codex
+and Cursor together; for shell commands choose the identity with --as <client>.
+MCP wiring selects its own identity automatically. Credentials never appear in output.`;
 
 const { version } = createRequire(import.meta.url)("../package.json") as { version: string };
-const { positionals, values } = parseArgs({
-  allowPositionals: true,
-  options: {
-    hub: { type: "string" },
-    token: { type: "string" },
-    session: { type: "string" },
-    config: { type: "string" },
-    input: { type: "string" },
-    limit: { type: "string" },
-    kind: { type: "string" },
-    text: { type: "string" },
-    context: { type: "string" },
-    task: { type: "string" },
-    file: { type: "string", multiple: true },
-    since: { type: "string" },
-    all: { type: "boolean" },
-    help: { type: "boolean", short: "h" },
-    version: { type: "boolean", short: "v" },
-  },
-});
+const parsed = (() => {
+  try {
+    return parseArgs({
+      allowPositionals: true,
+      options: {
+        hub: { type: "string" },
+        token: { type: "string" },
+        session: { type: "string" },
+        config: { type: "string" },
+        input: { type: "string" },
+        limit: { type: "string" },
+        kind: { type: "string" },
+        text: { type: "string" },
+        context: { type: "string" },
+        task: { type: "string" },
+        file: { type: "string", multiple: true },
+        since: { type: "string" },
+        all: { type: "boolean" },
+        as: { type: "string" },
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "v" },
+      },
+    });
+  } catch (error) {
+    console.error(`warren: ${(error as Error).message}`);
+    process.exit(1);
+  }
+})();
+const { positionals, values } = parsed;
 const [command, ...arguments_] = positionals;
 const argument = arguments_[0];
 const dir = process.cwd();
@@ -62,7 +73,10 @@ const required = (value: string | undefined, label: string) => {
   return value;
 };
 const joined = (values_: string[], explicit: string | undefined, label: string) => required(explicit ?? values_.join(" ").trim(), label);
-const auth = { hub: values.hub, token: values.token };
+const noArguments = (name: string) => {
+  if (arguments_.length) throw new Error(`${name} takes no positional arguments${name === "leave" ? "; use --as <client-or-handle>" : ""}`);
+};
+const auth = { hub: values.hub, token: values.token, agent: values.as };
 
 async function promptToken(): Promise<string> {
   if (!process.stdin.isTTY || !process.stdout.isTTY)
@@ -95,17 +109,33 @@ try {
       token: values.token,
       session: values.session,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
-      wakeCommand: `npx -y warren-cli@${version} wake`,
+      wakeCommand: `npx -y warren-cli@${version} wake --as ${argument}`,
       promptToken,
     });
-  else if (command === "wake") await wake(dir, values.session);
-  else if (command === "status") await status(dir);
-  else if (command === "leave") await leave(dir);
-  else if (command === "bridge") await bridge(dir, values.config);
-  else if (command === "tools") await listHubTools(dir, version, auth);
+  else if (command === "wake") {
+    noArguments("wake");
+    await wake(dir, values.session, values.as);
+  } else if (command === "status") {
+    noArguments("status");
+    await status(dir, values.as);
+  } else if (command === "leave") {
+    noArguments("leave");
+    await leave(dir, values.as);
+  } else if (command === "bridge") {
+    noArguments("bridge");
+    await bridge(dir, values.config, values.as);
+  } else if (command === "tools") {
+    noArguments("tools");
+    await listHubTools(dir, version, auth);
+  }
   else if (command === "call") await callHubTool(dir, version, required(argument, "tool name"), objectInput(values.input), auth);
-  else if (command === "whoami") await callHubTool(dir, version, "whoami", {}, auth);
-  else if (["rooms", "list-rooms", "list_rooms"].includes(command)) await callHubTool(dir, version, "list_rooms", {}, auth);
+  else if (command === "whoami") {
+    noArguments("whoami");
+    await callHubTool(dir, version, "whoami", {}, auth);
+  } else if (["rooms", "list-rooms", "list_rooms"].includes(command)) {
+    noArguments(command);
+    await callHubTool(dir, version, "list_rooms", {}, auth);
+  }
   else if (["read", "read-room", "read_room"].includes(command)) {
     const limit = positiveLimit(values.limit);
     await callHubTool(dir, version, "read_room", { room: required(argument, "room"), ...(limit ? { limit } : {}) }, auth);
@@ -144,8 +174,10 @@ try {
       auth,
     );
   else if (command === "release") await callHubTool(dir, version, "release", { claim: required(argument, "claim id") }, auth);
-  else if (command === "inbox")
+  else if (command === "inbox") {
+    noArguments("inbox");
     await callHubTool(dir, version, "inbox", { ...(values.since ? { since: values.since } : {}), all: values.all ?? false }, auth);
+  }
   else throw new Error(`unknown command "${command}"\n\n${help}`);
 } catch (error) {
   console.error(`warren: ${(error as Error).message}`);

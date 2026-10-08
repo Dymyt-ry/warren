@@ -10,13 +10,14 @@ interface Credentials {
 interface CredentialOverrides {
   hub?: string;
   token?: string;
+  agent?: string;
 }
 
 function credentials(dir: string, overrides: CredentialOverrides): Credentials {
   const suppliedHub = overrides.hub ?? process.env.WARREN_HUB;
   const suppliedToken = overrides.token ?? process.env.WARREN_TOKEN;
   // Fully headless calls must not inspect a project-controlled credential file.
-  const folder = suppliedHub && suppliedToken ? undefined : readFolder(dir);
+  const folder = suppliedHub && suppliedToken ? undefined : readFolder(dir, undefined, overrides.agent);
   const hub = suppliedHub ?? folder?.hub;
   const token = suppliedToken ?? folder?.token;
   if (!hub || !token)

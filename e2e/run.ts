@@ -207,16 +207,26 @@ try {
   cleanup.push(() => rmSync(cliDir, { recursive: true, force: true }));
   writeFileSync(
     join(cliDir, ".warren.json"),
-    JSON.stringify({ tool: "codex", hub: HUB, token: CODEX, handle: "codex-ben" }),
+    JSON.stringify({
+      version: 2,
+      agents: {
+        codex: { tool: "codex", hub: HUB, token: CODEX, handle: "codex-ben" },
+        claude: { tool: "claude", hub: HUB, token: CLAUDE, handle: "claude-anna" },
+      },
+    }),
     { mode: 0o600 },
   );
   const runCli = (...args: string[]) =>
     spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, ...args], { cwd: cliDir, encoding: "utf8", timeout: 10_000 });
-  const cliWho = runCli("whoami");
-  const cliRooms = runCli("rooms");
-  const cliPost = runCli("post", "api-contract", "Message sent by the agent CLI", "--kind", "note");
-  const cliGeneric = runCli("call", "read_room", "--input", JSON.stringify({ room: "api-contract", limit: 5 }));
+  const cliAmbiguous = runCli("whoami");
+  const cliWho = runCli("whoami", "--as", "codex");
+  const cliClaude = runCli("whoami", "--as", "claude");
+  const cliRooms = runCli("rooms", "--as", "codex");
+  const cliPost = runCli("post", "api-contract", "Message sent by the agent CLI", "--kind", "note", "--as", "codex");
+  const cliGeneric = runCli("call", "read_room", "--input", JSON.stringify({ room: "api-contract", limit: 5 }), "--as", "codex");
+  check(cliAmbiguous.status !== 0 && cliAmbiguous.stderr.includes("multiple Warren agents"), "multi-agent CLI fails closed without an identity");
   check(cliWho.status === 0 && JSON.parse(cliWho.stdout).handle === "codex-ben", "agent CLI calls whoami through MCP");
+  check(cliClaude.status === 0 && JSON.parse(cliClaude.stdout).handle === "claude-anna", "agent CLI selects another identity with --as");
   check(
     cliRooms.status === 0 && JSON.parse(cliRooms.stdout).map((room: { id: string }) => room.id).join(",") === "api-contract",
     "agent CLI gets the same scoped rooms as MCP",
@@ -226,6 +236,22 @@ try {
     cliGeneric.status === 0 && JSON.parse(cliGeneric.stdout).messages.some((message: { text: string }) => message.text === "Message sent by the agent CLI"),
     "agent CLI generic call accepts structured JSON and reads its post",
   );
+  const configuredBridge = async (agent: "claude" | "codex") => {
+    const client = new Client({ name: `multi-folder-${agent}`, version: "0" });
+    await client.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [TSX_CLI, WARREN_CLI, "bridge"],
+        cwd: cliDir,
+        env: { ...process.env, WARREN_CONFIG: ".warren.json", WARREN_AGENT: agent } as Record<string, string>,
+      }),
+    );
+    const identity = toolJson(await client.callTool({ name: "whoami", arguments: {} })).handle;
+    await client.close();
+    return identity;
+  };
+  check((await configuredBridge("codex")) === "codex-ben", "Codex MCP wiring auto-selects its identity in a shared folder");
+  check((await configuredBridge("claude")) === "claude-anna", "Claude MCP wiring auto-selects its identity in a shared folder");
   const headlessDir = mkdtempSync(join(tmpdir(), "warren-agent-cli-headless-e2e-"));
   cleanup.push(() => rmSync(headlessDir, { recursive: true, force: true }));
   writeFileSync(join(headlessDir, ".warren.json"), "project-controlled invalid JSON");
@@ -369,7 +395,7 @@ try {
       reviewerMe.org === "firmab" &&
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
-      reviewer.setup.cli.codex === `npx -y warren-cli@0.5.0 add codex --hub "${HUB}"` &&
+      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.0 add codex --hub "${HUB}"` &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
     "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
   );

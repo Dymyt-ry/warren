@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { applyAgentEnv, hubOrigin, readFolder, type FolderAgent } from "./config.js";
+import { applyAgentEnv, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
 import { prepareUnwireFolder, TOOLS, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
 
 interface Member {
@@ -32,7 +32,8 @@ export async function add(
   options: { hub?: string; token?: string; session?: string; bridge: Wiring["bridge"]; wakeCommand: string; promptToken?: () => Promise<string> },
 ) {
   const tool = asTool(toolValue);
-  if (readFolder(dir)) throw new Error("this folder already has a Warren agent; run `warren leave` first");
+  if ((readFolderAgents(dir) ?? []).some((agent) => agent.tool === tool))
+    throw new Error(`this folder already has a ${tool} agent; run \`warren leave --as ${tool}\` first`);
   const hub = hubOrigin(options.hub ?? process.env.WARREN_HUB ?? "");
   const token = options.token ?? process.env.WARREN_TOKEN ?? (await options.promptToken?.());
   if (!token) throw new Error("pass --token <agent-token> or set WARREN_TOKEN");
@@ -54,8 +55,8 @@ export async function add(
   else console.log(`For always-on mention delivery, keep this running in a second terminal:\n  ${options.wakeCommand}`);
 }
 
-export async function leave(dir: string) {
-  const agent = readFolder(dir);
+export async function leave(dir: string, selector?: string) {
+  const agent = readFolder(dir, undefined, selector);
   if (!agent) throw new Error("this folder has no Warren agent");
   const local = prepareUnwireFolder(dir, agent);
   try {
@@ -75,14 +76,17 @@ export async function leave(dir: string) {
   console.log(`@${agent.handle} left Warren and this folder was unwired.`);
 }
 
-export async function status(dir: string) {
-  const agent = readFolder(dir);
-  if (!agent) return void console.log("This folder has no Warren agent. Run `warren add <claude|codex|cursor>`. ");
-  const remote = await hubCall<Member>(agent.hub, "/api/me", agent.token).then(
-    (member) => `${member.online ? "online" : "offline"} at ${agent.hub}`,
-    (error: Error) => error.message,
-  );
-  console.log(`@${agent.handle} (${agent.tool}): ${remote}`);
+export async function status(dir: string, selector?: string) {
+  const configured = readFolderAgents(dir);
+  if (!configured) return void console.log("This folder has no Warren agent. Run `warren add <claude|codex|cursor>`. ");
+  const agents = selector ? [selectFolderAgent(configured, selector)] : configured;
+  for (const agent of agents) {
+    const remote = await hubCall<Member>(agent.hub, "/api/me", agent.token).then(
+      (member) => `${member.online ? "online" : "offline"} at ${agent.hub}`,
+      (error: Error) => error.message,
+    );
+    console.log(`@${agent.handle} (${agent.tool}): ${remote}`);
+  }
 }
 
 async function startBridge(agent: FolderAgent) {
@@ -91,14 +95,22 @@ async function startBridge(agent: FolderAgent) {
   await runBridge();
 }
 
-export async function bridge(dir: string, config?: string) {
-  const agent = readFolder(dir, config);
+export async function bridge(dir: string, config?: string, selector?: string) {
+  const agent = readFolder(dir, config, selector ?? process.env.WARREN_AGENT);
   if (!agent) throw new Error(`no Warren agent config found in ${dir}`);
   await startBridge(agent);
 }
 
-export async function wake(dir: string, session?: string) {
-  const agent = readFolder(dir);
+export async function wake(dir: string, session?: string, selector?: string) {
+  const configured = readFolderAgents(dir);
+  const wakeable = configured?.filter((agent) => agent.tool !== "claude");
+  const agent = configured
+    ? selector
+      ? selectFolderAgent(configured, selector)
+      : wakeable?.length === 1
+        ? wakeable[0]
+        : selectFolderAgent(configured)
+    : undefined;
   if (!agent) throw new Error("this folder has no Warren agent");
   if (agent.tool === "claude") throw new Error("Claude Code receives channel pushes; it does not need `warren wake`");
   let nextSession = session ?? agent.session;
