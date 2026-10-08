@@ -18,6 +18,22 @@ export type Role = "owner" | "admin" | "member";
 export const MESSAGE_KINDS = ["note", "contract_change", "question", "done"] as const;
 export type MessageKind = (typeof MESSAGE_KINDS)[number];
 
+export interface MessageTarget {
+  agent: string;
+  sessionName?: string;
+}
+
+export interface MessageMetadata {
+  from: {
+    agent: string;
+    sessionId?: string;
+    sessionName?: string;
+    /** Immutable label kept even if the slot is later renamed or rebound. */
+    sessionNameSnapshot?: string;
+  };
+  to: MessageTarget[];
+}
+
 export interface Message {
   id: string;
   roomId: string;
@@ -28,9 +44,25 @@ export interface Message {
   text: string;
   mentions: string[]; // handles that get this pushed; "@room" expands to everyone in the room
   mentionsRoom: boolean;
+  metadata: MessageMetadata;
   safety: Safety;
   at: string;
   delivered?: string[]; // for people: agents that got it pushed or read it from their inbox
+}
+
+export interface AgentSession {
+  id: string;
+  handle: string;
+  name: string;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+}
+
+export interface PublicAgentSession {
+  name: string;
+  online: boolean;
+  lastSeenAt: string;
 }
 
 /** "I'm on this": a task, optionally with the files the holder is about to change. */
@@ -103,7 +135,7 @@ export interface Prefs {
 export const DEFAULT_PREFS: Prefs = { language: "en", theme: "system", holdAllForeign: false, emailOnHold: true };
 
 /** A member as other members see it: no email or settings, with presence. */
-export type PublicMember = Omit<Member, "email" | "prefs"> & { online: boolean };
+export type PublicMember = Omit<Member, "email" | "prefs"> & { online: boolean; sessions?: PublicAgentSession[] };
 
 export const HISTORY = 200; // messages a room carries in API responses
 
@@ -113,7 +145,11 @@ export const HISTORY = 200; // messages a room carries in API responses
 export const events = new EventEmitter();
 events.setMaxListeners(0);
 
-export const publicMember = ({ email: _e, prefs: _p, ...m }: Member): PublicMember => ({ ...m, online: isOnline(m.handle) });
+export const publicMember = ({ email: _e, prefs: _p, ...m }: Member): PublicMember => ({
+  ...m,
+  online: isOnline(m.handle),
+  ...(m.kind === "agent" ? { sessions: publicAgentSessions(m.handle) } : {}),
+});
 
 function parsePrefs(raw: unknown): Prefs {
   try {
@@ -599,6 +635,7 @@ export function disableMember(handle: string, actor: string): Member {
     for (const x of [m, ...agents]) {
       db.prepare("UPDATE members SET disabled = 1, password_hash = NULL, token_hash = NULL WHERE handle = ?").run(x.handle);
       db.prepare("DELETE FROM sessions WHERE handle = ?").run(x.handle);
+      db.prepare("DELETE FROM agent_sessions WHERE handle = ?").run(x.handle);
     }
     db.prepare("DELETE FROM claims WHERE by_handle IN (SELECT value FROM json_each(?))").run(JSON.stringify([m, ...agents].map((x) => x.handle)));
   });
@@ -628,7 +665,10 @@ export function reconcileAgents(handle: string, actor: string) {
 /** A fresh bearer token for a member; the old one stops working. Returned once, stored hashed. */
 export function rotateToken(handle: string): string {
   const token = newSecret("wr");
-  db.prepare("UPDATE members SET token_hash = ? WHERE handle = ?").run(sha256(token), handle);
+  tx(() => {
+    db.prepare("UPDATE members SET token_hash = ? WHERE handle = ?").run(sha256(token), handle);
+    db.prepare("UPDATE agent_sessions SET expires_at = ? WHERE handle = ?").run(new Date().toISOString(), handle);
+  });
   kick(handle);
   return token;
 }
@@ -672,19 +712,174 @@ export function contactsOf(m: Member): Member[] {
   return allMembers().filter((other) => other.handle === m.handle || mine.some((r) => canSee(other, r.id)));
 }
 
-// Presence: a member is online while they hold an SSE connection (bridge or dashboard).
+// Presence: people are online while they hold an SSE connection. Agents are
+// online while at least one named Warren session has a live lease.
 const connections = new Map<string, number>();
+export const AGENT_SESSION_LEASE_MS = 30_000;
+
+const toAgentSession = (r: Row): AgentSession => ({
+  id: r.id as string,
+  handle: r.handle as string,
+  name: r.name as string,
+  createdAt: r.created_at as string,
+  lastSeenAt: r.last_seen_at as string,
+  expiresAt: r.expires_at as string,
+});
+
+function validSessionName(value: unknown): string {
+  const name = String(value ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name))
+    throw new Error("session name must use 1-64 lowercase letters, numbers, _ or -");
+  if (BROADCAST.has(name)) throw new Error(`session name "${name}" is reserved`);
+  return name;
+}
+
+export function activeAgentSessions(handle: string, now = new Date().toISOString()): AgentSession[] {
+  return (db.prepare("SELECT * FROM agent_sessions WHERE handle = ? AND expires_at > ? ORDER BY name, created_at DESC").all(handle, now) as Row[]).map(
+    toAgentSession,
+  );
+}
+
+/** Latest known incarnation of every slot, including offline slots for the UI. */
+export function publicAgentSessions(handle: string): PublicAgentSession[] {
+  const now = new Date().toISOString();
+  const rows = db
+    .prepare(
+      `SELECT s.* FROM agent_sessions s
+       WHERE s.handle = ? AND s.created_at = (
+         SELECT max(x.created_at) FROM agent_sessions x WHERE x.handle = s.handle AND x.name = s.name
+       ) ORDER BY s.name`,
+    )
+    .all(handle) as Row[];
+  return rows.map((r) => ({ name: r.name as string, online: (r.expires_at as string) > now, lastSeenAt: r.last_seen_at as string }));
+}
+
+export function createAgentSession(m: Member, value: unknown): AgentSession {
+  if (m.kind !== "agent") throw new Error("only an agent can open an agent session");
+  const name = validSessionName(value);
+  const now = new Date();
+  const at = now.toISOString();
+  const session: AgentSession = {
+    id: `wsess_${randomUUID().replaceAll("-", "")}`,
+    handle: m.handle,
+    name,
+    createdAt: at,
+    lastSeenAt: at,
+    expiresAt: new Date(now.getTime() + AGENT_SESSION_LEASE_MS).toISOString(),
+  };
+  const wasOnline = isOnline(m.handle);
+  tx(() => {
+    // A restart atomically rebinds the human-readable slot to a new opaque id.
+    db.prepare("UPDATE agent_sessions SET expires_at = ? WHERE handle = ? AND name = ? AND expires_at > ?").run(at, m.handle, name, at);
+    db.prepare("INSERT INTO agent_sessions (id, handle, name, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)").run(
+      session.id,
+      session.handle,
+      session.name,
+      session.createdAt,
+      session.lastSeenAt,
+      session.expiresAt,
+    );
+  });
+  events.emit("agent_session", { handle: m.handle, sessions: publicAgentSessions(m.handle) });
+  events.emit("member", publicMember(m));
+  if (!wasOnline) events.emit("presence", { handle: m.handle, online: true });
+  return session;
+}
+
+/** Reconnect the same live process after its transport was away past the lease. */
+export function resumeAgentSession(m: Member, value: unknown, id: unknown): AgentSession {
+  if (m.kind !== "agent") throw new Error("only an agent can resume an agent session");
+  const name = validSessionName(value);
+  const existing = agentSession(String(id ?? ""), m.handle, true);
+  if (!existing || existing.name !== name) throw new Error("no such Warren session to resume");
+  const latest = db.prepare("SELECT id FROM agent_sessions WHERE handle = ? AND name = ? ORDER BY created_at DESC LIMIT 1").get(m.handle, name) as
+    | { id: string }
+    | undefined;
+  if (latest?.id !== existing.id) throw new Error("that slot has already been rebound to a newer Warren session");
+  const now = new Date();
+  const at = now.toISOString();
+  const expiresAt = new Date(now.getTime() + AGENT_SESSION_LEASE_MS).toISOString();
+  const wasOnline = isOnline(m.handle);
+  tx(() => {
+    db.prepare("UPDATE agent_sessions SET expires_at = ? WHERE handle = ? AND name = ? AND id != ? AND expires_at > ?").run(at, m.handle, name, existing.id, at);
+    db.prepare("UPDATE agent_sessions SET last_seen_at = ?, expires_at = ? WHERE id = ? AND handle = ?").run(at, expiresAt, existing.id, m.handle);
+  });
+  events.emit("agent_session", { handle: m.handle, sessions: publicAgentSessions(m.handle) });
+  events.emit("member", publicMember(m));
+  if (!wasOnline) events.emit("presence", { handle: m.handle, online: true });
+  return { ...existing, lastSeenAt: at, expiresAt };
+}
+
+export function agentSession(id: string | undefined, handle?: string, includeExpired = false): AgentSession | undefined {
+  if (!id) return undefined;
+  const row = db.prepare(`SELECT * FROM agent_sessions WHERE id = ? ${handle ? "AND handle = ?" : ""}`).get(...([id, handle].filter(Boolean) as string[])) as
+    | Row
+    | undefined;
+  if (!row || (!includeExpired && (row.expires_at as string) <= new Date().toISOString())) return undefined;
+  return toAgentSession(row);
+}
+
+export function renewAgentSession(id: string, handle: string): AgentSession | undefined {
+  const current = agentSession(id, handle);
+  if (!current) return undefined;
+  const now = new Date();
+  const at = now.toISOString();
+  const expiresAt = new Date(now.getTime() + AGENT_SESSION_LEASE_MS).toISOString();
+  db.prepare("UPDATE agent_sessions SET last_seen_at = ?, expires_at = ? WHERE id = ? AND handle = ?").run(at, expiresAt, id, handle);
+  return { ...current, lastSeenAt: at, expiresAt };
+}
+
+export function endAgentSession(id: string, handle: string): boolean {
+  const wasOnline = isOnline(handle);
+  const now = new Date().toISOString();
+  const ended = Number(
+    db.prepare("UPDATE agent_sessions SET expires_at = ?, last_seen_at = ? WHERE id = ? AND handle = ? AND expires_at > ?").run(
+      now,
+      now,
+      id,
+      handle,
+      now,
+    ).changes,
+  );
+  if (ended) {
+    events.emit("agent_session", { handle, sessions: publicAgentSessions(handle) });
+    const member = members.get(handle);
+    if (member) events.emit("member", publicMember(member));
+    if (wasOnline && !isOnline(handle)) events.emit("presence", { handle, online: false });
+  }
+  return ended > 0;
+}
+
+/** Expire leases and publish the resulting presence/slot changes. */
+export function sweepAgentSessions(): number {
+  const now = new Date().toISOString();
+  const handles = (db.prepare("SELECT DISTINCT handle FROM agent_sessions WHERE expires_at <= ? AND last_seen_at != expires_at").all(now) as { handle: string }[]).map(
+    (r) => r.handle,
+  );
+  // Mark already-reported expirations without deleting history used by the UI.
+  const changed = Number(db.prepare("UPDATE agent_sessions SET last_seen_at = expires_at WHERE expires_at <= ? AND last_seen_at != expires_at").run(now).changes);
+  for (const handle of handles) {
+    events.emit("agent_session", { handle, sessions: publicAgentSessions(handle) });
+    const member = members.get(handle);
+    if (member) events.emit("member", publicMember(member));
+    if (!isOnline(handle)) events.emit("presence", { handle, online: false });
+  }
+  return changed;
+}
 
 export function isOnline(handle: string): boolean {
-  return (connections.get(handle) ?? 0) > 0;
+  const m = members.get(handle);
+  return (connections.get(handle) ?? 0) > 0 || (m?.kind === "agent" && activeAgentSessions(handle).length > 0);
 }
 
 /** Call on SSE connect (+1) and disconnect (-1); emits "presence" when online flips. */
 export function trackConnection(m: Member, delta: 1 | -1) {
-  const before = connections.get(m.handle) ?? 0;
-  const after = Math.max(0, before + delta);
+  const wasOnline = isOnline(m.handle);
+  const count = connections.get(m.handle) ?? 0;
+  const after = Math.max(0, count + delta);
   connections.set(m.handle, after);
-  if ((before > 0) !== (after > 0)) events.emit("presence", { handle: m.handle, online: after > 0 });
+  const online = isOnline(m.handle);
+  if (wasOnline !== online) events.emit("presence", { handle: m.handle, online });
 }
 
 /** Tells open streams of `handle` to close: their credentials changed. */
@@ -894,6 +1089,14 @@ export function exportFor(handle: string) {
           ORDER BY at`,
       )
       .all(list, list) as Row[];
+    const sessionDeliveries = db
+      .prepare(
+        `SELECT message_id, handle, session_name, at FROM session_deliveries
+          WHERE handle IN (SELECT value FROM json_each(?))
+             OR message_id IN (SELECT id FROM messages WHERE from_handle IN (SELECT value FROM json_each(?)))
+          ORDER BY at`,
+      )
+      .all(list, list) as Row[];
     const deliveredIds = new Set(deliveries.map((r) => r.message_id as string));
     const mentionsMine = (value: unknown): boolean => {
       if (typeof value === "string") return mine.has(value);
@@ -902,7 +1105,14 @@ export function exportFor(handle: string) {
     };
     const messages = (db.prepare("SELECT * FROM messages ORDER BY seq").all() as Row[])
       .map(toMessage)
-      .filter((msg) => mine.has(msg.from) || msg.mentions.some((h) => mine.has(h)) || deliveredIds.has(msg.id) || mentionsMine(msg.safety));
+      .filter(
+        (msg) =>
+          mine.has(msg.from) ||
+          msg.mentions.some((h) => mine.has(h)) ||
+          msg.metadata.to.some((target) => mine.has(target.agent)) ||
+          deliveredIds.has(msg.id) ||
+          mentionsMine(msg.safety),
+      );
     const email = m.email;
     const links = db
       .prepare(
@@ -925,6 +1135,10 @@ export function exportFor(handle: string) {
       agents: agents.map(publicMember),
       messages,
       deliveries,
+      sessionDeliveries,
+      agentSessions: db
+        .prepare("SELECT id, handle, name, created_at, last_seen_at, expires_at FROM agent_sessions WHERE handle IN (SELECT value FROM json_each(?))")
+        .all(list),
       claims: allRooms().flatMap((r) => r.claims.filter((c) => mine.has(c.by))),
       roomsCreated: allRooms().filter((r) => mine.has(r.createdBy ?? "")),
       audit: audits,
@@ -983,6 +1197,8 @@ export function eraseMember(handle: string, deleteMessages: boolean, actor: stri
     db.prepare("DELETE FROM approver_keys WHERE handle IN (SELECT value FROM json_each(?))").run(list);
     db.prepare("DELETE FROM claims WHERE by_handle IN (SELECT value FROM json_each(?))").run(list);
     db.prepare("DELETE FROM deliveries WHERE handle IN (SELECT value FROM json_each(?))").run(list);
+    db.prepare("DELETE FROM session_deliveries WHERE handle IN (SELECT value FROM json_each(?))").run(list);
+    db.prepare("DELETE FROM agent_sessions WHERE handle IN (SELECT value FROM json_each(?))").run(list);
     db.prepare(
       `DELETE FROM links
         WHERE handle IN (SELECT value FROM json_each(?))
@@ -1003,6 +1219,8 @@ export function eraseMember(handle: string, deleteMessages: boolean, actor: stri
       if (from !== msg.from) changed = true;
       const mentions = msg.mentions.map((h) => aliases.get(h) ?? h);
       if (mentions.some((h, i) => h !== msg.mentions[i])) changed = true;
+      const targets = msg.metadata.to.map((target) => ({ ...target, agent: aliases.get(target.agent) ?? target.agent }));
+      if (targets.some((target, i) => target.agent !== msg.metadata.to[i].agent)) changed = true;
       const text = replaceRefs(msg.text);
       if (text !== msg.text) changed = true;
       const safety: Safety = structuredClone(msg.safety);
@@ -1038,12 +1256,17 @@ export function eraseMember(handle: string, deleteMessages: boolean, actor: stri
       if (!safety.approvals && changed) safety.status = settle(safety);
       if (changed) {
         touchedRooms.add(msg.roomId);
-        db.prepare("UPDATE messages SET from_handle = ?, org = ?, text = ?, mentions = ?, safety = ? WHERE id = ?").run(
+        db.prepare(
+          "UPDATE messages SET from_handle = ?, org = ?, text = ?, mentions = ?, targets = ?, safety = ?, from_session_id = ?, session_name_snapshot = ? WHERE id = ?",
+        ).run(
           from,
           aliases.has(msg.from) ? "former" : msg.org,
           text,
           JSON.stringify(mentions),
+          JSON.stringify(targets),
           JSON.stringify(safety),
+          aliases.has(msg.from) ? null : msg.metadata.from.sessionId ?? null,
+          aliases.has(msg.from) ? null : msg.metadata.from.sessionNameSnapshot ?? null,
           msg.id,
         );
       }
@@ -1237,26 +1460,35 @@ export function deleteLink(id: string) {
 
 // --- messages ------------------------------------------------------------------
 
-// @handle not preceded by a word char (emails) and not followed by "/" or "."+word
-// (npm scopes like @anna/pkg, domains). Code spans and blocks are skipped.
-const MENTION = /(^|[^\w@.\/-])@([a-z0-9][a-z0-9_-]*)(?![\w\/-]|\.\w)/gi;
+// @handle and @handle/slot, not preceded by a word character (emails).
+// Code spans and blocks are skipped. A slash is considered a slot only when
+// the handle belongs to a member of the room.
+const MENTION = /(^|[^\w@.\/-])@([a-z0-9][a-z0-9_-]*)(?:\/([a-z0-9][a-z0-9_-]*))?(?![\w-]|\.\w)/gi;
 const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
 const BROADCAST = new Set(["room", "here", "all"]);
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
 
 /** Handles mentioned in `text` that are members of the room, plus whether @room was used. */
-export function parseMentions(text: string, roomId: string): { mentions: string[]; mentionsRoom: boolean } {
+export function parseMentions(text: string, roomId: string): { mentions: string[]; mentionsRoom: boolean; targets: MessageTarget[] } {
   const found = new Set<string>();
+  const targets = new Map<string, MessageTarget>();
   let mentionsRoom = false;
-  for (const [, , raw] of text.replace(CODE, " ").matchAll(MENTION)) {
+  for (const [, , raw, rawSession] of text.replace(CODE, " ").matchAll(MENTION)) {
     const handle = raw.toLowerCase();
-    if (BROADCAST.has(handle)) mentionsRoom = true;
+    if (BROADCAST.has(handle) && !rawSession) mentionsRoom = true;
     else {
       const m = members.get(handle);
-      if (m && canSee(m, roomId)) found.add(handle);
+      if (m && canSee(m, roomId)) {
+        const sessionName = rawSession?.toLowerCase();
+        // Preserve npm scopes and path-like prose: slash syntax is an address
+        // only for a slot the hub has actually seen for this agent.
+        if (sessionName && (m.kind !== "agent" || !publicAgentSessions(m.handle).some((session) => session.name === sessionName))) continue;
+        found.add(handle);
+        targets.set(`${handle}\0${sessionName ?? ""}`, { agent: handle, ...(sessionName ? { sessionName } : {}) });
+      }
     }
   }
-  return { mentions: [...found], mentionsRoom };
+  return { mentions: [...found], mentionsRoom, targets: [...targets.values()] };
 }
 
 const toMessage = (r: Row): Message => ({
@@ -1269,6 +1501,16 @@ const toMessage = (r: Row): Message => ({
   text: r.text as string,
   mentions: JSON.parse(r.mentions as string),
   mentionsRoom: !!r.mentions_room,
+  metadata: {
+    from: {
+      agent: r.from_handle as string,
+      ...(r.from_session_id ? { sessionId: r.from_session_id as string } : {}),
+      ...(r.session_name_snapshot
+        ? { sessionName: r.session_name_snapshot as string, sessionNameSnapshot: r.session_name_snapshot as string }
+        : {}),
+    },
+    to: JSON.parse((r.targets as string | null) ?? "[]"),
+  },
   safety: JSON.parse(r.safety as string),
   at: r.at as string,
 });
@@ -1310,7 +1552,7 @@ const decidesFor = (m: Member, key: string) => key === m.handle || key === `org:
  *  3. agents talking without a person, and agents' contract changes under the
  *     room's approval policy, close a room-wide gate until a person decides.
  */
-export function post(m: Member, roomId: string, kind: MessageKind, text: string): Message {
+export function post(m: Member, roomId: string, kind: MessageKind, text: string, sourceSession?: AgentSession): Message {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
   if (m.paused) throw new Error(`@${m.handle} is paused by a person of ${m.org}; ask them to resume you`);
   if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
@@ -1354,14 +1596,40 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string)
     org: m.org,
     kind,
     text: clean.text,
-    ...mentioned,
+    mentions: mentioned.mentions,
+    mentionsRoom: mentioned.mentionsRoom,
+    metadata: {
+      from: {
+        agent: m.handle,
+        ...(sourceSession
+          ? { sessionId: sourceSession.id, sessionName: sourceSession.name, sessionNameSnapshot: sourceSession.name }
+          : {}),
+      },
+      to: mentioned.targets,
+    },
     safety,
     at: new Date().toISOString(),
   };
   db.prepare(
-    `INSERT INTO messages (id, room_id, from_handle, from_kind, org, kind, text, mentions, mentions_room, safety, at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(msg.id, roomId, msg.from, msg.fromKind, msg.org, kind, msg.text, JSON.stringify(msg.mentions), msg.mentionsRoom ? 1 : 0, JSON.stringify(safety), msg.at);
+    `INSERT INTO messages (id, room_id, from_handle, from_kind, org, kind, text, mentions, mentions_room, safety, at,
+                           from_session_id, session_name_snapshot, targets)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    msg.id,
+    roomId,
+    msg.from,
+    msg.fromKind,
+    msg.org,
+    kind,
+    msg.text,
+    JSON.stringify(msg.mentions),
+    msg.mentionsRoom ? 1 : 0,
+    JSON.stringify(safety),
+    msg.at,
+    sourceSession?.id ?? null,
+    sourceSession?.name ?? null,
+    JSON.stringify(mentioned.targets),
+  );
   events.emit("message", msg);
   if (clean.redactions.length)
     audit({ type: "redacted", roomId, actor: "hub", target: msg.id, detail: `masked ${clean.redactions.join(", ")} in a message from @${m.handle}` });
@@ -1495,12 +1763,42 @@ export function isFor(m: Member, msg: Message): boolean {
   return msg.mentionsRoom || msg.mentions.includes(m.handle);
 }
 
+const targetsFor = (msg: Message, handle: string) => {
+  const structured = msg.metadata.to.filter((target) => target.agent === handle);
+  // Messages written before the session migration addressed the agent inbox.
+  return structured.length ? structured : msg.mentions.includes(handle) ? [{ agent: handle }] : [];
+};
+
+/** Whether a named process session may see an addressed message in its inbox. */
+export function isInboxForSession(m: Member, msg: Message, session?: AgentSession): boolean {
+  if (!isFor(m, msg)) return false;
+  if (m.kind !== "agent") return true;
+  const targets = targetsFor(msg, m.handle);
+  if (msg.mentionsRoom) return !!session || activeAgentSessions(m.handle).length === 0;
+  if (targets.some((target) => !target.sessionName)) return true;
+  return !!session && targets.some((target) => target.sessionName === session.name);
+}
+
+/** Address matching without safety/readability checks (used for held notices). */
+export function isAddressedToAgentSession(m: Member, msg: Message, session: AgentSession, soleInbox = true): boolean {
+  const targets = targetsFor(msg, m.handle);
+  if (msg.mentionsRoom) return true;
+  if (targets.some((target) => target.sessionName === session.name)) return true;
+  return soleInbox && targets.some((target) => !target.sessionName) && activeAgentSessions(m.handle).length === 1;
+}
+
+/** Push semantics: exact slot, @room broadcast, or a sole active session. */
+export function isForAgentSession(m: Member, msg: Message, session: AgentSession): boolean {
+  if (!isFor(m, msg) || session.handle !== m.handle) return false;
+  return isAddressedToAgentSession(m, msg, session);
+}
+
 /**
  * Messages the member can see that arrived after `sinceId` (the last 500 when
  * omitted), minus their own. With `mentionsOnly`, just the ones addressed to
  * them, which then count as delivered.
  */
-export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Message[] {
+export function inbox(m: Member, sinceId?: string, mentionsOnly = false, session?: AgentSession): Message[] {
   const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
   const since = sinceId ? (db.prepare("SELECT seq FROM messages WHERE id = ?").get(sinceId) as { seq: number } | undefined)?.seq : undefined;
   const rows = (
@@ -1512,8 +1810,19 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false): Messag
           .prepare("SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ? ORDER BY seq LIMIT 500")
           .all(visible, m.handle, since) as Row[])
   ).map(toMessage);
-  const out = rows.filter((x) => !mentionsOnly || isFor(m, x));
+  const out = rows.filter((x) => !mentionsOnly || (m.kind === "agent" ? isInboxForSession(m, x, session) : isFor(m, x)));
   return out.map((x) => viewFor(m, x));
+}
+
+/** Atomically let one named session take an agent-inbox item. */
+export function takeInboxMessage(m: Member, session: AgentSession, messageId: string): Message {
+  const msg = getMessage(messageId);
+  if (!msg || !isInboxForSession(m, msg, session)) throw new Error("no such inbox message");
+  const targets = targetsFor(msg, m.handle);
+  const general = !msg.mentionsRoom && targets.some((target) => !target.sessionName);
+  const accepted = general ? markDelivered(msg, m.handle) : markSessionDelivered(msg, session);
+  if (!accepted) throw new Error("that inbox message was already taken");
+  return viewFor(m, msg);
 }
 
 // --- delivery: who got what, and catching up agents that were offline ---------------
@@ -1527,6 +1836,25 @@ export function markDelivered(msg: Message, handle: string): boolean {
 
 export function wasDelivered(messageId: string, handle: string): boolean {
   return !!db.prepare("SELECT 1 FROM deliveries WHERE message_id = ? AND handle = ?").get(messageId, handle);
+}
+
+export function markSessionDelivered(msg: Message, session: AgentSession): boolean {
+  const done =
+    db
+      .prepare("INSERT OR IGNORE INTO session_deliveries (message_id, handle, session_name, at) VALUES (?, ?, ?, ?)")
+      .run(msg.id, session.handle, session.name, new Date().toISOString()).changes === 1;
+  if (done) {
+    // The dashboard's compact delivery line remains agent-level.
+    markDelivered(msg, session.handle);
+    events.emit("session_delivery", { messageId: msg.id, roomId: msg.roomId, handle: session.handle, sessionName: session.name });
+  }
+  return done;
+}
+
+export function wasDeliveredToSession(messageId: string, session: AgentSession): boolean {
+  return !!db
+    .prepare("SELECT 1 FROM session_deliveries WHERE message_id = ? AND handle = ? AND session_name = ?")
+    .get(messageId, session.handle, session.name);
 }
 
 /** Handles that got each message pushed or read it from their inbox. */
@@ -1566,8 +1894,26 @@ export function undelivered(m: Member, afterSeq = 0, pageSize = 200): MessagePag
   };
 }
 
+/** Durable catch-up scoped to one named slot. */
+export function undeliveredForSession(m: Member, session: AgentSession, afterSeq = 0, pageSize = 200): MessagePage {
+  const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
+  const limit = Math.max(1, Math.min(500, Math.floor(pageSize) || 200));
+  const rows = db
+    .prepare(
+      `SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ?
+       ORDER BY seq LIMIT ?`,
+    )
+    .all(visible, m.handle, afterSeq, limit) as Row[];
+  const messages = rows.map(toMessage).filter((msg) => {
+    if (!isForAgentSession(m, msg, session)) return false;
+    const general = !msg.mentionsRoom && targetsFor(msg, m.handle).some((target) => !target.sessionName);
+    return general ? !wasDelivered(msg.id, m.handle) : !wasDeliveredToSession(msg.id, session);
+  });
+  return { messages, nextSeq: rows.length === limit ? Number(rows[rows.length - 1].seq) : null };
+}
+
 /** One durable page of pending text-free hold notices for an agent. */
-export function pendingHeld(m: Member, afterSeq = 0, pageSize = 200): MessagePage {
+export function pendingHeld(m: Member, afterSeq = 0, pageSize = 200, session?: AgentSession): MessagePage {
   if (m.kind !== "agent" || m.paused) return { messages: [], nextSeq: null };
   const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
   const limit = Math.max(1, Math.min(500, Math.floor(pageSize) || 200));
@@ -1580,7 +1926,7 @@ export function pendingHeld(m: Member, afterSeq = 0, pageSize = 200): MessagePag
     .all(visible, m.handle, afterSeq, limit) as Row[];
   const messages = rows.map(toMessage).filter((msg) => {
     const approval = msg.safety.approvals?.[approvalKey(m)];
-    const addressed = msg.mentionsRoom || msg.mentions.includes(m.handle);
+    const addressed = session ? isAddressedToAgentSession(m, msg, session) : msg.mentionsRoom || msg.mentions.includes(m.handle);
     return (
       msg.safety.status === "held" &&
       addressed &&

@@ -144,6 +144,10 @@ class BrowserHub implements Transport {
         owner: "anna",
         online: true,
         paused: false,
+        sessions: [
+          { name: "frontend", online: true, lastSeenAt: iso(0) },
+          { name: "backend", online: false, lastSeenAt: iso(1800) },
+        ],
       },
       {
         handle: "cursor-marek",
@@ -156,6 +160,7 @@ class BrowserHub implements Transport {
         owner: "marek",
         online: false,
         paused: false,
+        sessions: [{ name: "mobile", online: false, lastSeenAt: iso(900) }],
       },
       {
         handle: "codex-ben",
@@ -168,6 +173,7 @@ class BrowserHub implements Transport {
         owner: "ben",
         online: true,
         paused: false,
+        sessions: [{ name: "review", online: true, lastSeenAt: iso(0) }],
       },
       {
         handle: "claude-ben",
@@ -227,6 +233,7 @@ class BrowserHub implements Transport {
             text: "@claude-anna yes. POST /cart still returns 201 with cartId.",
             mentions: ["claude-anna"],
             mentionsRoom: false,
+            metadata: { from: { agent: "codex-ben", sessionName: "review", sessionNameSnapshot: "review" }, to: [{ agent: "claude-anna", sessionName: "frontend" }] },
             safety: clone(safe),
             at: iso(360),
             delivered: ["claude-anna"],
@@ -402,16 +409,22 @@ class BrowserHub implements Transport {
   private mentions(text: string, roomId: string) {
     const inRoom = this.members.filter((member) => this.canSee(member, roomId));
     const found = new Set<string>();
+    const targets: { agent: string; sessionName?: string }[] = [];
     let mentionsRoom = false;
-    for (const match of text.matchAll(/@([a-z0-9][a-z0-9_-]*)/gi)) {
+    for (const match of text.matchAll(/@([a-z0-9][a-z0-9_-]*)(?:\/([a-z0-9][a-z0-9_-]*))?/gi)) {
       const handle = match[1].toLowerCase();
+      const sessionName = match[2]?.toLowerCase();
       if (["room", "here", "all"].includes(handle)) mentionsRoom = true;
-      else if (inRoom.some((member) => member.handle === handle)) found.add(handle);
+      else if (inRoom.some((member) => member.handle === handle)) {
+        found.add(handle);
+        targets.push({ agent: handle, ...(sessionName ? { sessionName } : {}) });
+      }
     }
-    return { mentions: [...found], mentionsRoom };
+    return { mentions: [...found], mentionsRoom, targets };
   }
 
   private baseMessage(roomId: string, from: Member, kind: MessageKind, text: string): Message {
+    const addressed = this.mentions(text, roomId);
     return {
       id: this.id("message"),
       roomId,
@@ -420,7 +433,9 @@ class BrowserHub implements Transport {
       org: from.org,
       kind,
       text,
-      ...this.mentions(text, roomId),
+      mentions: addressed.mentions,
+      mentionsRoom: addressed.mentionsRoom,
+      metadata: { from: { agent: from.handle }, to: addressed.targets },
       safety: { status: "delivered", flags: [], redactions: [] },
       at: new Date().toISOString(),
       delivered: [],
@@ -572,11 +587,11 @@ class BrowserHub implements Transport {
       },
       claudeCode: {
         mcpJson: { mcpServers: { warren: { command: "npx", args: ["warren-bridge"], env: { WARREN_HUB: hub, WARREN_TOKEN: token } } } },
-        launch: "warren claude",
+        launch: "warren claude --name main",
       },
       codex: {
         mcp: `codex mcp add warren --url ${hub}/mcp --bearer-token-env-var WARREN_TOKEN`,
-        wake: "warren codex",
+        wake: "warren codex --name main",
       },
       cursor: {
         mcpJson: { mcpServers: { warren: { url: `${hub}/mcp`, headers: { Authorization: `Bearer ${token}` } } } },
@@ -671,6 +686,8 @@ class BrowserHub implements Transport {
   private reconnectCursor() {
     const cursor = this.member("cursor-marek");
     cursor.online = true;
+    if (cursor.sessions?.[0]) cursor.sessions[0] = { ...cursor.sessions[0], online: true, lastSeenAt: new Date().toISOString() };
+    this.emit("member", cursor);
     this.emit("presence", { handle: cursor.handle, online: true });
     for (const room of this.rooms) {
       for (const message of room.messages) {

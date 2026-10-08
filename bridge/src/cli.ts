@@ -25,9 +25,9 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
   warren tools                       list the live hub's MCP tools as JSON
   warren call <tool> --input <json>  call any MCP tool; output is JSON/text
   warren bind --as codex             bind the current Codex session
-  warren listen [--session <id>]     push mentions into Codex/Cursor
-  warren claude [--session <id>] [--as <profile>]
-  warren codex [--session <id>] [--as <profile>]
+  warren listen [--session <id>] [--name <slot>]
+  warren claude --name <slot> [--session <client-id>] [--as <profile>]
+  warren codex --name <slot> [--session <client-id>] [--as <profile>]
                                      launch a client with live message delivery
   warren launch <claude|codex>       long form of the two commands above
   warren wake [--session <id>]       alias for listen
@@ -63,6 +63,7 @@ const parsed = (() => {
         as: { type: "string" },
         "cli-only": { type: "boolean" },
         profile: { type: "string" },
+        name: { type: "string" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -128,15 +129,15 @@ try {
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
       wakeCommand: `warren listen --as ${values.profile ?? argument}`,
       bindCommand: `warren bind --as ${values.profile ?? argument}`,
-      launchCommand: `warren ${argument} --as ${values.profile ?? argument}`,
+      launchCommand: `warren ${argument} --name main --as ${values.profile ?? argument}`,
       promptToken,
     });
   else if (command === "wake") {
     noArguments("wake");
-    await wake(dir, values.session, values.as);
+    await wake(dir, values.session, values.as, values.name);
   } else if (command === "listen") {
     noArguments("listen");
-    await wake(dir, values.session, values.as);
+    await wake(dir, values.session, values.as, values.name);
   } else if (command === "bind") {
     noArguments("bind");
     bindSession(dir, values.as, values.session);
@@ -148,6 +149,7 @@ try {
     await launch(dir, argument, {
       session: values.session,
       selector: values.as,
+      name: values.name,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
     });
   } else if (command === "claude" || command === "codex") {
@@ -155,6 +157,7 @@ try {
     await launch(dir, command, {
       session: values.session,
       selector: values.as,
+      name: values.name,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
     });
   } else if (command === "status") {
@@ -165,7 +168,7 @@ try {
     await leave(dir, values.as);
   } else if (command === "bridge") {
     noArguments("bridge");
-    await bridge(dir, values.config, values.as);
+    await bridge(dir, values.config, values.as, values.name);
   } else if (command === "tools") {
     noArguments("tools");
     await listHubTools(dir, version, auth);

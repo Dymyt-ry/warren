@@ -66,7 +66,7 @@ app.disable("x-powered-by");
 app.use((req, res, next) => {
   // Bearer-token API: any origin may call it. Cookies are never sent cross-origin (no credentials allowed).
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, Mcp-Protocol-Version, Warren-Session-Id");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "same-origin");
@@ -122,6 +122,16 @@ function caller(req: Request): store.Member | undefined {
   const token = presentedToken(req);
   if (token) return token.startsWith("ws_") ? store.sessionMember(token) : store.byTokenValue(token);
   return store.sessionMember(sessionId(req));
+}
+
+function presentedAgentSessionId(req: Request): string | undefined {
+  const value = req.headers["warren-session-id"];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function connectionSession(req: Request, m: store.Member | undefined): store.AgentSession | undefined {
+  if (!m || m.kind !== "agent") return undefined;
+  return store.agentSession(presentedAgentSessionId(req), m.handle);
 }
 
 // Cookie sessions only work from the hub's own pages: a state-changing request
@@ -248,7 +258,9 @@ const self = (m: store.Member) => ({
 app.post("/mcp", async (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
-  const server = createMcpServer(m);
+  const session = connectionSession(req, m);
+  if (presentedAgentSessionId(req) && !session) return void res.status(409).json({ error: "agent session lease expired" });
+  const server = createMcpServer(m, session);
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on("close", () => {
     transport.close();
@@ -864,6 +876,24 @@ app.get("/api/agents", (req, res) => {
   );
 });
 
+// The CLI authenticates with the stable agent token and asks the hub to bind
+// one human-readable slot. The opaque id comes only from this endpoint and is
+// subsequently attached by the bridge as connection metadata.
+app.post("/api/agent-sessions", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  if (m.kind !== "agent") return void res.status(403).json({ error: "only an agent can open an agent session" });
+  // Do not allow a person's ws_ cookie/session credential to mint agent leases.
+  if (!presentedToken(req) || presentedToken(req)!.startsWith("ws_")) return void res.status(401).json({ error: "use the agent token" });
+  try {
+    res.status(201).json(
+      req.body?.resumeId ? store.resumeAgentSession(m, req.body?.name, req.body.resumeId) : store.createAgentSession(m, req.body?.name),
+    );
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
 app.put("/api/agents/:handle", (req, res) => {
   const ok = manageableAgent(req, res);
   if (!ok) return;
@@ -1027,10 +1057,12 @@ app.get("/api/messages/:id", (req, res) => {
 app.post("/api/rooms/:id/messages", (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
+  const sourceSession = connectionSession(req, m);
+  if (presentedAgentSessionId(req) && !sourceSession) return void res.status(409).json({ error: "agent session lease expired" });
   // Same answer for a room that doesn't exist and one you can't see: no telling them apart.
   if (!store.canSee(m, req.params.id)) return void res.status(404).json({ error: "no such room" });
   try {
-    const posted = store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text);
+    const posted = store.post(m, req.params.id, req.body?.kind ?? "note", req.body?.text, sourceSession);
     res.status(201).json(store.withDeliveries(m, posted));
   } catch (e) {
     httpError(res, store.canSee(m, req.params.id) ? 400 : 403, e);
@@ -1134,16 +1166,31 @@ app.get("/api/waitlist", (req, res) => {
 // Messages addressed to the caller since ?since=<id>; ?all=1 for everything visible.
 app.get("/api/inbox", (req, res) => {
   const m = requireCaller(req, res);
-  if (m) res.json(store.inbox(m, req.query.since as string | undefined, req.query.all !== "1"));
+  if (!m) return;
+  const session = connectionSession(req, m);
+  if (presentedAgentSessionId(req) && !session) return void res.status(409).json({ error: "agent session lease expired" });
+  res.json(store.inbox(m, req.query.since as string | undefined, req.query.all !== "1", session));
+});
+
+app.post("/api/inbox/:id/take", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  const session = connectionSession(req, m);
+  if (m.kind !== "agent" || !session) return void res.status(409).json({ error: "a live named agent session is required" });
+  try {
+    res.json(store.takeInboxMessage(m, session, req.params.id));
+  } catch (e) {
+    httpError(res, (e as Error).message.startsWith("no such") ? 404 : 409, e);
+  }
 });
 
 // Bridges acknowledge only after their adapter accepted a message. Until this
 // explicit ack, reconnect catch-up keeps the message durable.
 const deliveryLeases = new Map<string, { streamId: string; expiresAt: number }>();
 let lastDeliveryLeaseSweep = 0;
-const deliveryLeaseKey = (messageId: string, handle: string) => `${messageId}\0${handle}`;
-const acquireDeliveryLease = (messageId: string, handle: string, streamId: string) => {
-  const key = deliveryLeaseKey(messageId, handle);
+const deliveryLeaseKey = (messageId: string, recipient: string) => `${messageId}\0${recipient}`;
+const acquireDeliveryLease = (messageId: string, recipient: string, streamId: string) => {
+  const key = deliveryLeaseKey(messageId, recipient);
   const now = Date.now();
   if (now - lastDeliveryLeaseSweep > 60_000) {
     for (const [leasedKey, lease] of deliveryLeases) if (lease.expiresAt <= now) deliveryLeases.delete(leasedKey);
@@ -1154,15 +1201,21 @@ const acquireDeliveryLease = (messageId: string, handle: string, streamId: strin
   deliveryLeases.set(key, { streamId, expiresAt: now + DELIVERY_LEASE_MS });
   return true;
 };
-const releaseDeliveryLease = (messageId: string, handle: string) => deliveryLeases.delete(deliveryLeaseKey(messageId, handle));
+const releaseDeliveryLease = (messageId: string, recipient: string) => deliveryLeases.delete(deliveryLeaseKey(messageId, recipient));
 
 app.post("/api/deliveries/:id/ack", (req, res) => {
   const m = requireCaller(req, res);
   if (!m) return;
   const msg = store.getMessage(req.params.id);
-  if (!msg || m.kind !== "agent" || !store.isFor(m, msg)) return void res.status(404).json({ error: "no such delivery" });
-  store.markDelivered(msg, m.handle);
-  releaseDeliveryLease(msg.id, m.handle);
+  const session = connectionSession(req, m);
+  if (presentedAgentSessionId(req) && !session) return void res.status(409).json({ error: "agent session lease expired" });
+  if (!msg || m.kind !== "agent") return void res.status(404).json({ error: "no such delivery" });
+  const addressed = session ? store.isForAgentSession(m, msg, session) : store.isFor(m, msg);
+  if (!addressed) return void res.status(404).json({ error: "no such delivery" });
+  const slotSpecific = !!session && (msg.mentionsRoom || msg.metadata.to.some((target) => target.agent === m.handle && !!target.sessionName));
+  if (slotSpecific) store.markSessionDelivered(msg, session!);
+  else store.markDelivered(msg, m.handle);
+  releaseDeliveryLease(msg.id, slotSpecific ? `${m.handle}/${session!.name}` : m.handle);
   res.json({ ok: true });
 });
 
@@ -1179,7 +1232,10 @@ let totalStreams = 0;
 app.get("/api/events", (req: Request, res: Response) => {
   const m = reader(req, res);
   if (m === false) return;
-  const who = m ? `m:${m.handle}` : `ip:${clientIp(req)}`;
+  const initialSession = m ? connectionSession(req, m) : undefined;
+  if (req.query.mentions === "1" && m?.kind === "agent" && req.headers["warren-session-id"] && !initialSession)
+    return void res.status(409).json({ error: "agent session lease expired; register the slot again" });
+  const who = m ? `m:${m.handle}${initialSession ? `/${initialSession.name}` : ""}` : `ip:${clientIp(req)}`;
   if ((streams.get(who) ?? 0) >= STREAMS_PER_CALLER || totalStreams >= STREAMS_TOTAL)
     return void res.status(429).json({ error: "too many open event streams; close some tabs or bridges" });
   streams.set(who, (streams.get(who) ?? 0) + 1);
@@ -1206,18 +1262,27 @@ app.get("/api/events", (req: Request, res: Response) => {
     const me = credential();
     return me?.handle === m.handle ? me : undefined;
   };
+  const liveSession = () => {
+    const me = live();
+    return me && initialSession ? store.agentSession(initialSession.id, me.handle) : undefined;
+  };
 
   const onMessage = (msg: store.Message, late = false) => {
     const me = live();
     if (!m) return send("message", msg);
     if (!me || !store.canSee(me, msg.roomId) || msg.from === me.handle) return;
-    const forYou = store.isFor(me, msg);
+    const session = liveSession();
+    if (initialSession && !session) return;
+    const forYou = session ? store.isForAgentSession(me, msg, session) : store.isFor(me, msg);
     if (mentionsOnly) {
       // Delivery is recorded only by POST /api/deliveries/:id/ack after the
       // bridge accepted this frame. A short-lived in-memory lease prevents
       // two concurrent bridges for one agent from both accepting it first.
-      if (!forYou || store.wasDelivered(msg.id, me.handle)) return;
-      if (!acquireDeliveryLease(msg.id, me.handle, streamId)) return;
+      const slotSpecific = !!session && (msg.mentionsRoom || msg.metadata.to.some((target) => target.agent === me.handle && !!target.sessionName));
+      const delivered = slotSpecific ? store.wasDeliveredToSession(msg.id, session!) : store.wasDelivered(msg.id, me.handle);
+      if (!forYou || delivered) return;
+      const recipient = slotSpecific ? `${me.handle}/${session!.name}` : me.handle;
+      if (!acquireDeliveryLease(msg.id, recipient, streamId)) return;
     }
     send("message", { ...store.withDeliveries(me, store.viewFor(me, msg)), forYou, ...(late ? { late: true } : {}) });
   };
@@ -1226,7 +1291,9 @@ app.get("/api/events", (req: Request, res: Response) => {
     const me = live();
     if (!mentionsOnly || !me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
     const approval = msg.safety.approvals?.[store.approvalKey(me)];
-    const addressed = msg.mentionsRoom || msg.mentions.includes(me.handle);
+    const session = liveSession();
+    if (initialSession && !session) return;
+    const addressed = session ? store.isAddressedToAgentSession(me, msg, session) : msg.mentionsRoom || msg.mentions.includes(me.handle);
     const reviewable = approval?.decision === "pending" && approval.agents.includes(me.handle);
     if (!addressed || (!reviewable && gateDecision(msg.safety) !== "pending")) return;
     send("held", {
@@ -1252,6 +1319,7 @@ app.get("/api/events", (req: Request, res: Response) => {
     const me = live();
     if (mentionsOnly) {
       if (!me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
+      if (initialSession && !liveSession()) return;
       const approval = msg.safety.approvals?.[store.approvalKey(me)];
       const wasTarget =
         (Array.isArray(approval?.agents) && approval.agents.includes(me.handle)) ||
@@ -1323,7 +1391,12 @@ app.get("/api/events", (req: Request, res: Response) => {
     ["held", onHeld],
     ["delivery", onDelivery],
   ];
-  const ping = setInterval(() => (m && !live() ? res.end() : res.write(": ping\n\n")), 15_000);
+  const ping = setInterval(() => {
+    const me = m && live();
+    if (m && !me) return void res.end();
+    if (me && initialSession && !store.renewAgentSession(initialSession.id, me.handle)) return void res.end();
+    res.write(": ping\n\n");
+  }, 10_000);
   for (const [e, fn] of handlers) store.events.on(e, fn);
   if (m) store.trackConnection(m, 1);
   // An agent that was offline catches up. Held notices are replayed without
@@ -1331,14 +1404,14 @@ app.get("/api/events", (req: Request, res: Response) => {
   if (m && mentionsOnly) {
     let cursor = 0;
     do {
-      const page = store.pendingHeld(m, cursor);
+      const page = store.pendingHeld(m, cursor, 200, initialSession);
       for (const msg of page.messages) onHeld(msg);
       cursor = page.nextSeq ?? 0;
       if (!page.nextSeq) break;
     } while (true);
     cursor = 0;
     do {
-      const page = store.undelivered(m, cursor);
+      const page = initialSession ? store.undeliveredForSession(m, initialSession, cursor) : store.undelivered(m, cursor);
       for (const msg of page.messages) onMessage(msg, true);
       cursor = page.nextSeq ?? 0;
       if (!page.nextSeq) break;
@@ -1348,6 +1421,7 @@ app.get("/api/events", (req: Request, res: Response) => {
     clearInterval(ping);
     for (const [e, fn] of handlers) store.events.off(e, fn);
     for (const [key, lease] of deliveryLeases) if (lease.streamId === streamId) deliveryLeases.delete(key);
+    if (m && initialSession) store.endAgentSession(initialSession.id, m.handle);
     if (m) store.trackConnection(m, -1);
   });
 });
@@ -1479,11 +1553,11 @@ function setupSnippets(m: store.Member, token: string) {
           },
         },
       },
-      launch: "warren claude",
+      launch: "warren claude --name main",
     },
     codex: {
       mcp: `WARREN_TOKEN=${token} codex mcp add warren --url ${PUBLIC_URL}/mcp --bearer-token-env-var WARREN_TOKEN`,
-      wake: "warren codex",
+      wake: "warren codex --name main",
     },
     cursor: {
       mcpJson: { mcpServers: { warren: { url: `${PUBLIC_URL}/mcp`, headers: { Authorization: `Bearer ${token}` } } } },
@@ -1497,6 +1571,7 @@ function setupSnippets(m: store.Member, token: string) {
 if (DEMO && SEED_DEMO) seedDemo(PUBLIC_URL);
 store.sweep();
 setInterval(() => store.sweep(), 60 * 60_000).unref();
+setInterval(() => store.sweepAgentSessions(), 5_000).unref();
 if (PRODUCTION && !DEMO && !store.isSetUp()) {
   if (!SETUP_TOKEN) throw new Error("invalid WARREN_SETUP_TOKEN: is required for a production database without an owner");
   if (SETUP_TOKEN.length < 32) throw new Error("invalid WARREN_SETUP_TOKEN: fresh production setup secrets must contain at least 32 characters");

@@ -675,6 +675,7 @@ function Thread({
             </MessageScrollerItem>
             {room.messages.map((m) => {
               const author = members[m.from];
+              const sessionName = m.metadata?.from.sessionNameSnapshot ?? m.metadata?.from.sessionName;
               const forMe = !!me && isForMe(m, me.handle);
               const time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
               return (
@@ -694,7 +695,9 @@ function Thread({
                     </MessageAvatar>
                     <MessageContent className="gap-1">
                       <MessageHeader className="gap-2.5 px-0 text-[13px]">
-                        <span className="font-semibold text-foreground">{author?.name ?? m.from}</span>
+                        <span className="font-semibold text-foreground">
+                          {author?.name ?? m.from}{sessionName ? ` · ${sessionName}` : ""}
+                        </span>
                         {me && m.org !== me.org && <span>{m.org}</span>}
                         <KindTag kind={m.kind} />
                         <time className="ml-auto tabular-nums" dateTime={m.at}>
@@ -951,19 +954,33 @@ function Composer({
   const input = useRef<HTMLTextAreaElement>(null);
 
   // @autocomplete for the word being typed, when it starts with @.
-  const query = /(?:^|\s)@([a-z0-9_-]*)$/i.exec(text)?.[1]?.toLowerCase();
-  const everyone = { handle: "room", name: "Everyone in this room", kind: "human" } as Member;
+  const query = /(?:^|\s)@([a-z0-9_-]*(?:\/[a-z0-9_-]*)?)$/i.exec(text)?.[1]?.toLowerCase();
+  type Suggestion = { value: string; name: string; detail: string; member?: Member };
+  const everyone: Suggestion = { value: "room", name: "Everyone in this room", detail: "@room" };
+  const addressable: Suggestion[] = inRoom
+    .filter((m) => m.handle !== me?.handle)
+    .flatMap((m) => [
+      ...(m.kind === "agent"
+        ? (m.sessions ?? []).map((session) => ({
+            value: `${m.handle}/${session.name}`,
+            name: `${m.name} · ${session.name}`,
+            detail: session.online ? t("online") : t("offline"),
+            member: m,
+          }))
+        : []),
+      { value: m.handle, name: m.name, detail: m.kind === "agent" ? "agent inbox" : `@${m.handle}`, member: m },
+    ]);
   const suggestions =
     query === undefined
       ? []
-      : [...inRoom.filter((m) => m.handle !== me?.handle), everyone]
-          .filter((m) => m.handle.startsWith(query) || m.name.toLowerCase().startsWith(query))
-          .slice(0, 6);
+      : [...addressable, everyone]
+          .filter((item) => item.value.startsWith(query) || item.name.toLowerCase().startsWith(query))
+          .slice(0, 8);
   const open = suggestions.length > 0 && dismissed !== text;
-  const active = suggestions.some((s) => s.handle === pick) ? pick : suggestions[0]?.handle ?? "";
+  const active = suggestions.some((s) => s.value === pick) ? pick : suggestions[0]?.value ?? "";
 
-  const complete = (handle: string) => {
-    setText((t) => t.replace(/@([a-z0-9_-]*)$/i, `@${handle} `));
+  const complete = (address: string) => {
+    setText((t) => t.replace(/@([a-z0-9_-]*(?:\/[a-z0-9_-]*)?)$/i, `@${address} `));
     input.current?.focus();
   };
 
@@ -984,10 +1001,10 @@ function Composer({
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (open) {
-      const i = suggestions.findIndex((s) => s.handle === active);
+      const i = suggestions.findIndex((s) => s.value === active);
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
-        setPick(suggestions[(i + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length].handle);
+        setPick(suggestions[(i + (e.key === "ArrowDown" ? 1 : suggestions.length - 1)) % suggestions.length].value);
         return;
       }
       if (e.key === "Enter" || e.key === "Tab") {
@@ -1042,11 +1059,11 @@ function Composer({
               <CommandList>
                 <CommandEmpty>{t("Nobody by that name here.")}</CommandEmpty>
                 <CommandGroup heading={`In ${room.name}`}>
-                  {suggestions.map((m) => (
-                    <CommandItem key={m.handle} value={m.handle} onSelect={complete} className="gap-2.5">
-                      {m.handle !== "room" && <Avatar kind={m.kind} name={m.name} size={22} />}
-                      <span className="font-medium">{m.name}</span>
-                      <span className="ml-auto text-xs text-muted-foreground">@{m.handle}</span>
+                  {suggestions.map((item) => (
+                    <CommandItem key={item.value} value={item.value} onSelect={complete} className="gap-2.5">
+                      {item.member && <Avatar kind={item.member.kind} name={item.name} size={22} />}
+                      <span className="font-medium">{item.name}</span>
+                      <span className="ml-auto text-xs text-muted-foreground">@{item.value}{item.detail.startsWith("@") ? "" : ` · ${item.detail}`}</span>
                     </CommandItem>
                   ))}
                 </CommandGroup>
@@ -1218,25 +1235,38 @@ function MemberRow({ m, me }: { m: Member; me: Member | null }) {
   );
   if (m.kind !== "agent") return row;
   return (
-    <div className="flex items-center gap-1">
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <div tabIndex={0} className="min-w-0 flex-1 rounded-md">
-            {row}
-          </div>
-        </TooltipTrigger>
-        <TooltipContent side="left">{m.paused ? t("Paused by a person: it can't post and gets no messages") : delivery(m.adapter)}</TooltipContent>
-      </Tooltip>
-      {canPause && (
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label={m.paused ? t("Resume {name}", { name: m.name }) : t("Pause {name}", { name: m.name })}
-          title={m.paused ? t("Resume") : t("Pause")}
-          onClick={() => api.pause(m.handle, !m.paused).catch(() => {})}
-        >
-          {m.paused ? <PlayIcon weight="fill" /> : <PauseIcon weight="fill" />}
-        </Button>
+    <div>
+      <div className="flex items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div tabIndex={0} className="min-w-0 flex-1 rounded-md">
+              {row}
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="left">{m.paused ? t("Paused by a person: it can't post and gets no messages") : delivery(m.adapter)}</TooltipContent>
+        </Tooltip>
+        {canPause && (
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label={m.paused ? t("Resume {name}", { name: m.name }) : t("Pause {name}", { name: m.name })}
+            title={m.paused ? t("Resume") : t("Pause")}
+            onClick={() => api.pause(m.handle, !m.paused).catch(() => {})}
+          >
+            {m.paused ? <PlayIcon weight="fill" /> : <PauseIcon weight="fill" />}
+          </Button>
+        )}
+      </div>
+      {!!m.sessions?.length && (
+        <ul className="mt-1 ml-10 flex flex-col gap-1 border-l border-border pl-3">
+          {m.sessions.map((session) => (
+            <li key={session.name} className="flex items-center gap-2 text-xs">
+              <span className={cn("size-1.5 rounded-full", session.online ? "bg-emerald-500" : "border border-muted-foreground")} aria-hidden />
+              <span className="font-medium text-foreground">{session.name}</span>
+              <span className="text-muted-foreground">{session.online ? t("online") : t("offline")}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

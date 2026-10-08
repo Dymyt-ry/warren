@@ -35,14 +35,34 @@ export interface HeldResolution {
   waitsFor: string;
 }
 
+export interface WarrenSession {
+  id: string;
+  handle: string;
+  name: string;
+  expiresAt: string;
+}
+
+export async function registerSession(hub: string, token: string, name: string, resumeId?: string): Promise<WarrenSession> {
+  const res = await fetch(`${hub}/api/agent-sessions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ...(resumeId ? { resumeId } : {}) }),
+  });
+  const body = (await res.json().catch(() => ({}))) as WarrenSession & { error?: string };
+  if (!res.ok) throw new Error(`cannot open Warren session ${name}: ${body.error ?? `hub answered ${res.status}`}`);
+  return body;
+}
+
 export async function subscribe(
   hub: string,
   token: string,
+  session: WarrenSession,
+  connectionHeaders: Record<string, string>,
   onMessage: (m: HubMessage) => void | Promise<void>,
   onHeld: (h: HeldNotice) => void | Promise<void> = () => {},
   onHeldResolution: (r: HeldResolution) => void | Promise<void> = () => {},
 ) {
-  const headers = { Accept: "text/event-stream", Authorization: `Bearer ${token}` };
+  const headers: Record<string, string> = { ...connectionHeaders, Accept: "text/event-stream" };
   const seen = new Set<string>(); // replay and live stream can overlap
   let reconnect = () => {};
   // Delivery runs outside the read loop: an agent turn can take minutes and
@@ -54,7 +74,7 @@ export async function subscribe(
       await onMessage(m);
       const ack = await fetch(`${hub}/api/deliveries/${encodeURIComponent(m.id)}/ack`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: connectionHeaders,
       });
       if (!ack.ok) throw new Error(`delivery ack answered ${ack.status}`);
       // The hub's durable delivery row is now the source of truth. Keeping
@@ -72,6 +92,14 @@ export async function subscribe(
     reconnect = () => controller.abort();
     try {
       const res = await fetch(`${hub}/api/events?mentions=1`, { headers, signal: controller.signal });
+      if (res.status === 409) {
+        const rebound = await registerSession(hub, token, session.name, session.id);
+        Object.assign(session, rebound);
+        connectionHeaders["Warren-Session-Id"] = rebound.id;
+        headers["Warren-Session-Id"] = rebound.id;
+        console.error(`warren-bridge: rebound @${rebound.handle}/${rebound.name} to a new Warren session`);
+        continue;
+      }
       if (!res.ok || !res.body) throw new Error(`hub answered ${res.status}`);
       const decoder = new TextDecoder();
       let buffer = "";

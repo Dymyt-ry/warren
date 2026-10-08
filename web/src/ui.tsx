@@ -44,7 +44,7 @@ export function KindTag({ kind }: { kind: MessageKind }) {
   );
 }
 
-const MENTION = /(@[a-z0-9][a-z0-9_-]*)/gi;
+const MENTION = /(@[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)?)/gi;
 
 /** Message text with @mentions set apart; mentions of `me` (or @room) are lit. */
 export function MentionText({ text, me }: { text: string; me?: string | null }) {
@@ -52,7 +52,7 @@ export function MentionText({ text, me }: { text: string; me?: string | null }) 
     <>
       {text.split(MENTION).map((part, i) => {
         if (i % 2 === 0) return part;
-        const handle = part.slice(1).toLowerCase();
+        const handle = part.slice(1).toLowerCase().split("/")[0];
         const lit = !!me && (handle === me || handle === "room" || handle === "here" || handle === "all");
         return (
           <span key={i} className={lit ? "mention lit" : "mention"}>
@@ -81,12 +81,13 @@ export function MessageItem({
 }) {
   const forMe = !!me && m.from !== me && (m.forYou || m.mentions.includes(me) || m.mentionsRoom);
   const time = new Date(m.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const sessionName = m.metadata?.from.sessionNameSnapshot ?? m.metadata?.from.sessionName;
   return (
     <li className={`msg${forMe ? " for-me" : ""} ${className}`} style={style}>
       <Avatar kind={m.fromKind} name={author?.name ?? m.from} />
       <div className="msg-body">
         <header>
-          <span className="msg-name">{author?.name ?? m.from}</span>
+          <span className="msg-name">{author?.name ?? m.from}{sessionName ? ` · ${sessionName}` : ""}</span>
           {external && <span className="org">{m.org}</span>}
           <KindTag kind={m.kind} />
           <time dateTime={m.at}>{time}</time>

@@ -193,6 +193,36 @@ const MIGRATIONS: string[] = [
    WHERE json_valid(safety)
      AND json_type(safety, '$.gate') = 'text';
   `,
+  `
+  -- Agent identity is stable, while a named slot is rebound to a short-lived
+  -- process session. Authentication still uses the agent token; the opaque
+  -- session id is connection metadata assigned by the hub.
+  CREATE TABLE agent_sessions (
+    id TEXT PRIMARY KEY,
+    handle TEXT NOT NULL REFERENCES members(handle) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  );
+  CREATE INDEX agent_sessions_handle_name ON agent_sessions(handle, name, created_at DESC);
+  CREATE INDEX agent_sessions_expiry ON agent_sessions(expires_at);
+
+  ALTER TABLE messages ADD COLUMN from_session_id TEXT;
+  ALTER TABLE messages ADD COLUMN session_name_snapshot TEXT;
+  ALTER TABLE messages ADD COLUMN targets TEXT NOT NULL DEFAULT '[]';
+
+  -- Handle-level delivery remains the receipt for an agent inbox. Slot-level
+  -- receipts let @room reach every slot and exact addresses survive restarts.
+  CREATE TABLE session_deliveries (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    handle TEXT NOT NULL,
+    session_name TEXT NOT NULL,
+    at TEXT NOT NULL,
+    PRIMARY KEY (message_id, handle, session_name)
+  );
+  CREATE INDEX session_deliveries_target ON session_deliveries(handle, session_name, message_id);
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {
@@ -201,6 +231,20 @@ export function openDb(path: string): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
   for (let v = version; v < MIGRATIONS.length; v++) {
+    // Recovery/compatibility tests may deliberately roll user_version back
+    // while leaving newer schema objects in place. DDL migrations are atomic,
+    // so all of these objects together mean migration 6 already completed.
+    if (
+      v === 5 &&
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_sessions'").get() &&
+      db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_deliveries'").get() &&
+      ["from_session_id", "session_name_snapshot", "targets"].every((name) =>
+        (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).some((column) => column.name === name),
+      )
+    ) {
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+      continue;
+    }
     db.exec("BEGIN");
     try {
       db.exec(MIGRATIONS[v]);

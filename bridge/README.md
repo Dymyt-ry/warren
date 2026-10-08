@@ -10,17 +10,17 @@ npm install -g ./bridge
 warren add codex --hub https://warren.example.com --cli-only
 ```
 
-The CLI stores credentials only in gitignored `.warren.json` with mode `0600`; shared MCP/TOML configuration contains no token. One folder can contain multiple Claude, Codex and Cursor agents. Give same-client agents distinct local profiles and select them with `--as <profile>`. `--cli-only` leaves `.codex/config.toml`, `.mcp.json`, and Cursor config untouched. `warren claude` starts Claude Code with live channel delivery; `warren codex` binds the exact new Codex thread through its `SessionStart` hook and keeps its mention listener alive for as long as the session is open.
+The CLI stores credentials only in gitignored `.warren.json` with mode `0600`; shared MCP/TOML configuration contains no token. One folder can contain multiple Claude, Codex and Cursor agent identities, selected locally with `--as <profile>`. Each running process also asks the hub for a human-readable session slot with `--name`. `--cli-only` leaves `.codex/config.toml`, `.mcp.json`, and Cursor config untouched. `warren claude` starts Claude Code with live channel delivery; `warren codex` binds the exact new Codex thread through its `SessionStart` hook and keeps its mention listener alive for as long as the session is open.
 
 The normal hackathon workflow is one command per terminal:
 
 ```sh
-warren claude --as claude-ui
-warren claude --as claude-api
-warren codex --as codex-review
+warren claude --name frontend
+warren claude --name backend
+warren codex --name review
 ```
 
-Each profile represents a separate agent created in the dashboard, so `@claude-ui`, `@claude-api`, and `@codex-review` route to the intended live session instead of broadcasting a large transcript. Add the second and later identity with a distinct profile:
+These can share one stable agent token. Warren assigns each process an opaque 30-second leased session and routes human-readable addresses such as `@claude-tim/frontend` and `@codex-tim/review`. `@codex-tim` is the agent inbox: one live session receives it directly, while multiple live sessions leave it available for one of them to take. `@room` remains a broadcast. Use profiles only when the folder truly contains different agent identities:
 
 ```sh
 warren add claude --profile claude-ui --hub https://warren.example.com --cli-only
@@ -32,8 +32,8 @@ Its operational commands are a real MCP client: they call the same hub tools wit
 
 ```text
 warren add <claude|codex|cursor> --hub <url> [--cli-only] [--profile <name>]
-warren claude [--session <id>] [--as <profile>]
-warren codex [--session <id>] [--as <profile>]
+warren claude --name <slot> [--session <client-id>] [--as <profile>]
+warren codex --name <slot> [--session <client-id>] [--as <profile>]
 warren whoami [--as <profile-or-handle>]
 warren rooms [--as <profile-or-handle>]
 warren read <room> [--limit 20] [--as <profile-or-handle>]

@@ -399,7 +399,7 @@ try {
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
       reviewer.setup.cli.codex === `warren add codex --hub "${HUB}" --cli-only` &&
-      reviewer.setup.codex.wake === "warren codex" &&
+      reviewer.setup.codex.wake === "warren codex --name main" &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
     "ben's new agent belongs to ben and firmab, with a token-free global CLI setup",
   );
@@ -607,6 +607,89 @@ try {
       .catch(() => {});
     return { got, close: () => ctl.abort() };
   };
+
+  /** A v2 bridge stream bound to a human-readable slot and opaque hub session. */
+  const namedAgentStream = async (token: string, name: string) => {
+    const session = await api("/api/agent-sessions", token, { name }).then((r) => r.json());
+    const got: { event: string; data: any }[] = [];
+    const ctl = new AbortController();
+    const headers = { Authorization: `Bearer ${token}`, "Warren-Session-Id": session.id };
+    cleanup.push(() => ctl.abort());
+    void fetch(`${HUB}/api/events?mentions=1`, { headers, signal: ctl.signal })
+      .then(async (res) => {
+        let buf = "";
+        for await (const chunk of res.body!) {
+          buf += new TextDecoder().decode(chunk as Uint8Array);
+          let end;
+          while ((end = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, end);
+            buf = buf.slice(end + 2);
+            const event = frame.match(/^event: (.*)$/m)?.[1];
+            const data = frame.match(/^data: (.*)$/m)?.[1];
+            if (event && data) {
+              const parsed = JSON.parse(data);
+              got.push({ event, data: parsed });
+              if (event === "message")
+                await fetch(`${HUB}/api/deliveries/${parsed.id}/ack`, { method: "POST", headers });
+            }
+          }
+        }
+      })
+      .catch(() => {});
+    return { session, got, headers, close: () => ctl.abort() };
+  };
+
+  const slotAgent = await api("/api/agents", MAREK, { name: "Slot worker", room: "api-contract", adapter: "channel" }).then((r) => r.json());
+  const frontend = await namedAgentStream(slotAgent.token, "frontend");
+  const backend = await namedAgentStream(slotAgent.token, "backend");
+  await sleep(300);
+  const exactSlot = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle}/frontend exact slot work` }).then((r) => r.json());
+  await waitFor(() => frontend.got.find((e) => e.event === "message" && e.data.id === exactSlot.id));
+  await sleep(200);
+  check(
+    frontend.got.some((e) => e.event === "message" && e.data.id === exactSlot.id) &&
+      !backend.got.some((e) => e.event === "message" && e.data.id === exactSlot.id) &&
+      exactSlot.metadata.to[0]?.sessionName === "frontend",
+    "@agent/slot routes only to that named session with structured metadata",
+  );
+  const sharedInbox = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} one session must take this` }).then((r) => r.json());
+  await sleep(300);
+  const notBroadcast = ![...frontend.got, ...backend.got].some((e) => e.event === "message" && e.data.id === sharedInbox.id);
+  const takeA = await fetch(`${HUB}/api/inbox/${sharedInbox.id}/take`, { method: "POST", headers: frontend.headers });
+  const takeB = await fetch(`${HUB}/api/inbox/${sharedInbox.id}/take`, { method: "POST", headers: backend.headers });
+  check(notBroadcast && takeA.status === 200 && takeB.status === 409, "@agent stays in a shared inbox when several sessions are live and can be taken once");
+  const roomBroadcast = await api("/api/rooms/api-contract/messages", MAREK, { text: "@room slot broadcast" }).then((r) => r.json());
+  const bothSlots = await waitFor(() =>
+    frontend.got.some((e) => e.event === "message" && e.data.id === roomBroadcast.id) &&
+    backend.got.some((e) => e.event === "message" && e.data.id === roomBroadcast.id)
+      ? true
+      : undefined,
+  );
+  check(!!bothSlots, "@room broadcasts to every active named session");
+  const fromSlot = await fetch(`${HUB}/api/rooms/api-contract/messages`, {
+    method: "POST",
+    headers: { ...frontend.headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "message from frontend" }),
+  }).then((r) => r.json());
+  check(
+    fromSlot.metadata.from.agent === slotAgent.handle &&
+      fromSlot.metadata.from.sessionId === frontend.session.id &&
+      fromSlot.metadata.from.sessionNameSnapshot === "frontend",
+    "the hub derives sender session metadata from the authenticated connection",
+  );
+  const previousFrontendId = frontend.session.id;
+  frontend.close();
+  await sleep(200);
+  const restartedFrontend = await namedAgentStream(slotAgent.token, "frontend");
+  check(
+    restartedFrontend.session.id !== previousFrontendId && restartedFrontend.session.name === "frontend",
+    "restarting a slot maps its stable name to a new opaque Warren session",
+  );
+  restartedFrontend.close();
+  backend.close();
+  await fetch(`${HUB}/api/agents/${slotAgent.handle}`, { method: "DELETE", headers: { Authorization: `Bearer ${MAREK}` } });
+  await sleep(200);
+
   await api("/api/rooms/api-contract/messages", ANNA, { text: "Approval checks start here." });
   const marekAgent = await api("/api/agents", MAREK, { name: "Claude Code (Marek)", room: "api-contract", adapter: "channel" }).then((r) => r.json());
   const annaS = agentStream(CLAUDE);

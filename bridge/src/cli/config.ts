@@ -144,6 +144,7 @@ export function applyAgentEnv(agent: FolderAgent) {
     WARREN_TOKEN: agent.token,
     WARREN_ADAPTER: agent.tool === "claude" ? "channel" : "exec",
     WARREN_EXEC_CLIENT: agent.tool === "cursor" ? "cursor" : "codex",
+    WARREN_SESSION_NAME: process.env.WARREN_SESSION_NAME || agent.profile || agent.tool,
     ...(agent.session ? { WARREN_EXEC_SESSION: agent.session } : {}),
   });
 }

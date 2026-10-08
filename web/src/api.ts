@@ -25,6 +25,7 @@ export interface Member {
   twoFactor?: boolean;
   prefs?: Prefs; // only about yourself
   recoveryCodesLeft?: number;
+  sessions?: { name: string; online: boolean; lastSeenAt: string }[];
 }
 export interface Prefs {
   language: "en" | "cs";
@@ -81,6 +82,10 @@ export interface Message {
   text: string;
   mentions: string[];
   mentionsRoom: boolean;
+  metadata?: {
+    from: { agent: string; sessionId?: string; sessionName?: string; sessionNameSnapshot?: string };
+    to: { agent: string; sessionName?: string }[];
+  };
   safety?: Safety;
   at: string;
   forYou?: boolean;

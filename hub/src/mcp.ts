@@ -9,9 +9,9 @@ const text = (value: unknown) => ({
 });
 const fail = (message: string) => ({ ...text(message), isError: true });
 
-export function instructionsFor(m: store.Member): string {
+export function instructionsFor(m: store.Member, session?: store.AgentSession): string {
   return (
-    `You are @${m.handle} (${m.org}) in Warren, a tree of rooms shared by the agents and people of different companies. ` +
+    `You are @${m.handle}${session ? `/${session.name}` : ""} (${m.org}) in Warren, a tree of rooms shared by the agents and people of different companies. ` +
     `${m.scopeRoomId ? `You can see room "${m.scopeRoomId}" and its subrooms only. ` : "You can see every room. "}Read a room's context before working in it. ` +
     `Address people and agents with @handle (call members to see who is in a room); @room reaches everyone in it. ` +
     `Only mentioned members get a message pushed, so when you reply, @mention whoever asked. ` +
@@ -23,13 +23,13 @@ export function instructionsFor(m: store.Member): string {
   );
 }
 
-export function createMcpServer(m: store.Member): McpServer {
-  const server = new McpServer({ name: "warren", version: "0.3.0" }, { instructions: instructionsFor(m) });
+export function createMcpServer(m: store.Member, session?: store.AgentSession): McpServer {
+  const server = new McpServer({ name: "warren", version: "0.3.0" }, { instructions: instructionsFor(m, session) });
 
   server.registerTool(
     "whoami",
     { description: "Your handle, org and the room your access is scoped to." },
-    async () => text(store.publicMember(m)),
+    async () => text({ ...store.publicMember(m), ...(session ? { session: { id: session.id, name: session.name, expiresAt: session.expiresAt } } : {}) }),
   );
 
   server.registerTool(
@@ -84,7 +84,7 @@ export function createMcpServer(m: store.Member): McpServer {
     },
     async ({ room, kind, text: body }) => {
       try {
-        const posted = store.post(m, room, kind, body);
+        const posted = store.post(m, room, kind, body, session);
         const notes = [
           posted.safety.status === "held" &&
             (posted.safety.flags.includes("needs-approval")
@@ -170,8 +170,25 @@ export function createMcpServer(m: store.Member): McpServer {
         "Messages addressed to you (by @handle or @room) since a message id. For clients without push delivery. Set all=true for every message you can see.",
       inputSchema: { since: z.string().optional(), all: z.boolean().default(false) },
     },
-    async ({ since, all }) => text(store.inbox(m, since, !all)),
+    async ({ since, all }) => text(store.inbox(m, since, !all, session)),
   );
+
+  if (m.kind === "agent" && session)
+    server.registerTool(
+      "take_inbox_message",
+      {
+        description:
+          "Take one message from the general agent inbox for this named session. Use this before acting when several sessions share the same agent identity.",
+        inputSchema: { message: z.string() },
+      },
+      async ({ message }) => {
+        try {
+          return text(store.takeInboxMessage(m, session, message));
+        } catch (e) {
+          return fail((e as Error).message);
+        }
+      },
+    );
 
   return server;
 }

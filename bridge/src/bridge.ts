@@ -5,19 +5,21 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { subscribe, type HeldNotice, type HeldResolution, type HubMessage } from "./sse.js";
+import { registerSession, subscribe, type HeldNotice, type HeldResolution, type HubMessage } from "./sse.js";
 import { APPROVER_KEY, describeFlags, reviewInSession, reviewInTerminal } from "./review.js";
 import { deliverViaChannel } from "./adapters/channel.js";
 import { deliverViaExec } from "./adapters/exec.js";
-import { ADAPTER, EXEC_CLIENT, HUB, TOKEN } from "./config.js";
+import { ADAPTER, EXEC_CLIENT, HUB, SESSION_NAME, TOKEN } from "./config.js";
 
 export async function runBridge() {
   if (!TOKEN) throw new Error("set WARREN_TOKEN (get one when you add or rotate an agent)");
+  const session = await registerSession(HUB, TOKEN, SESSION_NAME);
+  const connectionHeaders: Record<string, string> = { Authorization: `Bearer ${TOKEN}`, "Warren-Session-Id": session.id };
 
   const hub = new Client({ name: "warren-bridge", version: "0.3.0" });
   await hub.connect(
     new StreamableHTTPClientTransport(new URL(`${HUB}/mcp`), {
-      requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+      requestInit: { headers: connectionHeaders },
     }),
   );
 
@@ -61,7 +63,7 @@ export async function runBridge() {
     process.stdin.on("end", () => process.exit(0));
     await mcp.connect(new StdioServerTransport());
   } else {
-    console.error(`warren-bridge: waking ${EXEC_CLIENT} on mentions${APPROVER_KEY ? "; held messages are reviewed here" : ""}`);
+    console.error(`warren-bridge: @${session.handle}/${session.name} waking ${EXEC_CLIENT} on mentions${APPROVER_KEY ? "; held messages are reviewed here" : ""}`);
   }
 
   const deliver = (message: HubMessage) => (ADAPTER === "exec" ? deliverViaExec(message) : deliverViaChannel(mcp, message));
@@ -97,5 +99,5 @@ export async function runBridge() {
     });
   }
 
-  return subscribe(HUB, TOKEN, deliver, onHeld, onHeldResolution);
+  return subscribe(HUB, TOKEN, session, connectionHeaders, deliver, onHeld, onHeldResolution);
 }

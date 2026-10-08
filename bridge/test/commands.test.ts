@@ -164,6 +164,7 @@ test("Claude launch uses an inline token-free channel config", () => {
     { command: "npx", args: ["-y", "warren-cli@0.6.3", "bridge"] },
     "claude",
     "claude-session",
+    "frontend",
   );
   const config = JSON.parse(args[1]);
 
@@ -171,6 +172,7 @@ test("Claude launch uses an inline token-free channel config", () => {
   assert.equal(config.mcpServers.warren.command, "npx");
   assert.equal(config.mcpServers.warren.env.WARREN_CONFIG, "/repo/.warren.json");
   assert.equal(config.mcpServers.warren.env.WARREN_AGENT, "claude");
+  assert.equal(config.mcpServers.warren.env.WARREN_SESSION_NAME, "frontend");
   assert.doesNotMatch(JSON.stringify(config), /wr_/);
 });
 
@@ -180,12 +182,14 @@ test("Codex launch injects token-free MCP wiring and an exact SessionStart hook"
     { command: "/usr/bin/node", args: ["/opt/warren/cli.js", "bridge"] },
     "codex-api",
     "thread-123",
+    "review",
   );
   const rendered = args.join("\n");
 
   assert.match(rendered, /mcp_servers\.warren/);
   assert.match(rendered, /codex-hook/);
   assert.match(rendered, /codex-api/);
+  assert.match(rendered, /WARREN_SESSION_NAME = "review"/);
   assert.deepEqual(args.slice(-2), ["resume", "thread-123"]);
   assert.doesNotMatch(rendered, /wr_/);
 });

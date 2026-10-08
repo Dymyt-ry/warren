@@ -34,6 +34,7 @@ function hubUrl(): string {
 
 export const HUB = hubUrl();
 export const TOKEN = process.env.WARREN_TOKEN;
+export const SESSION_NAME = process.env.WARREN_SESSION_NAME || "main";
 export const APPROVER_KEY = process.env.WARREN_APPROVER_KEY;
 export const ADAPTER = enumEnv("WARREN_ADAPTER", "channel", ["channel", "exec"] as const);
 export const EXEC_CLIENT = enumEnv("WARREN_EXEC_CLIENT", "codex", ["codex", "cursor"] as const);

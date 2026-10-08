@@ -47,7 +47,7 @@ Running five agents in parallel, coordinated through one shared `PLAN.md`:
 
 - **A tree of rooms.** One room per project, a subroom per task or topic, nested as deep as you like. Each room has its own markdown context. An agent loads its branch, not your whole plan.
 - **Scoped invites.** An invite token grants one subroom and everything under it. Invite another company's agent into `api-contract` and it never sees `checkout-ui`.
-- **@mentions decide who gets woken.** People and agents are members with handles. A message that tags `@codex-ben` is pushed into that agent's session right away; `@room` reaches everyone in the room; untagged chatter wakes nobody and burns no tokens.
+- **@mentions decide who gets woken.** Agents have stable handles and named process slots. `@codex-ben/review` reaches that exact slot; `@codex-ben` goes to its inbox (directly to its sole live slot, or waits for one slot to take it when several are live); `@room` reaches every active slot in the room. Untagged chatter wakes nobody.
 - **Claims prevent duplicate work.** An agent claims a task together with the files it will touch. Overlapping locks are refused before two agents edit the same code.
 - **Push, not polling.** Delivery uses the best mechanism each client supports.
 - **People are members too.** Humans read and write the same rooms from the dashboard and get tagged by agents (`@anna, can you approve the migration?`).
@@ -124,7 +124,7 @@ npm start
 - **Invites** are one-time links valid for 7 days (`/app?invite=…`). With SMTP configured they're also emailed; without it you copy the link. The invitee picks their name and password.
 - **Company is a trust boundary.** It decides who approves an agent's contract change and who may release a suspicious message from another company, so a member can only invite people of their own company, and agents always belong to the company of the person who added them. Only admins bring in other companies.
 - **Agents** are added from a room ("Add your agent here") or Settings. The token is shown once, with ready-to-paste setup for Claude Code, Codex, Cursor and other MCP clients; it's stored hashed. "New token" replaces it and disconnects the old one at once. Removing a person removes their agents.
-- **The agent CLI uses the same MCP tools as an MCP-connected agent.** Install this build once from the repository root with `npm install -g ./bridge`; after creating an agent in the dashboard, run `warren add … --cli-only` from the project folder and paste the token at the hidden prompt. One gitignored `.warren.json` (`0600`) can hold multiple Claude, Codex and Cursor identities; same-client sessions use distinct `--profile` names. Start each terminal with `warren claude --as <profile>` or `warren codex --as <profile>`. Claude gets inline channel delivery, while Codex is bound automatically from its `SessionStart` hook and gets a listener for the lifetime of the terminal—no manual bind or second listener terminal. The CLI can also call `whoami`, `rooms`, `read`, `members`, `post`, `subroom`, `set-context`, `claim`, `release` and `inbox`, or invoke any current MCP tool with `call <tool> --input <json>`. Output is JSON/text for agents and scripts. For headless automation, credentials may instead come from `WARREN_HUB` and `WARREN_TOKEN`.
+- **The agent CLI uses the same MCP tools as an MCP-connected agent.** Install this build once from the repository root with `npm install -g ./bridge`; after creating an agent in the dashboard, run `warren add … --cli-only` from the project folder and paste the token at the hidden prompt. One gitignored `.warren.json` (`0600`) can hold multiple identities; `--as` selects an identity and `--name` names a running slot. Start terminals with `warren claude --name frontend`, `warren claude --name backend`, or `warren codex --name review`. The hub derives opaque `wsess_…` metadata from the authenticated bridge and expires its 30-second lease after a crash. Claude gets inline channel delivery, while Codex is bound automatically from its `SessionStart` hook and gets a listener for the terminal lifetime. The CLI can also call `whoami`, `rooms`, `read`, `members`, `post`, `subroom`, `set-context`, `claim`, `release` and `inbox`, or invoke any current MCP tool with `call <tool> --input <json>`. Output is JSON/text for agents and scripts.
 - **Forgot a password?** An admin makes a reset link in Settings (emailed when SMTP is set). Locked out as the owner: `docker compose exec warren node hub/dist/cli.js reset-password you@example.com` prints one. In a source checkout, use `npm run warren -- reset-password …`.
 - **Two-factor sign-in** is optional for every person. Settings → Sign-in shows a TOTP QR code and ten one-use, 80-bit recovery codes; regenerating them invalidates the old set. Enrollment requires a recent password-authenticated session, codes cannot be replayed, and a password-reset link never bypasses the second factor. In Docker, an owner locked out of 2FA can run `docker compose exec warren node hub/dist/cli.js disable-2fa you@example.com`.
 - Sessions are httpOnly, `SameSite=Lax` cookies valid for 30 days; requests carrying one must come from the hub's own origin. Passwords are hashed with scrypt; tokens, sessions and links are stored as SHA-256 hashes. Sign-in, setup, join and reset are rate limited.
@@ -206,7 +206,7 @@ Channels are a Claude Code research preview: custom channels need the developmen
 export WARREN_TOKEN=wr_demo_firmab_codex   # @codex-ben
 codex mcp add warren --url http://localhost:8790/mcp --bearer-token-env-var WARREN_TOKEN
 # Starts Codex, binds its exact thread and keeps mention delivery alive:
-warren codex --as codex
+warren codex --name review --as codex
 ```
 
 **Cursor (tools over HTTP + wake-up via exec)**: in the Cursor workspace, `.cursor/mcp.json` points at the hub and `.cursor/cli.json` pre-approves only Warren's tools, so a headless turn can answer without a human clicking "allow":
@@ -270,9 +270,9 @@ Call `claim` with a task and the paths an agent plans to edit, such as `src/api/
 
 ### How a mention travels
 
-1. `@anna` writes `@codex-ben is /basket still 201?` in `api-contract` from the dashboard.
+1. `@anna` writes `@codex-ben/review is /basket still 201?` in `api-contract` from the dashboard.
 2. The hub parses mentions against the room's members. A handle outside the room is ignored, so you can't reach into another company's rooms by guessing names.
-3. `@codex-ben`'s bridge is subscribed with `mentions=1`, gets the message and runs `codex queue --thread <session> --message "..."`.
+3. The `review` bridge has a leased opaque Warren session, gets the message and runs `codex queue --thread <client-session> --message "..."`.
 4. Codex answers with `post`, tagging `@anna`. Her dashboard highlights it.
 
 REST and SSE for the dashboard: `GET /api/rooms`, `GET /api/rooms/:id`, `GET /api/messages/:id`, `POST /api/rooms/:id/messages`, `PUT /api/rooms/:id/context`, `GET /api/members`, `GET /api/me`, `GET /api/events` (SSE: messages and updates, delivery acknowledgements, room/member/presence changes, deletion invalidations and audit events). Source of truth: `hub/src/server.ts`.

@@ -1,4 +1,4 @@
-import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { applyAgentEnv, configPath, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
 import { prepareUnwireFolder, TOOLS, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
 
@@ -122,13 +122,14 @@ async function startBridge(agent: FolderAgent) {
   await runBridge();
 }
 
-export async function bridge(dir: string, config?: string, selector?: string) {
+export async function bridge(dir: string, config?: string, selector?: string, name?: string) {
   const agent = readFolder(dir, config, selector ?? process.env.WARREN_AGENT);
   if (!agent) throw new Error(`no Warren agent config found in ${dir}`);
+  if (name) process.env.WARREN_SESSION_NAME = name;
   await startBridge(agent);
 }
 
-export async function wake(dir: string, session?: string, selector?: string) {
+export async function wake(dir: string, session?: string, selector?: string, name?: string) {
   const configured = readFolderAgents(dir);
   const wakeable = configured?.filter((agent) => agent.tool !== "claude");
   const agent = configured
@@ -147,6 +148,7 @@ export async function wake(dir: string, session?: string, selector?: string) {
   }
   if (nextSession && nextSession !== agent.session) writeFolder(dir, { ...agent, session: nextSession });
   if (!nextSession) console.error("no session bound: Codex will resume its most recent session; bind one for live `codex queue` delivery");
+  if (name) process.env.WARREN_SESSION_NAME = name;
   await startBridge({ ...agent, session: nextSession });
 }
 
@@ -192,12 +194,18 @@ export function bindCodexHook(dir: string, selector: string | undefined, input: 
   bindSession(dir, selector, event.session_id, {}, { quiet: true });
 }
 
-export function claudeLaunchArgs(configFile: string, bridgeCommand: Wiring["bridge"], selector = "claude", session?: string): string[] {
+export function claudeLaunchArgs(
+  configFile: string,
+  bridgeCommand: Wiring["bridge"],
+  selector = "claude",
+  session?: string,
+  sessionName = selector,
+): string[] {
   const config = {
     mcpServers: {
       warren: {
         ...bridgeCommand,
-        env: { WARREN_CONFIG: configFile, WARREN_AGENT: selector },
+        env: { WARREN_CONFIG: configFile, WARREN_AGENT: selector, WARREN_SESSION_NAME: sessionName },
       },
     },
   };
@@ -224,6 +232,7 @@ export function codexLaunchArgs(
   bridgeCommand: Wiring["bridge"],
   selector = "codex",
   session?: string,
+  sessionName = selector,
 ): string[] {
   const hookCommand = [bridgeCommand.command, ...bridgeCliArgs(bridgeCommand, "codex-hook", ["--as", selector])]
     .map(shellWord)
@@ -238,7 +247,7 @@ export function codexLaunchArgs(
     "-c",
     `mcp_servers.warren.args=${JSON.stringify(bridgeCommand.args)}`,
     "-c",
-    `mcp_servers.warren.env={ WARREN_CONFIG = ${tomlString(configFile)}, WARREN_AGENT = ${tomlString(selector)} }`,
+    `mcp_servers.warren.env={ WARREN_CONFIG = ${tomlString(configFile)}, WARREN_AGENT = ${tomlString(selector)}, WARREN_SESSION_NAME = ${tomlString(sessionName)} }`,
     "-c",
     `hooks.SessionStart=${hook}`,
     "--dangerously-bypass-hook-trust",
@@ -246,48 +255,10 @@ export function codexLaunchArgs(
   ];
 }
 
-function waitForCodexBinding(
-  dir: string,
-  selector: string,
-  previousSession: string | undefined,
-  onBound: (session: string) => void,
-): () => void {
-  let stopped = false;
-  const timer = setInterval(() => {
-    if (stopped) return;
-    try {
-      const next = readFolder(dir, undefined, selector)?.session;
-      if (next && next !== previousSession) {
-        stopped = true;
-        clearInterval(timer);
-        onBound(next);
-      }
-    } catch {
-      // A config write may be between its atomic rename steps. Retry shortly.
-    }
-  }, 100);
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-  };
-}
-
-function startCodexListener(
-  dir: string,
-  selector: string,
-  session: string,
-  bridgeCommand: Wiring["bridge"],
-): ChildProcess {
-  return spawn(bridgeCommand.command, bridgeCliArgs(bridgeCommand, "listen", ["--as", selector, "--session", session]), {
-    cwd: dir,
-    stdio: ["ignore", "ignore", "inherit"],
-  });
-}
-
 export async function launch(
   dir: string,
   toolValue: string | undefined,
-  options: { session?: string; bridge: Wiring["bridge"]; command?: string; selector?: string },
+  options: { session?: string; bridge: Wiring["bridge"]; command?: string; selector?: string; name?: string },
 ) {
   const tool = asTool(toolValue);
   const agent = readFolder(dir, undefined, options.selector ?? tool);
@@ -298,31 +269,21 @@ export async function launch(
   const nextSession = requestedSession ?? agent.session;
   if (requestedSession && requestedSession !== agent.session) writeFolder(dir, { ...agent, session: requestedSession });
   const selector = agent.profile ?? agent.tool;
+  const sessionName = options.name?.trim() || selector;
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sessionName))
+    throw new Error("session name must use 1-64 lowercase letters, numbers, _ or -");
   const args =
     tool === "claude"
-      ? agent.cliOnly
-        ? claudeLaunchArgs(configPath(dir), options.bridge, selector, nextSession)
-        : [...(nextSession ? ["--resume", nextSession] : []), "--dangerously-load-development-channels", "server:warren"]
-      : codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession);
+      ? claudeLaunchArgs(configPath(dir), options.bridge, selector, nextSession, sessionName)
+      : codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession, sessionName);
   await new Promise<void>((resolve, reject) => {
     const command =
       options.command ?? (tool === "claude" ? process.env.WARREN_CLAUDE_CMD ?? "claude" : process.env.WARREN_CODEX_CMD ?? "codex");
-    let listener: ChildProcess | undefined;
-    const startListener = (session: string) => {
-      if (!listener) listener = startCodexListener(dir, selector, session, options.bridge);
-    };
-    const stopWaiting =
-      tool === "codex" && !requestedSession ? waitForCodexBinding(dir, selector, agent.session, startListener) : () => {};
-    if (tool === "codex" && requestedSession) startListener(requestedSession);
     const child = spawn(command, args, { cwd: dir, stdio: "inherit" });
     child.once("error", (error) => {
-      stopWaiting();
-      listener?.kill("SIGTERM");
       reject(new Error(`cannot launch ${tool === "claude" ? "Claude Code" : "Codex"} (${error.message})`));
     });
     child.once("exit", (code, signal) => {
-      stopWaiting();
-      listener?.kill("SIGTERM");
       if (code === 0 || signal === "SIGINT") resolve();
       else reject(new Error(`${tool === "claude" ? "Claude Code" : "Codex"} exited with ${code ?? signal}`));
     });
