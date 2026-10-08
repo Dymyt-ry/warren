@@ -202,6 +202,10 @@ export function claudeLaunchArgs(session?: string): string[] {
   ];
 }
 
+export function claudeLaunchEnv(sessionName: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return { ...env, WARREN_SESSION_NAME: sessionName };
+}
+
 const tomlString = (value: string) => JSON.stringify(value);
 const shellWord = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
@@ -258,7 +262,7 @@ export async function launch(
     throw new Error("session name must use 1-64 lowercase letters, numbers, _ or -");
   let args: string[];
   if (tool === "claude") {
-    wireClaudeLaunch(dir, agent, options.bridge, sessionName);
+    wireClaudeLaunch(dir, agent, options.bridge);
     args = claudeLaunchArgs(nextSession);
   } else {
     args = codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession, sessionName);
@@ -266,7 +270,11 @@ export async function launch(
   await new Promise<void>((resolve, reject) => {
     const command =
       options.command ?? (tool === "claude" ? process.env.WARREN_CLAUDE_CMD ?? "claude" : process.env.WARREN_CODEX_CMD ?? "codex");
-    const child = spawn(command, args, { cwd: dir, stdio: "inherit" });
+    const child = spawn(command, args, {
+      cwd: dir,
+      stdio: "inherit",
+      ...(tool === "claude" ? { env: claudeLaunchEnv(sessionName) } : {}),
+    });
     child.once("error", (error) => {
       reject(new Error(`cannot launch ${tool === "claude" ? "Claude Code" : "Codex"} (${error.message})`));
     });

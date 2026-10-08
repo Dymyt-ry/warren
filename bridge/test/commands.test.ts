@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { add, bindCodexHook, bindSession, claudeLaunchArgs, codexLaunchArgs } from "../src/cli/commands.js";
+import { add, bindCodexHook, bindSession, claudeLaunchArgs, claudeLaunchEnv, codexLaunchArgs } from "../src/cli/commands.js";
 import { readFolderAgents } from "../src/cli/config.js";
 import { wireClaudeLaunch } from "../src/cli/writers.js";
 
@@ -168,7 +168,7 @@ test("Claude launch uses the project-configured Warren channel", () => {
   ]);
 });
 
-test("Claude launch materializes a token-free project MCP entry with the requested slot", async (t) => {
+test("Claude launch keeps a stable token-free project MCP entry while the process selects the slot", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const original = globalThis.fetch;
@@ -177,17 +177,19 @@ test("Claude launch materializes a token-free project MCP entry with the request
   await add(dir, "claude", { ...options, cliOnly: true });
   const agent = readFolderAgents(dir)![0];
 
-  wireClaudeLaunch(dir, agent, options.bridge, "frontend");
+  wireClaudeLaunch(dir, agent, options.bridge);
 
   const mcp = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
   assert.equal(mcp.mcpServers.warren.env.WARREN_AGENT, "claude");
-  assert.equal(mcp.mcpServers.warren.env.WARREN_SESSION_NAME, "frontend");
+  assert.equal(mcp.mcpServers.warren.env.WARREN_SESSION_NAME, undefined);
   assert.doesNotMatch(JSON.stringify(mcp), /wr_/);
   assert.equal(readFolderAgents(dir)![0].cliOnly, undefined);
 
-  wireClaudeLaunch(dir, readFolderAgents(dir)![0], options.bridge, "review");
+  wireClaudeLaunch(dir, readFolderAgents(dir)![0], options.bridge);
   const replaced = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
-  assert.equal(replaced.mcpServers.warren.env.WARREN_SESSION_NAME, "review");
+  assert.deepEqual(replaced, mcp);
+  assert.equal(claudeLaunchEnv("frontend", { KEEP: "yes", WARREN_SESSION_NAME: "old" }).KEEP, "yes");
+  assert.equal(claudeLaunchEnv("frontend", { KEEP: "yes", WARREN_SESSION_NAME: "old" }).WARREN_SESSION_NAME, "frontend");
 });
 
 test("Codex launch injects token-free MCP wiring and an exact SessionStart hook", () => {

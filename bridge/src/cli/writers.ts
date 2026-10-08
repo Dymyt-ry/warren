@@ -246,7 +246,6 @@ export function wireClaudeLaunch(
   dir: string,
   agent: FolderAgent,
   bridge: Wiring["bridge"],
-  sessionName: string,
 ): FolderAgent {
   const releaseLock = acquireFolderLock(dir);
   try {
@@ -276,7 +275,10 @@ export function wireClaudeLaunch(
       }
     }
 
-    const managedMcp = managedBridge(bridge, agent.profile ?? agent.tool, sessionName);
+    // Keep the project MCP entry stable. The launcher supplies the ephemeral
+    // slot through Claude's inherited environment so changing --name does not
+    // make Claude ask the user to approve a changed .mcp.json again.
+    const managedMcp = managedBridge(bridge, agent.profile ?? agent.tool);
     const { cliOnly: _cliOnly, ...selected } = configured[index];
     const wired: FolderAgent = { ...selected, managedMcp };
     configured[index] = wired;
