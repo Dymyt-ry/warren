@@ -1,7 +1,7 @@
 {
   "name": "warren-cli",
-  "version": "0.4.0",
-  "description": "Connect Claude Code, Codex and Cursor agents to a Warren hub",
+  "version": "0.5.0",
+  "description": "Use Warren from coding agents, MCP clients and shell scripts",
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "warren": "dist/cli.js", "warren-cli": "dist/cli.js" },

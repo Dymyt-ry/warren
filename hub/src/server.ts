@@ -1461,7 +1461,7 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
 // PUBLIC_URL is a validated origin and generated tokens use a URL-safe alphabet,
 // so JSON's double quotes are portable across POSIX shells, PowerShell and cmd.exe.
 const shellArg = (value: string) => JSON.stringify(value);
-const CLI_PACKAGE = "warren-cli@0.4.0";
+const CLI_PACKAGE = "warren-cli@0.5.0";
 
 function setupSnippets(m: store.Member, token: string) {
   return {

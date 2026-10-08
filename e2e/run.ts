@@ -32,6 +32,7 @@ const ANNA = "wr_demo_anna";
 const BEN = "wr_demo_ben";
 const MAREK = "wr_demo_marek";
 const TSX_CLI = fileURLToPath(import.meta.resolve("tsx/cli"));
+const WARREN_CLI = fileURLToPath(new URL("../bridge/src/cli.ts", import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 let failed = false;
@@ -201,6 +202,44 @@ try {
   const visible = toolJson(await codex.callTool({ name: "list_rooms", arguments: {} })).map((r: { id: string }) => r.id);
   check(JSON.stringify(visible) === '["api-contract"]', `codex-ben sees only api-contract (got ${visible})`);
 
+  // The shell CLI is a real MCP client: the same token calls the same hub tools.
+  const cliDir = mkdtempSync(join(tmpdir(), "warren-agent-cli-e2e-"));
+  cleanup.push(() => rmSync(cliDir, { recursive: true, force: true }));
+  writeFileSync(
+    join(cliDir, ".warren.json"),
+    JSON.stringify({ tool: "codex", hub: HUB, token: CODEX, handle: "codex-ben" }),
+    { mode: 0o600 },
+  );
+  const runCli = (...args: string[]) =>
+    spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, ...args], { cwd: cliDir, encoding: "utf8", timeout: 10_000 });
+  const cliWho = runCli("whoami");
+  const cliRooms = runCli("rooms");
+  const cliPost = runCli("post", "api-contract", "Message sent by the agent CLI", "--kind", "note");
+  const cliGeneric = runCli("call", "read_room", "--input", JSON.stringify({ room: "api-contract", limit: 5 }));
+  check(cliWho.status === 0 && JSON.parse(cliWho.stdout).handle === "codex-ben", "agent CLI calls whoami through MCP");
+  check(
+    cliRooms.status === 0 && JSON.parse(cliRooms.stdout).map((room: { id: string }) => room.id).join(",") === "api-contract",
+    "agent CLI gets the same scoped rooms as MCP",
+  );
+  check(cliPost.status === 0 && JSON.parse(cliPost.stdout).from === "codex-ben", "agent CLI posts through the MCP tool");
+  check(
+    cliGeneric.status === 0 && JSON.parse(cliGeneric.stdout).messages.some((message: { text: string }) => message.text === "Message sent by the agent CLI"),
+    "agent CLI generic call accepts structured JSON and reads its post",
+  );
+  const headlessDir = mkdtempSync(join(tmpdir(), "warren-agent-cli-headless-e2e-"));
+  cleanup.push(() => rmSync(headlessDir, { recursive: true, force: true }));
+  writeFileSync(join(headlessDir, ".warren.json"), "project-controlled invalid JSON");
+  const cliHeadless = spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, "whoami"], {
+    cwd: headlessDir,
+    env: { ...process.env, WARREN_HUB: HUB, WARREN_TOKEN: CODEX },
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  check(
+    cliHeadless.status === 0 && JSON.parse(cliHeadless.stdout).handle === "codex-ben",
+    "headless agent CLI does not inspect a project-controlled credential file",
+  );
+
   // 2. channel push into claude-anna, only when mentioned
   const claude = new Client({ name: "fake-claude-code", version: "0" });
   const pushed: { content: string; meta: Record<string, string> }[] = [];
@@ -330,7 +369,7 @@ try {
       reviewerMe.org === "firmab" &&
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
-      reviewer.setup.cli.codex === `npx -y warren-cli@0.4.0 add codex --hub "${HUB}"` &&
+      reviewer.setup.cli.codex === `npx -y warren-cli@0.5.0 add codex --hub "${HUB}"` &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
     "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
   );
