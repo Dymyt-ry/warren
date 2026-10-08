@@ -1,5 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { applyAgentEnv, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
+import { execFileSync, spawn } from "node:child_process";
+import { applyAgentEnv, configPath, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
 import { prepareUnwireFolder, TOOLS, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
 
 interface Member {
@@ -36,6 +36,8 @@ export async function add(
     cliOnly?: boolean;
     bridge: Wiring["bridge"];
     wakeCommand: string;
+    bindCommand?: string;
+    launchCommand?: string;
     promptToken?: () => Promise<string>;
   },
 ) {
@@ -63,7 +65,13 @@ export async function add(
     { cliOnly: options.cliOnly },
   );
   console.log(`This folder's ${tool} is now @${member.handle}.`);
-  if (options.cliOnly) console.log(`Use Warren shell commands with \`--as ${tool}\`; no ${tool} project config was changed.`);
+  if (options.cliOnly && tool === "claude")
+    console.log(`No Claude project config was changed. Start a push-enabled session with:\n  ${options.launchCommand ?? "warren launch claude"}`);
+  else if (options.cliOnly)
+    console.log(
+      `No ${tool} project config was changed. Bind from inside the session, then listen in another terminal:\n` +
+        `  ${options.bindCommand ?? `warren bind --as ${tool}`}\n  ${options.wakeCommand}`,
+    );
   else if (tool === "claude") console.log("Start Claude Code with: claude --dangerously-load-development-channels server:warren");
   else console.log(`For always-on mention delivery, keep this running in a second terminal:\n  ${options.wakeCommand}`);
 }
@@ -125,13 +133,77 @@ export async function wake(dir: string, session?: string, selector?: string) {
         : selectFolderAgent(configured)
     : undefined;
   if (!agent) throw new Error("this folder has no Warren agent");
-  if (agent.tool === "claude") throw new Error("Claude Code receives channel pushes; it does not need `warren wake`");
+  if (agent.tool === "claude") throw new Error("Claude Code receives channel pushes through `warren launch claude`");
   let nextSession = session ?? agent.session;
   if (!nextSession && agent.tool === "cursor") {
     nextSession = execFileSync(process.env.WARREN_EXEC_CMD ?? "cursor-agent", ["create-chat"], { cwd: dir, encoding: "utf8" }).trim();
     console.error(`created Cursor chat ${nextSession}`);
   }
   if (nextSession && nextSession !== agent.session) writeFolder(dir, { ...agent, session: nextSession });
-  if (!nextSession) console.error("no session given: Codex will resume its most recent session");
+  if (!nextSession) console.error("no session bound: Codex will resume its most recent session; bind one for live `codex queue` delivery");
   await startBridge({ ...agent, session: nextSession });
+}
+
+export function bindSession(
+  dir: string,
+  selector?: string,
+  session?: string,
+  environment: Record<string, string | undefined> = process.env,
+) {
+  const agent = readFolder(dir, undefined, selector);
+  if (!agent) throw new Error("this folder has no Warren agent");
+  if (agent.tool === "claude") throw new Error("Claude sessions receive pushes through `warren launch claude`; they are not bound to the exec adapter");
+  const detected = (
+    session ??
+    (agent.tool === "codex"
+      ? environment.CODEX_THREAD_ID ?? environment.CODEX_SESSION_ID
+      : environment.CURSOR_SESSION_ID ?? environment.CURSOR_CHAT_ID)
+  )?.trim();
+  if (!detected) throw new Error(`no ${agent.tool} session detected; run this inside the agent session or pass --session <id>`);
+  writeFolder(dir, { ...agent, session: detected });
+  console.log(`@${agent.handle} is bound to ${agent.tool} session ${detected}.`);
+}
+
+export function claudeLaunchArgs(configFile: string, bridgeCommand: Wiring["bridge"], session?: string): string[] {
+  const config = {
+    mcpServers: {
+      warren: {
+        ...bridgeCommand,
+        env: { WARREN_CONFIG: configFile, WARREN_AGENT: "claude" },
+      },
+    },
+  };
+  return [
+    "--mcp-config",
+    JSON.stringify(config),
+    ...(session ? ["--resume", session] : []),
+    "--dangerously-load-development-channels",
+    "server:warren",
+  ];
+}
+
+export async function launch(
+  dir: string,
+  toolValue: string | undefined,
+  options: { session?: string; bridge: Wiring["bridge"]; command?: string },
+) {
+  const tool = asTool(toolValue);
+  if (tool !== "claude") throw new Error("`warren launch` currently supports Claude; use `warren listen --as codex` for Codex");
+  const agent = readFolder(dir, undefined, tool);
+  if (!agent) throw new Error("this folder has no Claude Warren agent");
+  if (!agent.cliOnly)
+    throw new Error("this Claude agent already has project MCP wiring; start it with `claude --dangerously-load-development-channels server:warren`");
+  const requestedSession = options.session?.trim();
+  if (options.session !== undefined && !requestedSession) throw new Error("Claude session id must not be empty");
+  const nextSession = requestedSession ?? agent.session;
+  if (requestedSession && requestedSession !== agent.session) writeFolder(dir, { ...agent, session: requestedSession });
+  const args = claudeLaunchArgs(configPath(dir), options.bridge, nextSession);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(options.command ?? process.env.WARREN_CLAUDE_CMD ?? "claude", args, { cwd: dir, stdio: "inherit" });
+    child.once("error", (error) => reject(new Error(`cannot launch Claude Code (${error.message})`)));
+    child.once("exit", (code, signal) => {
+      if (code === 0 || signal === "SIGINT") resolve();
+      else reject(new Error(`Claude Code exited with ${code ?? signal}`));
+    });
+  });
 }

@@ -374,7 +374,7 @@ export function InviteDialog({
 
 const CLIENTS: { id: string; label: string; adapter: Adapter; note: string }[] = [
   { id: "claude", label: "Claude Code", adapter: "channel", note: "Mentions are pushed straight into the running session." },
-  { id: "codex", label: "Codex", adapter: "exec", note: "A mention wakes its session with codex exec resume." },
+  { id: "codex", label: "Codex", adapter: "exec", note: "A mention is queued directly into its bound session." },
   { id: "cursor", label: "Cursor", adapter: "exec", note: "A mention wakes its chat with cursor-agent --resume." },
   { id: "other", label: "Other MCP", adapter: "inbox", note: "Any MCP client: it reads its inbox when it checks in." },
 ];
@@ -386,16 +386,10 @@ export function AgentSetup({ agent, client }: { agent: NewAgent; client: string 
       <CopyField label={t("Token")} value={agent.token} />
       {client !== "other" && <CopyField label={t("Connect from the project folder")} value={s.cli[client as "claude" | "codex" | "cursor"]} multiline />}
       {client === "claude" && (
-        <>
-          <CopyField label={t("Add to .mcp.json in your repo")} value={JSON.stringify(s.claudeCode.mcpJson, null, 2)} multiline />
-          <CopyField label={t("Then start Claude Code with")} value={s.claudeCode.launch} />
-        </>
+        <CopyField label={t("Start Claude Code with live push")} value={s.claudeCode.launch} />
       )}
       {client === "codex" && (
-        <>
-          <CopyField label={t("Connect Codex")} value={s.codex.mcp} multiline />
-          <CopyField label={t("Wake it on mentions (bridge, next to Codex)")} value={s.codex.wake} multiline />
-        </>
+        <CopyField label={t("Enable live CLI push")} value={s.codex.wake} multiline />
       )}
       {client === "cursor" && (
         <>

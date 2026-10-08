@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { add } from "../src/cli/commands.js";
+import { add, bindSession, claudeLaunchArgs } from "../src/cli/commands.js";
 import { readFolderAgents } from "../src/cli/config.js";
 
 const options = {
@@ -104,4 +104,54 @@ test("the CLI accepts --cli-only for add", () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /tool must be one of/);
   assert.doesNotMatch(result.stderr, /Unknown option/);
+});
+
+test("bind stores the current Codex thread for live queue delivery", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async () => new Response(JSON.stringify({ handle: "codex-owner", kind: "agent", adapter: "exec" }), { status: 200 });
+  await add(dir, "codex", { ...options, cliOnly: true });
+
+  bindSession(dir, "codex", undefined, { CODEX_THREAD_ID: "thread-123" });
+
+  assert.equal(readFolderAgents(dir)?.[0].session, "thread-123");
+});
+
+test("bind refuses to guess when it is outside a Codex session", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async () => new Response(JSON.stringify({ handle: "codex-owner", kind: "agent", adapter: "exec" }), { status: 200 });
+  await add(dir, "codex", { ...options, cliOnly: true });
+
+  assert.throws(() => bindSession(dir, "codex", undefined, {}), /no codex session detected/);
+});
+
+test("bind directs Claude to its channel launcher", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async () => new Response(JSON.stringify({ handle: "claude-owner", kind: "agent", adapter: "channel" }), { status: 200 });
+  await add(dir, "claude", { ...options, cliOnly: true });
+
+  assert.throws(() => bindSession(dir, "claude", "session-123", {}), /warren launch claude/);
+});
+
+test("Claude launch uses an inline token-free channel config", () => {
+  const args = claudeLaunchArgs(
+    "/repo/.warren.json",
+    { command: "npx", args: ["-y", "warren-cli@0.6.2", "bridge"] },
+    "claude-session",
+  );
+  const config = JSON.parse(args[1]);
+
+  assert.deepEqual(args.slice(2), ["--resume", "claude-session", "--dangerously-load-development-channels", "server:warren"]);
+  assert.equal(config.mcpServers.warren.command, "npx");
+  assert.equal(config.mcpServers.warren.env.WARREN_CONFIG, "/repo/.warren.json");
+  assert.equal(config.mcpServers.warren.env.WARREN_AGENT, "claude");
+  assert.doesNotMatch(JSON.stringify(config), /wr_/);
 });

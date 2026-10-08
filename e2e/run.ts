@@ -1,7 +1,7 @@
 // End-to-end: real hub, real bridges, fake agents.
 //   1. codex-ben (firmab, HTTP MCP) sees api-contract only
 //   2. a contract_change without a mention is NOT pushed; with @room it is pushed into claude-anna's session
-//   3. claude-anna @mentions codex-ben -> its bridge wakes "codex exec resume" (stubbed); an untagged note does not
+//   3. claude-anna @mentions codex-ben -> its bridge queues into the live Codex session (stubbed); an untagged note does not
 //   4. anna (human, dashboard) tags @claude-anna -> pushed; the agent answers @anna -> anna's stream flags it forYou
 //   5. scope: codex-ben can't post into checkout-ui, can't @mention someone outside the room
 //   6. inbox for pull clients returns only what's addressed to them
@@ -296,7 +296,7 @@ try {
   check(!!got && got.meta.room === "api-contract" && got.meta.from === "codex-ben" && got.meta.to === "room", "@room contract_change pushed into claude-anna session");
   check(!pushed.some((p) => p.content.includes("Refactoring")), "untagged note was not pushed");
 
-  // 3. exec wake-up for codex-ben (codex binary stubbed), only when mentioned
+  // 3. live queue delivery for codex-ben (codex binary stubbed), only when mentioned
   const dir = mkdtempSync(join(tmpdir(), "warren-e2e-"));
   const stub = join(dir, "codex");
   const out = join(dir, "args.txt");
@@ -326,8 +326,11 @@ try {
   });
   const args = await waitFor(() => (existsSync(out) ? readFileSync(out, "utf8") : undefined));
   await sleep(300);
-  const wakes = existsSync(out) ? readFileSync(out, "utf8").split("exec\nresume\n").length - 1 : 0;
-  check(!!args && args.startsWith("exec\nresume\ndemo-session\n") && args.includes("/basket still return 201"), "@codex-ben question woke codex via exec resume");
+  const wakes = existsSync(out) ? readFileSync(out, "utf8").split("queue\n--thread\n").length - 1 : 0;
+  check(
+    !!args && args.startsWith("queue\n--thread\ndemo-session\n--message\n") && args.includes("/basket still return 201"),
+    "@codex-ben question was queued into the live Codex session",
+  );
   check(wakes === 1, `untagged note did not wake codex (wakes: ${wakes})`);
 
   // 4. human <-> agent: anna tags claude-anna from the dashboard, the agent answers @anna
@@ -395,7 +398,9 @@ try {
       reviewerMe.org === "firmab" &&
       reviewerMe.owner === "ben" &&
       !!reviewer.setup?.codex &&
-      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.1 add codex --hub "${HUB}"` &&
+      reviewer.setup.cli.codex === `npx -y warren-cli@0.6.2 add codex --hub "${HUB}" --cli-only` &&
+      reviewer.setup.codex.wake.includes("warren-cli@0.6.2 bind --as codex") &&
+      reviewer.setup.codex.wake.includes("warren-cli@0.6.2 listen --as codex") &&
       !reviewer.setup.cli.codex.includes(reviewer.token),
     "ben's new agent belongs to ben and firmab, with a token-free, version-pinned CLI setup",
   );

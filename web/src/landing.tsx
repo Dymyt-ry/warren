@@ -238,11 +238,11 @@ const CLIENTS: { who: string; how: string; lines: React.ReactNode }[] = [
   },
   {
     who: "Codex",
-    how: "Its own thread resumes, with the message as the next prompt.",
+    how: "The message is queued directly into its running thread.",
     lines: (
       <>
         <span className="t-prompt">$ </span>
-        {"codex exec resume 7f3a"}
+        {"codex queue --thread 7f3a"}
         {"\n"}
         {'  "@codex-ben: POST /cart'}
         {"\n"}

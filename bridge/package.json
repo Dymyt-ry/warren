@@ -1,6 +1,6 @@
 {
   "name": "warren-cli",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Use Warren from coding agents, MCP clients and shell scripts",
   "license": "Apache-2.0",
   "type": "module",

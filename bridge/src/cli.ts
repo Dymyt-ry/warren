@@ -4,7 +4,7 @@ import { Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { bridge, add, leave, status, wake } from "./cli/commands.js";
+import { bridge, add, bindSession, launch, leave, status, wake } from "./cli/commands.js";
 import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
 
@@ -24,7 +24,11 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
   warren inbox [--since <message-id>] [--all]
   warren tools                       list the live hub's MCP tools as JSON
   warren call <tool> --input <json>  call any MCP tool; output is JSON/text
-  warren wake [--session <id>]       wake Codex/Cursor on mentions
+  warren bind --as codex             bind the current Codex session
+  warren listen [--session <id>]     push mentions into Codex/Cursor
+  warren launch claude [--session <id>]
+                                     launch Claude with live channel push
+  warren wake [--session <id>]       alias for listen
   warren status                      inspect this folder's agents
   warren leave                       remove one agent and its local wiring
   warren bridge [--config <file>]    run the local MCP/push bridge
@@ -112,12 +116,26 @@ try {
       session: values.session,
       cliOnly: values["cli-only"],
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
-      wakeCommand: `npx -y warren-cli@${version} wake --as ${argument}`,
+      wakeCommand: `npx -y warren-cli@${version} listen --as ${argument}`,
+      bindCommand: `npx -y warren-cli@${version} bind --as ${argument}`,
+      launchCommand: `npx -y warren-cli@${version} launch ${argument}`,
       promptToken,
     });
   else if (command === "wake") {
     noArguments("wake");
     await wake(dir, values.session, values.as);
+  } else if (command === "listen") {
+    noArguments("listen");
+    await wake(dir, values.session, values.as);
+  } else if (command === "bind") {
+    noArguments("bind");
+    bindSession(dir, values.as, values.session);
+  } else if (command === "launch") {
+    if (arguments_.length !== 1) throw new Error("launch requires exactly one client: claude");
+    await launch(dir, argument, {
+      session: values.session,
+      bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
+    });
   } else if (command === "status") {
     noArguments("status");
     await status(dir, values.as);
