@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { add, bindCodexHook, bindSession, claudeLaunchArgs, codexLaunchArgs } from "../src/cli/commands.js";
 import { readFolderAgents } from "../src/cli/config.js";
+import { wireClaudeLaunch } from "../src/cli/writers.js";
 
 const options = {
   hub: "https://warren.example.com",
@@ -158,22 +159,35 @@ test("bind directs Claude to its channel launcher", async (t) => {
   assert.throws(() => bindSession(dir, "claude", "session-123", {}), /warren launch claude/);
 });
 
-test("Claude launch uses an inline token-free channel config", () => {
-  const args = claudeLaunchArgs(
-    "/repo/.warren.json",
-    { command: "npx", args: ["-y", "warren-cli@0.6.3", "bridge"] },
-    "claude",
+test("Claude launch uses the project-configured Warren channel", () => {
+  assert.deepEqual(claudeLaunchArgs("claude-session"), [
+    "--resume",
     "claude-session",
-    "frontend",
-  );
-  const config = JSON.parse(args[1]);
+    "--dangerously-load-development-channels",
+    "server:warren",
+  ]);
+});
 
-  assert.deepEqual(args.slice(2), ["--resume", "claude-session", "--dangerously-load-development-channels", "server:warren"]);
-  assert.equal(config.mcpServers.warren.command, "npx");
-  assert.equal(config.mcpServers.warren.env.WARREN_CONFIG, "/repo/.warren.json");
-  assert.equal(config.mcpServers.warren.env.WARREN_AGENT, "claude");
-  assert.equal(config.mcpServers.warren.env.WARREN_SESSION_NAME, "frontend");
-  assert.doesNotMatch(JSON.stringify(config), /wr_/);
+test("Claude launch materializes a token-free project MCP entry with the requested slot", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "warren-cli-command-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const original = globalThis.fetch;
+  t.after(() => (globalThis.fetch = original));
+  globalThis.fetch = async () => new Response(JSON.stringify({ handle: "claude-owner", kind: "agent", adapter: "channel" }), { status: 200 });
+  await add(dir, "claude", { ...options, cliOnly: true });
+  const agent = readFolderAgents(dir)![0];
+
+  wireClaudeLaunch(dir, agent, options.bridge, "frontend");
+
+  const mcp = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
+  assert.equal(mcp.mcpServers.warren.env.WARREN_AGENT, "claude");
+  assert.equal(mcp.mcpServers.warren.env.WARREN_SESSION_NAME, "frontend");
+  assert.doesNotMatch(JSON.stringify(mcp), /wr_/);
+  assert.equal(readFolderAgents(dir)![0].cliOnly, undefined);
+
+  wireClaudeLaunch(dir, readFolderAgents(dir)![0], options.bridge, "review");
+  const replaced = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
+  assert.equal(replaced.mcpServers.warren.env.WARREN_SESSION_NAME, "review");
 });
 
 test("Codex launch injects token-free MCP wiring and an exact SessionStart hook", () => {

@@ -10,7 +10,7 @@ npm install -g ./bridge
 warren add codex --hub https://warren.example.com --cli-only
 ```
 
-The CLI stores credentials only in gitignored `.warren.json` with mode `0600`; shared MCP/TOML configuration contains no token. One folder can contain multiple Claude, Codex and Cursor agent identities, selected locally with `--as <profile>`. Each running process also asks the hub for a human-readable session slot with `--name`. `--cli-only` leaves `.codex/config.toml`, `.mcp.json`, and Cursor config untouched. `warren claude` starts Claude Code with live channel delivery; `warren codex` binds the exact new Codex thread through its `SessionStart` hook and keeps its mention listener alive for as long as the session is open.
+The CLI stores credentials only in gitignored `.warren.json` with mode `0600`; shared MCP/TOML configuration contains no token. One folder can contain multiple Claude, Codex and Cursor agent identities, selected locally with `--as <profile>`. Each running process also asks the hub for a human-readable session slot with `--name`. `--cli-only` leaves native client configuration untouched during `add`. On first `warren claude`, Warren materializes the token-free `.mcp.json` entry required by Claude Channels and updates it to the selected profile and slot. `warren codex` binds the exact new Codex thread through its `SessionStart` hook and keeps its mention listener alive for as long as the session is open.
 
 The normal hackathon workflow is one command per terminal:
 

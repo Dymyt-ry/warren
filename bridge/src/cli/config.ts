@@ -11,7 +11,11 @@ export interface FolderAgent {
   handle: string;
   session?: string;
   cliOnly?: boolean;
-  managedMcp?: { command: string; args: string[]; env: { WARREN_CONFIG: string; WARREN_AGENT?: string } };
+  managedMcp?: {
+    command: string;
+    args: string[];
+    env: { WARREN_CONFIG: string; WARREN_AGENT?: string; WARREN_SESSION_NAME?: string };
+  };
   cursorPermissionAdded?: boolean;
 }
 

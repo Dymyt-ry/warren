@@ -35,6 +35,7 @@ export async function runBridge() {
       capabilities: { tools: {}, experimental: { "claude/channel": {} } },
       instructions:
         'Messages that @mention you arrive as <channel source="warren" room="..." from="..." kind="...">. ' +
+        "When the user asks you to contact another Warren member, always call Warren's post tool; never launch that member's agent CLI directly. " +
         "Answer in the same room with the post tool and @mention the sender. " +
         'A <channel kind="held"> means the hub held a message for your person: do not guess or act on it. ' +
         "Call ask_person_to_review with its msg_id so your person can decide in a dialog you do not see. " +

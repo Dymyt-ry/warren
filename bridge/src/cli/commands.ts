@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { applyAgentEnv, configPath, hubOrigin, readFolder, readFolderAgents, selectFolderAgent, type FolderAgent } from "./config.js";
-import { prepareUnwireFolder, TOOLS, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
+import { prepareUnwireFolder, TOOLS, wireClaudeLaunch, wireFolder, writeFolder, type Tool, type Wiring } from "./writers.js";
 
 interface Member {
   handle: string;
@@ -194,24 +194,8 @@ export function bindCodexHook(dir: string, selector: string | undefined, input: 
   bindSession(dir, selector, event.session_id, {}, { quiet: true });
 }
 
-export function claudeLaunchArgs(
-  configFile: string,
-  bridgeCommand: Wiring["bridge"],
-  selector = "claude",
-  session?: string,
-  sessionName = selector,
-): string[] {
-  const config = {
-    mcpServers: {
-      warren: {
-        ...bridgeCommand,
-        env: { WARREN_CONFIG: configFile, WARREN_AGENT: selector, WARREN_SESSION_NAME: sessionName },
-      },
-    },
-  };
+export function claudeLaunchArgs(session?: string): string[] {
   return [
-    "--mcp-config",
-    JSON.stringify(config),
     ...(session ? ["--resume", session] : []),
     "--dangerously-load-development-channels",
     "server:warren",
@@ -272,10 +256,13 @@ export async function launch(
   const sessionName = options.name?.trim() || selector;
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(sessionName))
     throw new Error("session name must use 1-64 lowercase letters, numbers, _ or -");
-  const args =
-    tool === "claude"
-      ? claudeLaunchArgs(configPath(dir), options.bridge, selector, nextSession, sessionName)
-      : codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession, sessionName);
+  let args: string[];
+  if (tool === "claude") {
+    wireClaudeLaunch(dir, agent, options.bridge, sessionName);
+    args = claudeLaunchArgs(nextSession);
+  } else {
+    args = codexLaunchArgs(configPath(dir), options.bridge, selector, requestedSession, sessionName);
+  }
   await new Promise<void>((resolve, reject) => {
     const command =
       options.command ?? (tool === "claude" ? process.env.WARREN_CLAUDE_CMD ?? "claude" : process.env.WARREN_CODEX_CMD ?? "codex");

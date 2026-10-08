@@ -34,9 +34,13 @@ const LOCK_FILE = `${FOLDER_FILE}.lock`;
 const BEGIN = "# >>> warren (managed by warren-cli; `warren leave` removes it)";
 const END = "# <<< warren";
 
-const managedBridge = (bridge: Wiring["bridge"], selector: string) => ({
+const managedBridge = (bridge: Wiring["bridge"], selector: string, sessionName?: string) => ({
   ...bridge,
-  env: { WARREN_CONFIG: FOLDER_FILE, WARREN_AGENT: selector },
+  env: {
+    WARREN_CONFIG: FOLDER_FILE,
+    WARREN_AGENT: selector,
+    ...(sessionName ? { WARREN_SESSION_NAME: sessionName } : {}),
+  },
 });
 
 const codexBlock = (managedMcp: ReturnType<typeof managedBridge>) => [
@@ -227,6 +231,62 @@ export function writeFolder(dir: string, agent: FolderAgent) {
       throw new Error(`the ${agent.tool} agent changed while this command was starting; retry with its current identity`);
     configured[index] = agent;
     applyMutations([{ file, text: JSON.stringify(folderConfig(configured), null, 2) + "\n", mode: 0o600 }]);
+  } finally {
+    releaseLock();
+  }
+}
+
+/**
+ * Claude Channels only resolve servers from normal Claude MCP configuration;
+ * Claude 2.1.x starts `--mcp-config` servers but does not expose them to
+ * `server:<name>` channel selection. Materialize a token-free project entry
+ * before launch and make the active profile/slot its owner.
+ */
+export function wireClaudeLaunch(
+  dir: string,
+  agent: FolderAgent,
+  bridge: Wiring["bridge"],
+  sessionName: string,
+): FolderAgent {
+  const releaseLock = acquireFolderLock(dir);
+  try {
+    const configured = readFolderAgents(dir) ?? [];
+    const index = configured.findIndex(
+      (candidate) =>
+        candidate.profile === agent.profile &&
+        candidate.handle === agent.handle &&
+        candidate.token === agent.token &&
+        candidate.hub === agent.hub,
+    );
+    if (index === -1) throw new Error("the Claude agent changed while this command was starting; retry with its current identity");
+
+    const file = join(dir, ".mcp.json");
+    assertProjectPath(dir, file);
+    const config = readJson(file);
+    const servers = mcpServers(config, file);
+    if ("warren" in servers) {
+      const ownerIndex = configured.findIndex(
+        (candidate) => candidate.managedMcp && JSON.stringify(candidate.managedMcp) === JSON.stringify(servers.warren),
+      );
+      if (ownerIndex === -1)
+        throw new Error(`${file} already has a Warren server not managed by warren-cli; remove it first`);
+      if (ownerIndex !== index) {
+        const { managedMcp: _managedMcp, ...previousOwner } = configured[ownerIndex];
+        configured[ownerIndex] = { ...previousOwner, cliOnly: true };
+      }
+    }
+
+    const managedMcp = managedBridge(bridge, agent.profile ?? agent.tool, sessionName);
+    const { cliOnly: _cliOnly, ...selected } = configured[index];
+    const wired: FolderAgent = { ...selected, managedMcp };
+    configured[index] = wired;
+    const folderFile = join(dir, FOLDER_FILE);
+    assertProjectPath(dir, folderFile);
+    applyMutations([
+      jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }),
+      { file: folderFile, text: JSON.stringify(folderConfig(configured), null, 2) + "\n", mode: 0o600 },
+    ]);
+    return wired;
   } finally {
     releaseLock();
   }
