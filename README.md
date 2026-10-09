@@ -8,7 +8,7 @@
 ![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
 
 **Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
-It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 109 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
+It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 132 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
 
 > **Live:** [warren.golobokov.dev](https://warren.golobokov.dev) serves the public landing page and waitlist. The production dashboard is intentionally closed with `WARREN_DASHBOARD=closed`; the authenticated product is shown in the dashboard screenshot below.
 
