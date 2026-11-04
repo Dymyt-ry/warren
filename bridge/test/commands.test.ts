@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { add, bindCodexHook, bindSession, claudeLaunchArgs, claudeLaunchEnv, codexLaunchArgs } from "../src/cli/commands.js";
 import { readFolderAgents } from "../src/cli/config.js";
-import { wireClaudeLaunch } from "../src/cli/writers.js";
+import { unwireFolder, wireClaudeLaunch } from "../src/cli/writers.js";
 
 const options = {
   hub: "https://warren.example.com",
@@ -185,9 +185,19 @@ test("Claude launch keeps a stable token-free project MCP entry while the proces
   assert.doesNotMatch(JSON.stringify(mcp), /wr_/);
   assert.equal(readFolderAgents(dir)![0].cliOnly, undefined);
 
+  const settings = JSON.parse(readFileSync(join(dir, ".claude", "settings.local.json"), "utf8"));
+  assert.deepEqual(settings.enabledMcpjsonServers, ["warren"], "the project server is pre-approved so Claude's default 'continue without' can't disconnect Warren");
+  assert.match(readFileSync(join(dir, ".gitignore"), "utf8"), /^\/\.claude\/settings\.local\.json$/m);
+
   wireClaudeLaunch(dir, readFolderAgents(dir)![0], options.bridge);
   const replaced = JSON.parse(readFileSync(join(dir, ".mcp.json"), "utf8"));
   assert.deepEqual(replaced, mcp);
+  assert.equal(readFileSync(join(dir, ".gitignore"), "utf8").match(/settings\.local\.json/g)?.length, 1);
+
+  // Leaving withdraws the approval, so a later `warren` server is asked about again.
+  unwireFolder(dir, readFolderAgents(dir)![0]);
+  const after = JSON.parse(readFileSync(join(dir, ".claude", "settings.local.json"), "utf8"));
+  assert.deepEqual(after.enabledMcpjsonServers, []);
   assert.equal(claudeLaunchEnv("frontend", { KEEP: "yes", WARREN_SESSION_NAME: "old" }).KEEP, "yes");
   assert.equal(claudeLaunchEnv("frontend", { KEEP: "yes", WARREN_SESSION_NAME: "old" }).WARREN_SESSION_NAME, "frontend");
 });

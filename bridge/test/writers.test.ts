@@ -7,6 +7,9 @@ import test from "node:test";
 import { readFolder, readFolderAgents } from "../src/cli/config.js";
 import { prepareUnwireFolder, unwireFolder, wireFolder, writeFolder, type Tool } from "../src/cli/writers.js";
 
+// Lock contention normally waits up to 15 s for the other command; keep tests fast.
+process.env.WARREN_LOCK_WAIT_MS = "200";
+
 const secret = "wr_example_secret"; // gitleaks:allow
 const bridge = { command: "npx", args: ["-y", "warren-cli@0.4.0", "bridge"] };
 
@@ -488,6 +491,20 @@ test("tracked-file verification ignores a project-controlled git executable", { 
     assert.equal(existsSync(join(dir, ".warren.json")), true);
   } finally {
     process.env.PATH = originalPath;
+    done();
+  }
+});
+
+test("a lock left by a crashed command is taken over instead of blocking everyone", () => {
+  const { dir, done } = folder();
+  try {
+    // PID 2^22+ is beyond any live process on CI runners.
+    writeFileSync(join(dir, ".warren.json.lock"), JSON.stringify({ pid: 4_194_000, nonce: "dead" }));
+    wire(dir, "codex");
+    assert.equal(readFolder(dir)?.handle, "codex-agent");
+    assert.equal(existsSync(join(dir, ".warren.json.lock")), false);
+    assert.equal(existsSync(join(dir, ".warren.json.lock.takeover")), false);
+  } finally {
     done();
   }
 });

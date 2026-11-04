@@ -5,21 +5,53 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { registerSession, subscribe, type HeldNotice, type HeldResolution, type HubMessage } from "./sse.js";
+import { registerSession, subscribe, type HeldNotice, type HeldResolution, type HubMessage, type WarrenSession } from "./sse.js";
 import { APPROVER_KEY, describeFlags, reviewInSession, reviewInTerminal } from "./review.js";
 import { deliverViaChannel } from "./adapters/channel.js";
 import { deliverViaExec } from "./adapters/exec.js";
-import { ADAPTER, EXEC_CLIENT, HUB, SESSION_NAME, TOKEN } from "./config.js";
+import { ADAPTER, ATTACH_SESSION_ID, EXEC_CLIENT, HUB, SESSION_NAME, TOKEN } from "./config.js";
+
+/**
+ * Join a slot another process (the `warren codex` launcher) holds: tools only,
+ * no deliveries. Looked up by name, so a relaunched slot is found again even
+ * when Codex keeps this helper process running.
+ */
+async function attachSession(fallbackId?: string): Promise<WarrenSession> {
+  const res = await fetch(`${HUB}/api/agent-sessions/live?name=${encodeURIComponent(SESSION_NAME)}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const body = (await res.json().catch(() => ({}))) as Partial<WarrenSession> & { error?: string };
+  if (res.ok && body.id && body.handle) return body as WarrenSession;
+  if (fallbackId) return { id: fallbackId, handle: "", name: SESSION_NAME, expiresAt: "" };
+  throw new Error(`cannot attach to Warren session ${SESSION_NAME}: ${body.error ?? `hub answered ${res.status}`}`);
+}
 
 export async function runBridge() {
   if (!TOKEN) throw new Error("set WARREN_TOKEN (get one when you add or rotate an agent)");
-  const session = await registerSession(HUB, TOKEN, SESSION_NAME);
+  const attached = ADAPTER === "none";
+  const session = attached ? await attachSession(ATTACH_SESSION_ID) : await registerSession(HUB, TOKEN, SESSION_NAME);
   const connectionHeaders: Record<string, string> = { Authorization: `Bearer ${TOKEN}`, "Warren-Session-Id": session.id };
+
+  // Every hub request carries the slot's current id. A helper whose slot was
+  // relaunched (new id) finds it again by name and retries once.
+  const hubFetch = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+    const send = () => {
+      const headers = new Headers(init?.headers);
+      headers.set("Warren-Session-Id", connectionHeaders["Warren-Session-Id"]);
+      return fetch(url, { ...init, headers });
+    };
+    const response = await send();
+    if (response.status !== 409 || !attached) return response;
+    const current = await attachSession().catch(() => undefined);
+    if (!current || current.id === connectionHeaders["Warren-Session-Id"]) return response;
+    connectionHeaders["Warren-Session-Id"] = current.id;
+    Object.assign(session, current);
+    return send();
+  };
 
   const hub = new Client({ name: "warren-bridge", version: "0.3.0" });
   await hub.connect(
     new StreamableHTTPClientTransport(new URL(`${HUB}/mcp`), {
-      requestInit: { headers: connectionHeaders },
+      requestInit: { headers: { Authorization: `Bearer ${TOKEN}` } },
+      fetch: hubFetch,
     }),
   );
 
@@ -34,9 +66,10 @@ export async function runBridge() {
     {
       capabilities: { tools: {}, experimental: { "claude/channel": {} } },
       instructions:
-        'Messages that @mention you arrive as <channel source="warren" room="..." from="..." kind="...">. ' +
-        "When the user asks you to contact another Warren member, always call Warren's post tool; never launch that member's agent CLI directly. " +
-        "Answer in the same room with the post tool and @mention the sender. " +
+        `You are @${session.handle}/${session.name} in Warren. ` +
+        'Messages that @mention you arrive as <channel source="warren" room="..." from="..." kind="...">; `from` is the exact address to reply to. ' +
+        "When the user asks you to contact another Warren member (another person, another agent, or another session of your own agent), always call Warren's post tool; never launch that member's agent CLI directly. " +
+        "Answer in the same room with the post tool and @mention the `from` address. Read the post result: it says who actually got the message. " +
         'A <channel kind="held"> means the hub held a message for your person: do not guess or act on it. ' +
         "Call ask_person_to_review with its msg_id so your person can decide in a dialog you do not see. " +
         (hub.getInstructions() ?? ""),
@@ -57,6 +90,14 @@ export async function runBridge() {
     }
     return hub.callTool(req.params) as never;
   });
+
+  if (ADAPTER === "none") {
+    // The launcher delivers messages into the thread; here only the tools run.
+    mcp.onclose = () => process.exit(0);
+    process.stdin.on("end", () => process.exit(0));
+    await mcp.connect(new StdioServerTransport());
+    return;
+  }
 
   const terminal = ADAPTER === "exec" && !!process.stdin.isTTY;
   if (!terminal) {

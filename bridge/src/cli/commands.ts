@@ -284,3 +284,21 @@ export async function launch(
     });
   });
 }
+
+const SLOT = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** `warren codex --name <slot>`: a live Codex window (or headless thread) in Warren. */
+export async function launchCodexLive(
+  dir: string,
+  options: { selector?: string; name?: string; headless?: boolean; fresh?: boolean; thread?: string; bridge: Wiring["bridge"] },
+): Promise<number> {
+  const agent = readFolder(dir, undefined, options.selector ?? "codex");
+  if (!agent) throw new Error("this folder has no codex Warren agent; run `warren add codex --hub <url>` first");
+  if (agent.tool !== "codex") throw new Error(`@${agent.handle} is a ${agent.tool} agent, not codex`);
+  const slot = (options.name?.trim() || agent.profile || agent.tool).toLowerCase();
+  if (!SLOT.test(slot)) throw new Error("session name must use 1-64 lowercase letters, numbers, _ or -");
+  const { runCodexLive } = await import("../codex-live.js");
+  if (options.thread !== undefined && !options.thread.trim()) throw new Error("codex thread id must not be empty");
+  if (options.thread && options.fresh) throw new Error("--session resumes a thread; --new starts one: pick one");
+  return runCodexLive({ dir, agent, slot, bridge: options.bridge, headless: options.headless, fresh: options.fresh, thread: options.thread?.trim() });
+}

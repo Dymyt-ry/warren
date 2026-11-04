@@ -236,6 +236,25 @@ export function writeFolder(dir: string, agent: FolderAgent) {
   }
 }
 
+/** Remember (or forget, with `threadId` undefined) the Codex thread of one named slot. */
+export function rememberCodexThread(dir: string, agent: FolderAgent, slot: string, threadId: string | undefined) {
+  const releaseLock = acquireFolderLock(dir);
+  try {
+    const file = join(dir, FOLDER_FILE);
+    assertProjectPath(dir, file);
+    const configured = readFolderAgents(dir) ?? [];
+    const index = configured.findIndex((candidate) => candidate.profile === agent.profile && candidate.handle === agent.handle && candidate.token === agent.token);
+    if (index === -1) return;
+    const threads = { ...(configured[index].codexThreads ?? {}) };
+    if (threadId) threads[slot] = threadId;
+    else delete threads[slot];
+    configured[index] = { ...configured[index], codexThreads: threads };
+    applyMutations([{ file, text: JSON.stringify(folderConfig(configured), null, 2) + "\n", mode: 0o600 }]);
+  } finally {
+    releaseLock();
+  }
+}
+
 /**
  * Claude Channels only resolve servers from normal Claude MCP configuration;
  * Claude 2.1.x starts `--mcp-config` servers but does not expose them to
@@ -284,8 +303,39 @@ export function wireClaudeLaunch(
     configured[index] = wired;
     const folderFile = join(dir, FOLDER_FILE);
     assertProjectPath(dir, folderFile);
+    // Claude asks before starting a new project MCP server and its default
+    // answer is "continue without it", which silently disconnects Warren.
+    // Approve exactly this server in the gitignored per-user project settings.
+    const settingsFile = join(dir, ".claude", "settings.local.json");
+    assertProjectPath(dir, settingsFile);
+    const settings = readJson(settingsFile);
+    const enabled = Array.isArray(settings.enabledMcpjsonServers) ? (settings.enabledMcpjsonServers as unknown[]) : [];
+    const disabled = Array.isArray(settings.disabledMcpjsonServers) ? (settings.disabledMcpjsonServers as unknown[]) : [];
+    const settingsMutations: Mutation[] =
+      enabled.includes("warren") && !disabled.includes("warren")
+        ? []
+        : [
+            jsonMutation(settingsFile, {
+              ...settings,
+              enabledMcpjsonServers: [...enabled.filter((x) => x !== "warren"), "warren"],
+              ...(disabled.length ? { disabledMcpjsonServers: disabled.filter((x) => x !== "warren") } : {}),
+            }),
+          ];
+    if (settingsMutations.length) {
+      // Per-user settings must never be committed; Claude ignores them itself
+      // only when Claude created the file.
+      const ignoreFile = join(dir, ".gitignore");
+      assertProjectPath(dir, ignoreFile);
+      const ignoreText = readText(ignoreFile);
+      if (!ignoreText.split("\n").some((line) => [".claude/settings.local.json", "/.claude/settings.local.json"].includes(line.trim())))
+        settingsMutations.push({
+          file: ignoreFile,
+          text: `${ignoreText}${ignoreText && !ignoreText.endsWith("\n") ? "\n" : ""}/.claude/settings.local.json\n`,
+        });
+    }
     applyMutations([
       jsonMutation(file, { ...config, mcpServers: { ...servers, warren: managedMcp } }),
+      ...settingsMutations,
       { file: folderFile, text: JSON.stringify(folderConfig(configured), null, 2) + "\n", mode: 0o600 },
     ]);
     return wired;
@@ -312,7 +362,12 @@ function acquireFolderLock(dir: string): () => void {
   const file = join(dir, LOCK_FILE);
   assertProjectPath(dir, file);
   const owner = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
-  for (let attempt = 0; attempt < 3; attempt++) {
+  // Several terminals often start at once (`warren claude --name fe` and `--name be`):
+  // wait for the other command for a few seconds instead of failing.
+  const wait = Number(process.env.WARREN_LOCK_WAIT_MS ?? 15_000);
+  const deadline = Date.now() + (Number.isFinite(wait) && wait >= 0 ? wait : 15_000);
+  const pause = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  for (let attempt = 0; attempt < 10_000; attempt++) {
     let descriptor: number | undefined;
     let created = false;
     try {
@@ -347,11 +402,41 @@ function acquireFolderLock(dir: string): () => void {
       try {
         pid = (JSON.parse(readFileSync(file, "utf8")) as { pid?: unknown }).pid as number | undefined;
       } catch {}
-      if (Number.isInteger(pid) && pid! > 0 && !processIsAlive(pid!))
-        throw new Error(`${LOCK_FILE} was left by stopped process ${pid}; remove that lock file and retry`);
-      if (!Number.isInteger(pid) || pid! <= 0)
-        throw new Error(`${LOCK_FILE} is incomplete or stale; if no Warren command is running, remove that lock file and retry`);
-      throw new Error(`another Warren command is updating this folder (${LOCK_FILE} is locked)`);
+      if (Number.isInteger(pid) && pid! > 0 && !processIsAlive(pid!)) {
+        // Left by a command that crashed. Only the holder of a short-lived
+        // takeover lock may remove it, and only while it still holds that
+        // dead owner's content, so a fresh live lock is never deleted.
+        const takeover = `${file}.takeover`;
+        let claimed = false;
+        try {
+          closeSync(openSync(takeover, "wx", 0o600));
+          claimed = true;
+        } catch (takeoverError) {
+          if ((takeoverError as NodeJS.ErrnoException).code !== "EEXIST") throw takeoverError;
+          try {
+            if (Date.now() - statSync(takeover).mtimeMs > 5_000) rmSync(takeover, { force: true });
+          } catch {}
+        }
+        if (claimed) {
+          try {
+            const stale = readFileSync(file, "utf8");
+            const stalePid = (JSON.parse(stale) as { pid?: unknown }).pid;
+            if (stalePid === pid && !processIsAlive(pid!)) rmSync(file, { force: true });
+          } catch {
+          } finally {
+            rmSync(takeover, { force: true });
+          }
+          continue;
+        }
+        pause();
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        if (!Number.isInteger(pid) || pid! <= 0)
+          throw new Error(`${LOCK_FILE} is incomplete or stale; if no Warren command is running, remove that lock file and retry`);
+        throw new Error(`another Warren command is updating this folder (${LOCK_FILE} is locked)`);
+      }
+      pause();
     }
   }
   throw new Error(`cannot acquire ${LOCK_FILE}`);
@@ -373,7 +458,20 @@ function buildUnwireMutations(dir: string, agent: FolderAgent): Mutation[] {
     const file = join(dir, ".mcp.json");
     assertProjectPath(dir, file);
     const mutation = removeOwnedMcp(file, agent);
-    if (mutation) mutations.push(mutation);
+    if (mutation) {
+      mutations.push(mutation);
+      // Withdraw the approval Warren gave this server name, so a later
+      // `warren` entry in .mcp.json is asked about again.
+      const settingsFile = join(dir, ".claude", "settings.local.json");
+      assertProjectPath(dir, settingsFile);
+      if (existsSync(settingsFile)) {
+        const settings = readJson(settingsFile, false);
+        if (Array.isArray(settings.enabledMcpjsonServers) && settings.enabledMcpjsonServers.includes("warren")) {
+          const enabledMcpjsonServers = settings.enabledMcpjsonServers.filter((x: unknown) => x !== "warren");
+          mutations.push(jsonMutation(settingsFile, { ...settings, enabledMcpjsonServers }));
+        }
+      }
+    }
   } else if (agent.tool === "codex") {
     const file = join(dir, CODEX_FILE);
     assertProjectPath(dir, file);

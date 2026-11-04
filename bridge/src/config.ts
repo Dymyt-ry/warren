@@ -36,7 +36,10 @@ export const HUB = hubUrl();
 export const TOKEN = process.env.WARREN_TOKEN;
 export const SESSION_NAME = process.env.WARREN_SESSION_NAME || "main";
 export const APPROVER_KEY = process.env.WARREN_APPROVER_KEY;
-export const ADAPTER = enumEnv("WARREN_ADAPTER", "channel", ["channel", "exec"] as const);
+// "none": tools only. Used inside a Codex thread whose messages the `warren codex`
+// launcher delivers itself; the launcher owns the slot and passes WARREN_SESSION_ID.
+export const ADAPTER = enumEnv("WARREN_ADAPTER", "channel", ["channel", "exec", "none"] as const);
+export const ATTACH_SESSION_ID = process.env.WARREN_SESSION_ID;
 export const EXEC_CLIENT = enumEnv("WARREN_EXEC_CLIENT", "codex", ["codex", "cursor"] as const);
 export const EXEC_CMD = process.env.WARREN_EXEC_CMD || (EXEC_CLIENT === "cursor" ? "cursor-agent" : "codex");
 export const EXEC_SESSION = process.env.WARREN_EXEC_SESSION ?? process.env.WARREN_CODEX_SESSION;

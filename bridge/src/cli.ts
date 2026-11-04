@@ -4,7 +4,7 @@ import { Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { bridge, add, bindCodexHook, bindSession, launch, leave, status, wake } from "./cli/commands.js";
+import { bridge, add, bindCodexHook, bindSession, launch, launchCodexLive, leave, status, wake } from "./cli/commands.js";
 import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
 
@@ -27,8 +27,12 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
   warren bind --as codex             bind the current Codex session
   warren listen [--session <id>] [--name <slot>]
   warren claude --name <slot> [--session <client-id>] [--as <profile>]
-  warren codex --name <slot> [--session <client-id>] [--as <profile>]
-                                     launch a client with live message delivery
+                                     open Claude Code; mentions are pushed into it
+  warren codex --name <slot> [--headless] [--new] [--session <thread>] [--as <profile>]
+                                     open Codex; mentions become turns you see live
+                                     (--headless: no window, answers on its own;
+                                      --new: fresh thread instead of the slot's last one;
+                                      --exec: legacy wake-up via codex exec)
   warren launch <claude|codex>       long form of the two commands above
   warren wake [--session <id>]       alias for listen
   warren status                      inspect this folder's agents
@@ -64,6 +68,9 @@ const parsed = (() => {
         "cli-only": { type: "boolean" },
         profile: { type: "string" },
         name: { type: "string" },
+        headless: { type: "boolean" },
+        new: { type: "boolean" },
+        exec: { type: "boolean" },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "v" },
       },
@@ -116,7 +123,12 @@ async function promptToken(): Promise<string> {
   }
 }
 
+const codexOnly = (["headless", "new", "exec"] as const).filter((flag) => values[flag]);
+const codexCommand = command === "codex" || (command === "launch" && argument === "codex");
+
 try {
+  if (codexOnly.length && !codexCommand) throw new Error(`--${codexOnly.join(", --")} only applies to \`warren codex\``);
+  if (values.exec && (values.headless || values.new)) throw new Error("--exec is the legacy wake-up; --headless and --new belong to the live mode");
   if (values.version) console.log(version);
   else if (values.help || !command) console.log(help);
   else if (command === "add")
@@ -144,12 +156,32 @@ try {
   } else if (command === "codex-hook") {
     noArguments("codex-hook");
     bindCodexHook(dir, values.as, await stdinText());
+  } else if (command === "launch" && argument === "codex" && !values.exec) {
+    if (arguments_.length !== 1) throw new Error("launch requires exactly one client: claude or codex");
+    process.exitCode = await launchCodexLive(dir, {
+      selector: values.as,
+      name: values.name,
+      headless: values.headless,
+      fresh: values.new,
+      thread: values.session,
+      bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
+    });
   } else if (command === "launch") {
     if (arguments_.length !== 1) throw new Error("launch requires exactly one client: claude or codex");
     await launch(dir, argument, {
       session: values.session,
       selector: values.as,
       name: values.name,
+      bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
+    });
+  } else if (command === "codex" && !values.exec) {
+    noArguments(command);
+    process.exitCode = await launchCodexLive(dir, {
+      selector: values.as,
+      name: values.name,
+      headless: values.headless,
+      fresh: values.new,
+      thread: values.session,
       bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
     });
   } else if (command === "claude" || command === "codex") {

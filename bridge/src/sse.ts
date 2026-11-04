@@ -12,6 +12,13 @@ export interface HubMessage {
   mentionsRoom: boolean;
   at: string;
   late?: boolean; // sent while the agent was offline
+  metadata?: { from?: { agent?: string; sessionName?: string } };
+}
+
+/** The exact address to reply to: `claude-ana/api` for a named agent session, else the handle. */
+export function senderAddress(m: Pick<HubMessage, "from" | "metadata">): string {
+  const session = m.metadata?.from?.sessionName;
+  return session ? `${m.from}/${session}` : m.from;
 }
 
 /** A message to this agent that the hub holds until its person decides. No text: the agent must not read it. */
@@ -61,6 +68,7 @@ export async function subscribe(
   onMessage: (m: HubMessage) => void | Promise<void>,
   onHeld: (h: HeldNotice) => void | Promise<void> = () => {},
   onHeldResolution: (r: HeldResolution) => void | Promise<void> = () => {},
+  stop?: AbortSignal,
 ) {
   const headers: Record<string, string> = { ...connectionHeaders, Accept: "text/event-stream" };
   const seen = new Set<string>(); // replay and live stream can overlap
@@ -87,13 +95,25 @@ export async function subscribe(
     }
   };
 
-  for (;;) {
+  while (!stop?.aborted) {
     const controller = new AbortController();
     reconnect = () => controller.abort();
+    const onStop = () => controller.abort();
+    stop?.addEventListener("abort", onStop, { once: true });
     try {
       const res = await fetch(`${hub}/api/events?mentions=1`, { headers, signal: controller.signal });
       if (res.status === 409) {
-        const rebound = await registerSession(hub, token, session.name, session.id);
+        let rebound: WarrenSession;
+        try {
+          rebound = await registerSession(hub, token, session.name, session.id);
+        } catch (error) {
+          // Someone started this slot again elsewhere: that process owns it now.
+          if (/rebound to a newer/.test((error as Error).message)) {
+            console.error(`warren-bridge: @${session.handle}/${session.name} was started again elsewhere; this one stops receiving`);
+            return "evicted" as const;
+          }
+          throw error;
+        }
         Object.assign(session, rebound);
         connectionHeaders["Warren-Session-Id"] = rebound.id;
         headers["Warren-Session-Id"] = rebound.id;
@@ -120,8 +140,12 @@ export async function subscribe(
       }
     } catch (e) {
       // stderr only: stdout belongs to the MCP stdio transport
-      console.error(`warren-bridge: ${(e as Error).message}, reconnecting`);
+      if (!stop?.aborted) console.error(`warren-bridge: ${(e as Error).message}, reconnecting`);
+    } finally {
+      stop?.removeEventListener("abort", onStop);
     }
+    if (stop?.aborted) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
+  return "stopped" as const;
 }

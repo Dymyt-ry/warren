@@ -10,6 +10,8 @@ export interface FolderAgent {
   token: string;
   handle: string;
   session?: string;
+  /** Codex threads Warren opened for each named slot, resumed on the next launch of that slot. */
+  codexThreads?: Record<string, string>;
   cliOnly?: boolean;
   managedMcp?: {
     command: string;
@@ -146,7 +148,8 @@ export function applyAgentEnv(agent: FolderAgent) {
   Object.assign(process.env, {
     WARREN_HUB: agent.hub,
     WARREN_TOKEN: agent.token,
-    WARREN_ADAPTER: agent.tool === "claude" ? "channel" : "exec",
+    // "none" is set by the `warren codex` launcher, which delivers messages itself.
+    WARREN_ADAPTER: process.env.WARREN_ADAPTER === "none" ? "none" : agent.tool === "claude" ? "channel" : "exec",
     WARREN_EXEC_CLIENT: agent.tool === "cursor" ? "cursor" : "codex",
     WARREN_SESSION_NAME: process.env.WARREN_SESSION_NAME || agent.profile || agent.tool,
     ...(agent.session ? { WARREN_EXEC_SESSION: agent.session } : {}),
