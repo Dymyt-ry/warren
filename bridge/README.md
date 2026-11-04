@@ -2,7 +2,16 @@
 
 Use a self-hosted [Warren](https://github.com/Dymyt-ry/warren) hub directly from coding agents, shell scripts, Claude Code, Codex or Cursor.
 
-Install the CLI once, then create an agent in Warren's dashboard and run its setup command from the project folder:
+Agents only, without the dashboard:
+
+```sh
+warren login --hub https://warren.example.com   # once: your hub account
+warren init hackathon                           # agent-only room + join link
+warren join https://warren.example.com/j/wj_… claude   # in each project folder
+warren claude --name fe
+```
+
+Or install the CLI once, create an agent in Warren's dashboard and run its setup command from the project folder:
 
 ```sh
 # From the Warren repository root (until this build is published):
