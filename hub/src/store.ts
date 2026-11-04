@@ -21,6 +21,12 @@ export type MessageKind = (typeof MESSAGE_KINDS)[number];
 export interface MessageTarget {
   agent: string;
   sessionName?: string;
+  /**
+   * For a bare @agent: the sessions that were live when it was posted. Each of
+   * them gets its own durable copy; when none was live (empty list) the agent's
+   * first session to come back takes it. Absent on messages from older hubs.
+   */
+  sessions?: string[];
 }
 
 export interface MessageMetadata {
@@ -810,6 +816,12 @@ export function resumeAgentSession(m: Member, value: unknown, id: unknown): Agen
   return { ...existing, lastSeenAt: at, expiresAt };
 }
 
+/** The live incarnation of a named slot, for a process that joins a slot another process holds. */
+export function liveAgentSession(handle: string, value: unknown): AgentSession | undefined {
+  const name = validSessionName(value);
+  return activeAgentSessions(handle).find((session) => session.name === name);
+}
+
 export function agentSession(id: string | undefined, handle?: string, includeExpired = false): AgentSession | undefined {
   if (!id) return undefined;
   const row = db.prepare(`SELECT * FROM agent_sessions WHERE id = ? ${handle ? "AND handle = ?" : ""}`).get(...([id, handle].filter(Boolean) as string[])) as
@@ -1468,27 +1480,44 @@ const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
 const BROADCAST = new Set(["room", "here", "all"]);
 const EMAIL = /^[^\s@]{1,64}@[^\s@]{1,190}\.[^\s@]{2,63}$/;
 
+export interface ParsedMentions {
+  mentions: string[];
+  mentionsRoom: boolean;
+  targets: MessageTarget[];
+  /** `@x` that is nobody in this room (or a disabled member): ignored, reported back to the sender. */
+  ignored: string[];
+  /** `@agent/slot` with a slot the hub has never seen: sent to the agent as a whole instead. */
+  unknownSlots: string[];
+}
+
 /** Handles mentioned in `text` that are members of the room, plus whether @room was used. */
-export function parseMentions(text: string, roomId: string): { mentions: string[]; mentionsRoom: boolean; targets: MessageTarget[] } {
+export function parseMentions(text: string, roomId: string): ParsedMentions {
   const found = new Set<string>();
   const targets = new Map<string, MessageTarget>();
+  const ignored = new Set<string>();
+  const unknownSlots = new Set<string>();
   let mentionsRoom = false;
   for (const [, , raw, rawSession] of text.replace(CODE, " ").matchAll(MENTION)) {
     const handle = raw.toLowerCase();
     if (BROADCAST.has(handle) && !rawSession) mentionsRoom = true;
     else {
       const m = members.get(handle);
-      if (m && canSee(m, roomId)) {
-        const sessionName = rawSession?.toLowerCase();
-        // Preserve npm scopes and path-like prose: slash syntax is an address
-        // only for a slot the hub has actually seen for this agent.
-        if (sessionName && (m.kind !== "agent" || !publicAgentSessions(m.handle).some((session) => session.name === sessionName))) continue;
+      if (m && !m.disabled && canSee(m, roomId)) {
+        let sessionName: string | undefined = rawSession?.toLowerCase();
+        // Path-like prose after a person's handle (`@anna/notes`) is not an address.
+        if (sessionName && m.kind !== "agent") continue;
+        // A slot the hub never saw is most likely a typo or a session that has
+        // not started yet: reach the agent as a whole rather than nobody.
+        if (sessionName && !publicAgentSessions(m.handle).some((session) => session.name === sessionName)) {
+          unknownSlots.add(`${handle}/${sessionName}`);
+          sessionName = undefined;
+        }
         found.add(handle);
         targets.set(`${handle}\0${sessionName ?? ""}`, { agent: handle, ...(sessionName ? { sessionName } : {}) });
-      }
+      } else ignored.add(rawSession ? `${handle}/${rawSession.toLowerCase()}` : handle);
     }
   }
-  return { mentions: [...found], mentionsRoom, targets: [...targets.values()] };
+  return { mentions: [...found], mentionsRoom, targets: [...targets.values()], ignored: [...ignored], unknownSlots: [...unknownSlots] };
 }
 
 const toMessage = (r: Row): Message => ({
@@ -1552,7 +1581,13 @@ const decidesFor = (m: Member, key: string) => key === m.handle || key === `org:
  *  3. agents talking without a person, and agents' contract changes under the
  *     room's approval policy, close a room-wide gate until a person decides.
  */
-export function post(m: Member, roomId: string, kind: MessageKind, text: string, sourceSession?: AgentSession): Message {
+export function post(
+  m: Member,
+  roomId: string,
+  kind: MessageKind,
+  text: string,
+  sourceSession?: AgentSession,
+): Message & { delivery: DeliveryReport } {
   if (!canSee(m, roomId)) throw new Error(`no access to room ${roomId}`);
   if (m.paused) throw new Error(`@${m.handle} is paused by a person of ${m.org}; ask them to resume you`);
   if (typeof text !== "string" || !text.trim()) throw new Error("text is required");
@@ -1562,7 +1597,20 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string,
 
   const clean = redactSecrets(text);
   const flags = injectionFlags(clean.text);
-  const mentioned = parseMentions(clean.text, roomId);
+  const parsed = parseMentions(clean.text, roomId);
+  // Signing a message with your own address addresses nobody: keep only
+  // targets that reach someone else (a sibling session of your agent counts).
+  const mentioned = {
+    ...parsed,
+    targets: parsed.targets.filter(
+      (t) => t.agent !== m.handle || (!!t.sessionName && t.sessionName !== sourceSession?.name),
+    ),
+  };
+  if (!mentioned.targets.some((t) => t.agent === m.handle)) mentioned.mentions = mentioned.mentions.filter((h) => h !== m.handle);
+  mentioned.targets = mentioned.targets.map((t) => {
+    const target = members.get(t.agent);
+    return t.sessionName || target?.kind !== "agent" ? t : { ...t, sessions: activeAgentSessions(t.agent).map((x) => x.name) };
+  });
   const reaches = (a: Member) => mentioned.mentionsRoom || mentioned.mentions.includes(a.handle);
 
   const approvals: Record<string, Approval> = {};
@@ -1645,7 +1693,7 @@ export function post(m: Member, roomId: string, kind: MessageKind, text: string,
     // Tell the agents it was meant for (without the text) and their people.
     events.emit("held", msg);
   }
-  return msg;
+  return { ...msg, delivery: deliveryReport(msg, mentioned) };
 }
 
 export function getMessage(id: string): Message | undefined {
@@ -1760,7 +1808,11 @@ export function viewFor(viewer: Member | undefined, msg: Message): Message {
 export function isFor(m: Member, msg: Message): boolean {
   if (m.paused || msg.from === m.handle || !canSee(m, msg.roomId)) return false;
   if (m.kind === "agent" ? !agentMayRead(m, msg) : gateDecision(msg.safety) === "pending" || gateDecision(msg.safety) === "rejected") return false;
-  return msg.mentionsRoom || msg.mentions.includes(m.handle);
+  if (msg.mentionsRoom) return true;
+  // A session-less agent client (MCP over HTTP, legacy bridge) is the agent as
+  // a whole: it gets bare @agent messages, not ones meant for one named slot.
+  if (m.kind === "agent") return targetsFor(msg, m.handle).some((t) => !t.sessionName);
+  return msg.mentions.includes(m.handle);
 }
 
 const targetsFor = (msg: Message, handle: string) => {
@@ -1769,28 +1821,128 @@ const targetsFor = (msg: Message, handle: string) => {
   return structured.length ? structured : msg.mentions.includes(handle) ? [{ agent: handle }] : [];
 };
 
-/** Whether a named process session may see an addressed message in its inbox. */
-export function isInboxForSession(m: Member, msg: Message, session?: AgentSession): boolean {
-  if (!isFor(m, msg)) return false;
-  if (m.kind !== "agent") return true;
-  const targets = targetsFor(msg, m.handle);
-  if (msg.mentionsRoom) return !!session || activeAgentSessions(m.handle).length === 0;
-  if (targets.some((target) => !target.sessionName)) return true;
-  return !!session && targets.some((target) => target.sessionName === session.name);
-}
-
-/** Address matching without safety/readability checks (used for held notices). */
-export function isAddressedToAgentSession(m: Member, msg: Message, session: AgentSession, soleInbox = true): boolean {
-  const targets = targetsFor(msg, m.handle);
+/**
+ * Address matching for one named session of an agent, without safety checks
+ * (also used for text-free held notices):
+ *  - `@room` reaches every session, except the one that sent it;
+ *  - `@agent/slot` reaches exactly that slot, also from a sibling session of the same agent;
+ *  - a bare `@agent` reaches every live session of that agent (fan-out); an agent
+ *    mentioning its own bare handle (signing a reply) reaches nobody.
+ */
+export function isAddressedToAgentSession(m: Member, msg: Message, session: AgentSession): boolean {
+  if (session.handle !== m.handle) return false;
+  const own = msg.from === m.handle;
+  if (own && msg.metadata.from.sessionName === session.name) return false;
   if (msg.mentionsRoom) return true;
+  const targets = targetsFor(msg, m.handle);
   if (targets.some((target) => target.sessionName === session.name)) return true;
-  return soleInbox && targets.some((target) => !target.sessionName) && activeAgentSessions(m.handle).length === 1;
+  if (own) return false;
+  return targets.some((target) => !target.sessionName && (!target.sessions?.length || target.sessions.includes(session.name)));
 }
 
-/** Push semantics: exact slot, @room broadcast, or a sole active session. */
+/**
+ * How a session's copy is tracked: "session" for its own durable copy (exact
+ * slot, @room, a fan-out it was live for), "agent" for the agent-wide inbox
+ * (bare @agent while no session was live: the first session back takes it).
+ */
+export function deliveryScope(m: Member, msg: Message, session: AgentSession): "session" | "agent" {
+  if (msg.mentionsRoom) return "session";
+  const targets = targetsFor(msg, m.handle);
+  if (targets.some((t) => t.sessionName === session.name)) return "session";
+  return targets.some((t) => !t.sessionName && !!t.sessions?.length) ? "session" : "agent";
+}
+
+/** Push semantics for a named session: addressed to it and readable by its agent. */
 export function isForAgentSession(m: Member, msg: Message, session: AgentSession): boolean {
-  if (!isFor(m, msg) || session.handle !== m.handle) return false;
+  if (m.paused || !canSee(m, msg.roomId) || !agentMayRead(m, msg)) return false;
+  // Room-wide gates (agent loops, contract changes) hold a message from the
+  // agent's own sibling sessions too.
+  if (msg.from === m.handle && (gateDecision(msg.safety) === "pending" || gateDecision(msg.safety) === "rejected")) return false;
   return isAddressedToAgentSession(m, msg, session);
+}
+
+/** Whether `m` (in one named session, when given) should find the message in their inbox. */
+export function isInboxForSession(m: Member, msg: Message, session?: AgentSession): boolean {
+  return m.kind === "agent" && session ? isForAgentSession(m, msg, session) : isFor(m, msg);
+}
+
+/** When this slot name first connected: `@room` history before that is not replayed into it. */
+function slotFirstSeen(handle: string, name: string): string {
+  const row = db.prepare("SELECT min(created_at) AS at FROM agent_sessions WHERE handle = ? AND name = ?").get(handle, name) as { at: string | null } | undefined;
+  return row?.at ?? new Date().toISOString();
+}
+
+/** Whether a session should still get `msg` replayed on (re)connect. */
+function pendingForSession(m: Member, msg: Message, session: AgentSession): boolean {
+  if (!isForAgentSession(m, msg, session) || wasDeliveredToSession(msg.id, session)) return false;
+  if (targetsFor(msg, m.handle).some((target) => target.sessionName === session.name)) return true;
+  if (msg.mentionsRoom) return msg.at >= slotFirstSeen(m.handle, session.name);
+  // A fan-out this session was live for stays its own until it acknowledges;
+  // to an agent with no live session, the first session back takes it.
+  return deliveryScope(m, msg, session) === "session" || !wasDelivered(msg.id, m.handle);
+}
+
+/** Who a message reaches, in words the sender (person, agent or CLI) can act on. */
+export interface DeliveryReport {
+  /** Pushed now: `@handle` for people and agents, `@agent/slot` for live agent sessions. */
+  live: string[];
+  /** Addressed but offline: delivered when they connect (agents) or sign in (people). */
+  queued: string[];
+  /** Held for a person's review before it reaches these agents. */
+  held: string[];
+  ignored: string[];
+  unknownSlots: string[];
+  summary: string;
+}
+
+export function deliveryReport(msg: Message, parsed?: Pick<ParsedMentions, "ignored" | "unknownSlots">): DeliveryReport {
+  const live: string[] = [];
+  const queued: string[] = [];
+  const held: string[] = [];
+  for (const x of roomMembers(msg.roomId)) {
+    if (x.kind === "human") {
+      if (!isFor(x, msg)) continue;
+      (isOnline(x.handle) ? live : queued).push("@" + x.handle);
+      continue;
+    }
+    const sessions = activeAgentSessions(x.handle);
+    const addressed = sessions.length
+      ? sessions.filter((s) => isAddressedToAgentSession(x, msg, s))
+      : [];
+    const mentioned =
+      addressed.length > 0 ||
+      (x.handle !== msg.from && (msg.mentionsRoom || msg.mentions.includes(x.handle))) ||
+      targetsFor(msg, x.handle).some((t) => t.sessionName && !(x.handle === msg.from && t.sessionName === msg.metadata.from.sessionName));
+    if (!mentioned) continue;
+    if (x.paused) {
+      queued.push(`@${x.handle} (paused)`);
+      continue;
+    }
+    const ownGate = x.handle === msg.from && (gateDecision(msg.safety) === "pending" || gateDecision(msg.safety) === "rejected");
+    if (!agentMayRead(x, msg) || ownGate) {
+      held.push("@" + x.handle);
+      continue;
+    }
+    if (addressed.length) live.push(...addressed.map((s) => `@${x.handle}/${s.name}`));
+    else if (sessions.length === 0 && isOnline(x.handle)) live.push("@" + x.handle);
+    // Exact slots that are not running wait under their own address.
+    const offlineSlots = targetsFor(msg, x.handle)
+      .filter((t) => t.sessionName && !sessions.some((s) => s.name === t.sessionName) && !(x.handle === msg.from && t.sessionName === msg.metadata.from.sessionName))
+      .map((t) => `@${x.handle}/${t.sessionName}`);
+    if (offlineSlots.length) queued.push(...offlineSlots);
+    else if (!addressed.length && !(sessions.length === 0 && isOnline(x.handle))) queued.push("@" + x.handle);
+  }
+  const ignored = (parsed?.ignored ?? []).map((h) => "@" + h);
+  const unknownSlots = (parsed?.unknownSlots ?? []).map((h) => "@" + h);
+  const parts: string[] = [];
+  if (live.length) parts.push(`delivered now to ${live.join(", ")}`);
+  if (queued.length) parts.push(`queued for ${queued.join(", ")} (offline; they get it when they connect)`);
+  if (held.length) parts.push(`held for human review before it reaches ${held.join(", ")}`);
+  if (!live.length && !queued.length && !held.length)
+    parts.push("nobody was notified: it is in the room history only. Mention @handle (or @handle/session) to reach someone, or @room for everyone");
+  if (unknownSlots.length) parts.push(`no session named ${unknownSlots.join(", ")} has ever connected, so the whole agent was addressed`);
+  if (ignored.length) parts.push(`${ignored.join(", ")} ${ignored.length === 1 ? "is" : "are"} not in this room and got nothing`);
+  return { live, queued, held, ignored, unknownSlots, summary: parts.join("; ") + "." };
 }
 
 /**
@@ -1801,15 +1953,19 @@ export function isForAgentSession(m: Member, msg: Message, session: AgentSession
 export function inbox(m: Member, sinceId?: string, mentionsOnly = false, session?: AgentSession): Message[] {
   const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
   const since = sinceId ? (db.prepare("SELECT seq FROM messages WHERE id = ?").get(sinceId) as { seq: number } | undefined)?.seq : undefined;
+  // A named session also reads what its sibling sessions (same handle) wrote.
+  const exclude = session ? "" : m.handle;
   const rows = (
     since === undefined
       ? (db
           .prepare("SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? ORDER BY seq DESC LIMIT 500")
-          .all(visible, m.handle) as Row[]).reverse()
+          .all(visible, exclude) as Row[]).reverse()
       : (db
           .prepare("SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ? ORDER BY seq LIMIT 500")
-          .all(visible, m.handle, since) as Row[])
-  ).map(toMessage);
+          .all(visible, exclude, since) as Row[])
+  )
+    .map(toMessage)
+    .filter((x) => !session || x.from !== m.handle || x.metadata.from.sessionName !== session.name);
   const out = rows.filter((x) => !mentionsOnly || (m.kind === "agent" ? isInboxForSession(m, x, session) : isFor(m, x)));
   return out.map((x) => viewFor(m, x));
 }
@@ -1818,10 +1974,12 @@ export function inbox(m: Member, sinceId?: string, mentionsOnly = false, session
 export function takeInboxMessage(m: Member, session: AgentSession, messageId: string): Message {
   const msg = getMessage(messageId);
   if (!msg || !isInboxForSession(m, msg, session)) throw new Error("no such inbox message");
-  const targets = targetsFor(msg, m.handle);
-  const general = !msg.mentionsRoom && targets.some((target) => !target.sessionName);
-  const accepted = general ? markDelivered(msg, m.handle) : markSessionDelivered(msg, session);
-  if (!accepted) throw new Error("that inbox message was already taken");
+  if (deliveryScope(m, msg, session) === "agent") {
+    // The agent-wide copy: exactly one session takes it.
+    const taken = db.prepare("INSERT OR IGNORE INTO deliveries (message_id, handle, at) VALUES (?, ?, ?)").run(msg.id, m.handle, new Date().toISOString()).changes === 1;
+    if (!taken) throw new Error("that inbox message was already taken");
+    markSessionDelivered(msg, session);
+  } else if (!markSessionDelivered(msg, session)) throw new Error("that inbox message was already taken");
   return viewFor(m, msg);
 }
 
@@ -1844,9 +2002,9 @@ export function markSessionDelivered(msg: Message, session: AgentSession): boole
       .prepare("INSERT OR IGNORE INTO session_deliveries (message_id, handle, session_name, at) VALUES (?, ?, ?, ?)")
       .run(msg.id, session.handle, session.name, new Date().toISOString()).changes === 1;
   if (done) {
-    // The dashboard's compact delivery line remains agent-level.
-    markDelivered(msg, session.handle);
-    events.emit("session_delivery", { messageId: msg.id, roomId: msg.roomId, handle: session.handle, sessionName: session.name });
+    // Agent-level row: offline catch-up and privacy export use it.
+    db.prepare("INSERT OR IGNORE INTO deliveries (message_id, handle, at) VALUES (?, ?, ?)").run(msg.id, session.handle, new Date().toISOString());
+    events.emit("delivery", { messageId: msg.id, roomId: msg.roomId, handle: `${session.handle}/${session.name}` });
   }
   return done;
 }
@@ -1857,15 +2015,25 @@ export function wasDeliveredToSession(messageId: string, session: AgentSession):
     .get(messageId, session.handle, session.name);
 }
 
-/** Handles that got each message pushed or read it from their inbox. */
+/**
+ * Who got each message: `handle/session` for each named agent session that
+ * acknowledged it, plain `handle` for people and session-less clients.
+ */
 export function deliveriesOf(ids: string[]): Map<string, string[]> {
   const out = new Map<string, string[]>();
   if (!ids.length) return out;
-  const rows = db.prepare("SELECT message_id, handle FROM deliveries WHERE message_id IN (SELECT value FROM json_each(?))").all(JSON.stringify(ids)) as {
+  const list = JSON.stringify(ids);
+  const bySession = db
+    .prepare("SELECT message_id, handle, session_name FROM session_deliveries WHERE message_id IN (SELECT value FROM json_each(?)) ORDER BY at")
+    .all(list) as { message_id: string; handle: string; session_name: string }[];
+  const covered = new Set(bySession.map((r) => `${r.message_id}\0${r.handle}`));
+  for (const r of bySession) out.set(r.message_id, [...(out.get(r.message_id) ?? []), `${r.handle}/${r.session_name}`]);
+  const rows = db.prepare("SELECT message_id, handle FROM deliveries WHERE message_id IN (SELECT value FROM json_each(?)) ORDER BY at").all(list) as {
     message_id: string;
     handle: string;
   }[];
-  for (const r of rows) out.set(r.message_id, [...(out.get(r.message_id) ?? []), r.handle]);
+  for (const r of rows)
+    if (!covered.has(`${r.message_id}\0${r.handle}`)) out.set(r.message_id, [...(out.get(r.message_id) ?? []), r.handle]);
   return out;
 }
 
@@ -1885,9 +2053,10 @@ export function undelivered(m: Member, afterSeq = 0, pageSize = 200): MessagePag
   const rows = db
     .prepare(
       `SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ?
+       AND (mentions_room = 1 OR EXISTS (SELECT 1 FROM json_each(messages.mentions) WHERE value = ?))
        AND id NOT IN (SELECT message_id FROM deliveries WHERE handle = ?) ORDER BY seq LIMIT ?`,
     )
-    .all(visible, m.handle, afterSeq, m.handle, limit) as Row[];
+    .all(visible, m.handle, afterSeq, m.handle, m.handle, limit) as Row[];
   return {
     messages: rows.map(toMessage).filter((x) => isFor(m, x)),
     nextSeq: rows.length === limit ? Number(rows[rows.length - 1].seq) : null,
@@ -1898,17 +2067,16 @@ export function undelivered(m: Member, afterSeq = 0, pageSize = 200): MessagePag
 export function undeliveredForSession(m: Member, session: AgentSession, afterSeq = 0, pageSize = 200): MessagePage {
   const visible = JSON.stringify(visibleRooms(m).map((r) => r.id));
   const limit = Math.max(1, Math.min(500, Math.floor(pageSize) || 200));
+  // Only rows that can concern this agent, and not yet acknowledged by this slot.
   const rows = db
     .prepare(
-      `SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND from_handle != ? AND seq > ?
+      `SELECT * FROM messages WHERE room_id IN (SELECT value FROM json_each(?)) AND seq > ?
+         AND (mentions_room = 1 OR EXISTS (SELECT 1 FROM json_each(messages.mentions) WHERE value = ?))
+         AND id NOT IN (SELECT message_id FROM session_deliveries WHERE handle = ? AND session_name = ?)
        ORDER BY seq LIMIT ?`,
     )
-    .all(visible, m.handle, afterSeq, limit) as Row[];
-  const messages = rows.map(toMessage).filter((msg) => {
-    if (!isForAgentSession(m, msg, session)) return false;
-    const general = !msg.mentionsRoom && targetsFor(msg, m.handle).some((target) => !target.sessionName);
-    return general ? !wasDelivered(msg.id, m.handle) : !wasDeliveredToSession(msg.id, session);
-  });
+    .all(visible, afterSeq, m.handle, m.handle, session.name, limit) as Row[];
+  const messages = rows.map(toMessage).filter((msg) => pendingForSession(m, msg, session));
   return { messages, nextSeq: rows.length === limit ? Number(rows[rows.length - 1].seq) : null };
 }
 
@@ -1981,9 +2149,13 @@ export function setPaused(actor: Member, handle: string, paused: boolean): Membe
   if (target.kind !== "agent") throw new Error(`@${handle} is a person, not an agent`);
   if (target.org !== actor.org) throw new Error(`only people of ${target.org} can pause @${handle}`);
   if (!canSee(actor, target.scopeRoomId!)) throw new Error(`no such member @${handle}`);
+  const wasPaused = target.paused;
   target.paused = paused;
   db.prepare("UPDATE members SET paused = ? WHERE handle = ?").run(paused ? 1 : 0, target.handle);
   events.emit("member", publicMember(target));
+  // Messages sent while paused were never pushed: resumed bridges reconnect
+  // and catch up on them (they stay unacknowledged until then).
+  if (wasPaused && !paused) events.emit("reconnect", target.handle);
   audit({
     type: paused ? "paused" : "resumed",
     roomId: target.scopeRoomId!,

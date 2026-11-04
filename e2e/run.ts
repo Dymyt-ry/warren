@@ -48,9 +48,9 @@ async function waitFor<T>(fn: () => T | undefined | Promise<T | undefined>, ms =
   }
 }
 
-const api = (path: string, token?: string, body?: unknown) =>
+const api = (path: string, token?: string, body?: unknown, method?: string) =>
   fetch(`${HUB}${path}`, {
-    method: body ? "POST" : "GET",
+    method: method ?? (body ? "POST" : "GET"),
     headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -609,7 +609,7 @@ try {
   };
 
   /** A v2 bridge stream bound to a human-readable slot and opaque hub session. */
-  const namedAgentStream = async (token: string, name: string) => {
+  const namedAgentStream = async (token: string, name: string, acknowledge = true) => {
     const session = await api("/api/agent-sessions", token, { name }).then((r) => r.json());
     const got: { event: string; data: any }[] = [];
     const ctl = new AbortController();
@@ -629,7 +629,7 @@ try {
             if (event && data) {
               const parsed = JSON.parse(data);
               got.push({ event, data: parsed });
-              if (event === "message")
+              if (event === "message" && acknowledge)
                 await fetch(`${HUB}/api/deliveries/${parsed.id}/ack`, { method: "POST", headers });
             }
           }
@@ -652,12 +652,60 @@ try {
       exactSlot.metadata.to[0]?.sessionName === "frontend",
     "@agent/slot routes only to that named session with structured metadata",
   );
-  const sharedInbox = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} one session must take this` }).then((r) => r.json());
+  check(
+    JSON.stringify(exactSlot.delivery?.live) === JSON.stringify([`@${slotAgent.handle}/frontend`]),
+    `the post result reports exactly who got it (${exactSlot.delivery?.summary})`,
+  );
+  const fanOut = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} every session should see this` }).then((r) => r.json());
+  const fannedOut = await waitFor(() =>
+    frontend.got.some((e) => e.event === "message" && e.data.id === fanOut.id) && backend.got.some((e) => e.event === "message" && e.data.id === fanOut.id)
+      ? true
+      : undefined,
+  );
+  check(!!fannedOut && fanOut.delivery?.live?.length === 2, "a bare @agent reaches every live session of that agent");
+  const sessionPost = (stream: { headers: Record<string, string> }, text: string) =>
+    fetch(`${HUB}/api/rooms/api-contract/messages`, {
+      method: "POST",
+      headers: { ...stream.headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }).then((r) => r.json());
+  const siblingMsg = await sessionPost(frontend, `@${slotAgent.handle}/backend can you take the API part?`);
+  await waitFor(() => backend.got.find((e) => e.event === "message" && e.data.id === siblingMsg.id));
+  await sleep(200);
+  check(
+    backend.got.some((e) => e.event === "message" && e.data.id === siblingMsg.id && e.data.metadata?.from?.sessionName === "frontend") &&
+      !frontend.got.some((e) => e.event === "message" && e.data.id === siblingMsg.id),
+    "sibling sessions of one agent can message each other, and the reply address names the sending session",
+  );
+  const siblingView = await api("/api/rooms/api-contract", MAREK).then((r) => r.json());
+  check(
+    siblingView.messages.find((x: { id: string }) => x.id === siblingMsg.id)?.delivered?.includes(`${slotAgent.handle}/backend`),
+    "people see which session got a message (handle/session)",
+  );
+  const signed = await sessionPost(frontend, `@marek done. Signed, @${slotAgent.handle} and @${slotAgent.handle}/frontend`);
   await sleep(300);
-  const notBroadcast = ![...frontend.got, ...backend.got].some((e) => e.event === "message" && e.data.id === sharedInbox.id);
-  const takeA = await fetch(`${HUB}/api/inbox/${sharedInbox.id}/take`, { method: "POST", headers: frontend.headers });
-  const takeB = await fetch(`${HUB}/api/inbox/${sharedInbox.id}/take`, { method: "POST", headers: backend.headers });
-  check(notBroadcast && takeA.status === 200 && takeB.status === 409, "@agent stays in a shared inbox when several sessions are live and can be taken once");
+  check(
+    ![...frontend.got, ...backend.got].some((e) => e.event === "message" && e.data.id === signed.id) &&
+      !signed.metadata.to.some((t: { agent: string }) => t.agent === slotAgent.handle),
+    "an agent signing with its own address wakes none of its own sessions",
+  );
+  const nobody = await api("/api/rooms/api-contract/messages", MAREK, { text: "thinking out loud, @nobody-here" }).then((r) => r.json());
+  check(
+    nobody.delivery?.live?.length === 0 && /nobody was notified/.test(nobody.delivery?.summary) && nobody.delivery?.ignored?.includes("@nobody-here"),
+    "a message that reaches nobody says so, naming handles that are not in the room",
+  );
+  const typoSlot = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle}/fronted typo in the slot` }).then((r) => r.json());
+  await waitFor(() => frontend.got.find((e) => e.event === "message" && e.data.id === typoSlot.id));
+  check(
+    typoSlot.delivery?.unknownSlots?.length === 1 && frontend.got.some((e) => e.event === "message" && e.data.id === typoSlot.id),
+    "an unknown @agent/slot reaches the agent as a whole and the sender is told",
+  );
+  const viaTool = await fetch(`${HUB}/mcp`, {
+    method: "POST",
+    headers: { ...backend.headers, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "post", arguments: { room: "api-contract", text: `@${slotAgent.handle}/frontend from the backend tool` } } }),
+  }).then((r) => r.text());
+  check(/delivered now to @[a-z0-9-]+\/frontend/.test(viaTool), "the MCP post tool leads with the delivery report");
   const roomBroadcast = await api("/api/rooms/api-contract/messages", MAREK, { text: "@room slot broadcast" }).then((r) => r.json());
   const bothSlots = await waitFor(() =>
     frontend.got.some((e) => e.event === "message" && e.data.id === roomBroadcast.id) &&
@@ -685,8 +733,97 @@ try {
     restartedFrontend.session.id !== previousFrontendId && restartedFrontend.session.name === "frontend",
     "restarting a slot maps its stable name to a new opaque Warren session",
   );
+  const liveLookup = await fetch(`${HUB}/api/agent-sessions/live?name=frontend`, { headers: { Authorization: `Bearer ${slotAgent.token}` } }).then((r) => r.json());
+  check(liveLookup.id === restartedFrontend.session.id, "a helper process finds a slot's current session by name");
   restartedFrontend.close();
   backend.close();
+  await sleep(300);
+  const whileAllAway = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} for whoever comes back first` }).then((r) => r.json());
+  check(JSON.stringify(whileAllAway.delivery?.queued) === JSON.stringify([`@${slotAgent.handle}`]), "a message to an offline agent is reported as queued");
+  const firstBack = await namedAgentStream(slotAgent.token, "backend");
+  await waitFor(() => firstBack.got.find((e) => e.event === "message" && e.data.id === whileAllAway.id));
+  await sleep(300);
+  const secondBack = await namedAgentStream(slotAgent.token, "frontend");
+  const newcomer = await namedAgentStream(slotAgent.token, "brand-new");
+  await sleep(500);
+  check(
+    firstBack.got.some((e) => e.event === "message" && e.data.id === whileAllAway.id && e.data.late) &&
+      !secondBack.got.some((e) => e.event === "message" && e.data.id === whileAllAway.id),
+    "the first session back catches up on a bare @agent sent while all were offline, the next one does not get it again",
+  );
+  check(
+    !newcomer.got.some((e) => e.event === "message" && e.data.id === roomBroadcast.id),
+    "a brand-new slot does not replay older @room history",
+  );
+  firstBack.close();
+  secondBack.close();
+  newcomer.close();
+  await sleep(300);
+
+  // A fan-out is durable per session: a live session that drops before acknowledging gets it on return.
+  const steady = await namedAgentStream(slotAgent.token, "steady");
+  const flaky = await namedAgentStream(slotAgent.token, "flaky", false);
+  await sleep(300);
+  const durableFan = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} durable fan-out` }).then((r) => r.json());
+  await waitFor(() => flaky.got.find((e) => e.event === "message" && e.data.id === durableFan.id));
+  await waitFor(() => steady.got.find((e) => e.event === "message" && e.data.id === durableFan.id));
+  flaky.close();
+  await sleep(300);
+  const flakyBack = await namedAgentStream(slotAgent.token, "flaky");
+  const fanReplayed = await waitFor(() => flakyBack.got.find((e) => e.event === "message" && e.data.id === durableFan.id));
+  check(!!fanReplayed, "a live session that dropped before acknowledging a fan-out gets it when it returns");
+
+  // A session-less client of the agent is the agent as a whole: it never gets one slot's message.
+  const wholeAgent = agentStream(slotAgent.token);
+  await sleep(300);
+  const onlySteady = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle}/steady only for steady` }).then((r) => r.json());
+  await waitFor(() => steady.got.find((e) => e.event === "message" && e.data.id === onlySteady.id));
+  await sleep(200);
+  check(!wholeAgent.got.some((e) => e.event === "message" && e.data.id === onlySteady.id), "an exact-slot message does not reach the agent's session-less clients");
+  wholeAgent.close();
+
+  // Room-wide gates hold between sibling sessions too.
+  await api("/api/rooms/api-contract/policy", MAREK, { approveContractChanges: true }, "PUT");
+  const gatedSibling = await sessionPost(steady, `@${slotAgent.handle}/flaky the API contract changed`).catch(() => undefined);
+  const gated = await fetch(`${HUB}/api/rooms/api-contract/messages`, {
+    method: "POST",
+    headers: { ...steady.headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ text: `@${slotAgent.handle}/flaky /basket now returns 201`, kind: "contract_change" }),
+  }).then((r) => r.json());
+  await sleep(400);
+  check(
+    gated.safety.status === "held" &&
+      !flakyBack.got.some((e) => e.event === "message" && e.data.id === gated.id) &&
+      !!gatedSibling &&
+      gated.delivery?.held?.includes(`@${slotAgent.handle}`) &&
+      !gated.delivery?.live?.length,
+    "a held contract change from a sibling session waits for its person like any other, and the report says so",
+  );
+  await api("/api/rooms/api-contract/policy", MAREK, { approveContractChanges: false }, "PUT");
+
+  // Paused agents catch up when resumed.
+  await api(`/api/members/${slotAgent.handle}/pause`, MAREK, { paused: true });
+  const whilePaused = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle}/steady when you are back` }).then((r) => r.json());
+  check(/paused/.test(whilePaused.delivery?.summary ?? ""), "the delivery report says the agent is paused");
+  await sleep(300);
+  const pausedGot = steady.got.some((e) => e.event === "message" && e.data.id === whilePaused.id);
+  await api(`/api/members/${slotAgent.handle}/pause`, MAREK, { paused: false });
+  // The test stream does not reconnect by itself (a bridge does); reconnect it like a bridge would.
+  const steadyBack = await namedAgentStream(slotAgent.token, "steady");
+  const resumedGot = await waitFor(() => steadyBack.got.find((e) => e.event === "message" && e.data.id === whilePaused.id));
+  check(!pausedGot && !!resumedGot, "messages sent while an agent was paused are delivered after it is resumed");
+  steady.close();
+  flakyBack.close();
+  steadyBack.close();
+  await sleep(300);
+  // The agent-wide copy of a message sent while no session ran is taken exactly once.
+  const forAnyone = await api("/api/rooms/api-contract/messages", MAREK, { text: `@${slotAgent.handle} whoever takes this first` }).then((r) => r.json());
+  const takerA = await api("/api/agent-sessions", slotAgent.token, { name: "taker-a" }).then((r) => r.json());
+  const takerB = await api("/api/agent-sessions", slotAgent.token, { name: "taker-b" }).then((r) => r.json());
+  const take = (session: { id: string }) =>
+    fetch(`${HUB}/api/inbox/${forAnyone.id}/take`, { method: "POST", headers: { Authorization: `Bearer ${slotAgent.token}`, "Warren-Session-Id": session.id } });
+  const [tookA, tookB] = [await take(takerA), await take(takerB)];
+  check(tookA.status === 200 && tookB.status === 409, "an agent-wide inbox message can be taken by only one session");
   await fetch(`${HUB}/api/agents/${slotAgent.handle}`, { method: "DELETE", headers: { Authorization: `Bearer ${MAREK}` } });
   await sleep(200);
 

@@ -894,6 +894,22 @@ app.post("/api/agent-sessions", (req, res) => {
   }
 });
 
+// A helper process of a running session (the tools inside a Codex thread)
+// looks up the slot's live id by name instead of opening a competing lease.
+app.get("/api/agent-sessions/live", (req, res) => {
+  const m = requireCaller(req, res);
+  if (!m) return;
+  if (m.kind !== "agent" || !presentedToken(req) || presentedToken(req)!.startsWith("ws_"))
+    return void res.status(403).json({ error: "use the agent token" });
+  try {
+    const session = store.liveAgentSession(m.handle, req.query.name);
+    if (!session) return void res.status(404).json({ error: `no live Warren session named ${String(req.query.name)}` });
+    res.json(session);
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
 app.put("/api/agents/:handle", (req, res) => {
   const ok = manageableAgent(req, res);
   if (!ok) return;
@@ -1212,10 +1228,14 @@ app.post("/api/deliveries/:id/ack", (req, res) => {
   if (!msg || m.kind !== "agent") return void res.status(404).json({ error: "no such delivery" });
   const addressed = session ? store.isForAgentSession(m, msg, session) : store.isFor(m, msg);
   if (!addressed) return void res.status(404).json({ error: "no such delivery" });
-  const slotSpecific = !!session && (msg.mentionsRoom || msg.metadata.to.some((target) => target.agent === m.handle && !!target.sessionName));
-  if (slotSpecific) store.markSessionDelivered(msg, session!);
+  // A named session acknowledges for itself (that also counts for the agent as
+  // a whole); an agent-wide inbox copy is taken by the first session only.
+  const scope = session ? store.deliveryScope(m, msg, session) : "agent";
+  if (session && scope === "agent" && store.wasDelivered(msg.id, m.handle) && !store.wasDeliveredToSession(msg.id, session))
+    return void res.json({ ok: true, alreadyTakenByAnotherSession: true });
+  if (session) store.markSessionDelivered(msg, session);
   else store.markDelivered(msg, m.handle);
-  releaseDeliveryLease(msg.id, slotSpecific ? `${m.handle}/${session!.name}` : m.handle);
+  releaseDeliveryLease(msg.id, session && scope === "session" ? `${m.handle}/${session.name}` : m.handle);
   res.json({ ok: true });
 });
 
@@ -1270,20 +1290,22 @@ app.get("/api/events", (req: Request, res: Response) => {
   const onMessage = (msg: store.Message, late = false) => {
     const me = live();
     if (!m) return send("message", msg);
-    if (!me || !store.canSee(me, msg.roomId) || msg.from === me.handle) return;
+    if (!me || !store.canSee(me, msg.roomId)) return;
     const session = liveSession();
     if (initialSession && !session) return;
+    // Sibling sessions of one agent may write to each other; a person's own
+    // messages and an agent's session-less posts never come back to them.
+    if (msg.from === me.handle && !session) return;
     const forYou = session ? store.isForAgentSession(me, msg, session) : store.isFor(me, msg);
     if (mentionsOnly) {
       // Delivery is recorded only by POST /api/deliveries/:id/ack after the
       // bridge accepted this frame. A short-lived in-memory lease prevents
-      // two concurrent bridges for one agent from both accepting it first.
-      const slotSpecific = !!session && (msg.mentionsRoom || msg.metadata.to.some((target) => target.agent === me.handle && !!target.sessionName));
-      const delivered = slotSpecific ? store.wasDeliveredToSession(msg.id, session!) : store.wasDelivered(msg.id, me.handle);
+      // two concurrent bridges for one slot from both accepting it first.
+      const scope = session ? store.deliveryScope(me, msg, session) : "agent";
+      const delivered = session && scope === "session" ? store.wasDeliveredToSession(msg.id, session) : store.wasDelivered(msg.id, me.handle);
       if (!forYou || delivered) return;
-      const recipient = slotSpecific ? `${me.handle}/${session!.name}` : me.handle;
-      if (!acquireDeliveryLease(msg.id, recipient, streamId)) return;
-    }
+      if (!acquireDeliveryLease(msg.id, session && scope === "session" ? `${me.handle}/${session.name}` : me.handle, streamId)) return;
+    } else if (session && msg.from === me.handle && msg.metadata.from.sessionName === session.name) return;
     send("message", { ...store.withDeliveries(me, store.viewFor(me, msg)), forYou, ...(late ? { late: true } : {}) });
   };
   // A message to this agent waits for its person: tell the bridge (no text) so it can ask them.
@@ -1321,10 +1343,10 @@ app.get("/api/events", (req: Request, res: Response) => {
       if (!me || me.kind !== "agent" || me.paused || !store.canSee(me, msg.roomId)) return;
       if (initialSession && !liveSession()) return;
       const approval = msg.safety.approvals?.[store.approvalKey(me)];
-      const wasTarget =
-        (Array.isArray(approval?.agents) && approval.agents.includes(me.handle)) ||
-        msg.mentionsRoom ||
-        msg.mentions.includes(me.handle);
+      const boundSession = liveSession();
+      const wasTarget = boundSession
+        ? store.isAddressedToAgentSession(me, msg, boundSession)
+        : (Array.isArray(approval?.agents) && approval.agents.includes(me.handle)) || msg.mentionsRoom || msg.mentions.includes(me.handle);
       if (wasTarget && (gateDecision(msg.safety) === "rejected" || approval?.decision === "rejected"))
         send("held_resolution", { id: msg.id, roomId: msg.roomId, resolution: "rejected", waitsFor: store.approvalKey(me) });
       return;
@@ -1376,6 +1398,10 @@ app.get("/api/events", (req: Request, res: Response) => {
   const onKick = (handle: string) => {
     if (m && handle === m.handle) res.end();
   };
+  // An agent was resumed: its bridges reconnect and replay what they missed.
+  const onReconnect = (handle: string) => {
+    if (m && mentionsOnly && handle === m.handle) res.end();
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handlers: [string, (x: any) => void][] = [
     ["message", onMessage],
@@ -1388,6 +1414,7 @@ app.get("/api/events", (req: Request, res: Response) => {
     ["presence", onPresence],
     ["audit", onAudit],
     ["kick", onKick],
+    ["reconnect", onReconnect],
     ["held", onHeld],
     ["delivery", onDelivery],
   ];
@@ -1487,8 +1514,8 @@ app.post("/a2a", (req, res) => {
         kind: "message",
         messageId: randomUUID(),
         role: "agent",
-        parts: [{ kind: "text", text: `Posted to #${room}. Delivered to: ${deliveredTo(posted)}.` }],
-        metadata: { warrenMessageId: posted.id, room },
+        parts: [{ kind: "text", text: `Posted to #${room}: ${posted.safety.status === "held" ? `held for human review (${posted.safety.flags.join(", ")}); ` : ""}${posted.delivery.summary}` }],
+        metadata: { warrenMessageId: posted.id, room, delivery: posted.delivery },
       },
     });
   } catch (e) {
@@ -1496,11 +1523,6 @@ app.post("/a2a", (req, res) => {
   }
 });
 
-function deliveredTo(msg: store.Message): string {
-  if (msg.safety.status === "held") return `nobody yet: held for human review (${msg.safety.flags.join(", ")})`;
-  if (msg.mentionsRoom) return "everyone in the room (@room)";
-  return msg.mentions.map((h) => "@" + h).join(", ") || "nobody (no @mention)";
-}
 
 // --- Web (landing + dashboard), built by `npm run build` ---------------------
 const WEB = fileURLToPath(new URL("../../web/dist", import.meta.url));
@@ -1547,8 +1569,8 @@ function setupSnippets(m: store.Member, token: string) {
       mcpJson: {
         mcpServers: {
           warren: {
-            command: "npx",
-            args: ["tsx", "bridge/src/index.ts"],
+            command: "warren",
+            args: ["bridge"],
             env: { WARREN_HUB: PUBLIC_URL, WARREN_TOKEN: token, WARREN_ADAPTER: "channel" },
           },
         },
@@ -1561,7 +1583,7 @@ function setupSnippets(m: store.Member, token: string) {
     },
     cursor: {
       mcpJson: { mcpServers: { warren: { url: `${PUBLIC_URL}/mcp`, headers: { Authorization: `Bearer ${token}` } } } },
-      wake: `WARREN_HUB=${PUBLIC_URL} WARREN_TOKEN=${token} WARREN_ADAPTER=exec WARREN_EXEC_CLIENT=cursor WARREN_EXEC_SESSION=$(cursor-agent create-chat) npx tsx bridge/src/index.ts`,
+      wake: "warren listen --as cursor",
     },
     a2a: { card: `${PUBLIC_URL}/.well-known/agent-card.json`, auth: `Authorization: Bearer ${token}` },
     handle: m.handle,
