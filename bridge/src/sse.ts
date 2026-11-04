@@ -1,4 +1,7 @@
-// Minimal SSE client over fetch, reconnects forever. Two events matter to the
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
+
+// Minimal SSE client, reconnects forever. Two events matter to the
 // bridge: "message" (deliver it) and "held" (a message for this agent waits
 // for its person). On connect the hub replays what the agent missed while it
 // was offline; after a reconnect the inbox is read too, so a mention is never lost.
@@ -47,6 +50,22 @@ export interface WarrenSession {
   handle: string;
   name: string;
   expiresAt: string;
+}
+
+/**
+ * Opens the long-lived event stream on its own HTTP/1.1 connection. Through
+ * fetch it would share a pooled (HTTP/2, behind Cloudflare and most proxies)
+ * connection with the MCP tool calls, and the never-ending stream stalled
+ * every later call of the same process.
+ */
+export function openEventStream(url: string, headers: Record<string, string>, signal: AbortSignal): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const send = target.protocol === "https:" ? httpsRequest : httpRequest;
+    const req = send(target, { method: "GET", headers, agent: false, signal }, resolve);
+    req.on("error", reject);
+    req.end();
+  });
 }
 
 export async function registerSession(hub: string, token: string, name: string, resumeId?: string): Promise<WarrenSession> {
@@ -101,8 +120,9 @@ export async function subscribe(
     const onStop = () => controller.abort();
     stop?.addEventListener("abort", onStop, { once: true });
     try {
-      const res = await fetch(`${hub}/api/events?mentions=1`, { headers, signal: controller.signal });
-      if (res.status === 409) {
+      const res = await openEventStream(`${hub}/api/events?mentions=1`, headers, controller.signal);
+      if (res.statusCode === 409) {
+        res.resume();
         let rebound: WarrenSession;
         try {
           rebound = await registerSession(hub, token, session.name, session.id);
@@ -120,10 +140,13 @@ export async function subscribe(
         console.error(`warren-bridge: rebound @${rebound.handle}/${rebound.name} to a new Warren session`);
         continue;
       }
-      if (!res.ok || !res.body) throw new Error(`hub answered ${res.status}`);
+      if (res.statusCode !== 200) {
+        res.resume();
+        throw new Error(`hub answered ${res.statusCode}`);
+      }
       const decoder = new TextDecoder();
       let buffer = "";
-      for await (const chunk of res.body) {
+      for await (const chunk of res) {
         buffer += decoder.decode(chunk as Uint8Array, { stream: true });
         let end;
         while ((end = buffer.indexOf("\n\n")) !== -1) {
