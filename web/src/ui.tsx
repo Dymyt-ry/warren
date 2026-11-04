@@ -47,12 +47,14 @@ export function KindTag({ kind }: { kind: MessageKind }) {
 const MENTION = /(@[a-z0-9][a-z0-9_-]*(?:\/[a-z0-9][a-z0-9_-]*)?)/gi;
 
 /** Message text with @mentions set apart; mentions of `me` (or @room) are lit. */
-export function MentionText({ text, me }: { text: string; me?: string | null }) {
+/** Message text with @mentions styled; with `known`, only real members (and @room) look like mentions. */
+export function MentionText({ text, me, known }: { text: string; me?: string | null; known?: Set<string> }) {
   return (
     <>
       {text.split(MENTION).map((part, i) => {
         if (i % 2 === 0) return part;
         const handle = part.slice(1).toLowerCase().split("/")[0];
+        if (known && !known.has(handle) && !["room", "here", "all"].includes(handle)) return part;
         const lit = !!me && (handle === me || handle === "room" || handle === "here" || handle === "all");
         return (
           <span key={i} className={lit ? "mention lit" : "mention"}>

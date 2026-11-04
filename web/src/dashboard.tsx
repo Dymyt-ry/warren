@@ -641,6 +641,7 @@ function Thread({
 }) {
   // Only messages that arrive while you're looking animate in; opening a room doesn't replay history.
   const [mountedAt] = useState(() => Date.now());
+  const known = new Set(inRoom.map((x) => x.handle));
   // Opened from a review link (email, agent session): bring that message into view.
   useEffect(() => {
     if (!focus) return;
@@ -710,10 +711,10 @@ function Thread({
                           m.safety?.status === "rejected" && "text-muted-foreground line-through",
                         )}
                       >
-                        <MentionText text={m.text} me={me?.handle} />
+                        <MentionText text={m.text} me={me?.handle} known={known} />
                       </p>
                       <SafetyLine m={m} me={me} members={members} onUpdated={onUpdated} />
-                      <DeliveryLine m={m} inRoom={inRoom} />
+                      <DeliveryLine m={m} inRoom={inRoom} me={me} />
                     </MessageContent>
                   </Message>
                 </MessageScrollerItem>
@@ -863,39 +864,125 @@ function SafetyLine({ m, me, members, onUpdated }: { m: Msg; me: Member | null; 
   );
 }
 
-/** Who a message reached: agents that got it, and the ones it waits for because they're offline. */
-function DeliveryLine({ m, inRoom }: { m: Msg; inRoom: Member[] }) {
+/** Who a message reached: agents (per live session) that got it, and the ones it waits for because they're offline. */
+function DeliveryLine({ m, inRoom, me }: { m: Msg; inRoom: Member[]; me: Member | null }) {
   if (m.safety?.status === "held" && m.safety.gate?.decision === "pending") return null;
-  const targets = inRoom.filter((x) => x.kind === "agent" && x.handle !== m.from && (m.mentionsRoom || m.mentions.includes(x.handle)));
-  if (!targets.length) return null;
-  const got = new Set(m.delivered ?? []);
+  // An agent's own handle stays in `mentions` only when it wrote to a sibling session.
+  const toSibling = (x: Member) =>
+    !!m.metadata?.to.some((to) => to.agent === x.handle && !!to.sessionName && to.sessionName !== m.metadata?.from.sessionName);
+  const targets = inRoom.filter(
+    (x) => x.kind === "agent" && (x.handle === m.from ? toSibling(x) || (m.mentionsRoom && !!m.metadata?.from.sessionName) : m.mentionsRoom || m.mentions.includes(x.handle)),
+  );
+  const nobody = !m.mentionsRoom && m.mentions.length === 0;
+  if (!targets.length) {
+    if (nobody && me && m.from === me.handle)
+      return <span className="mt-1 block text-xs text-muted-foreground">{t("Nobody was notified: no @mention.")}</span>;
+    return null;
+  }
+  const got = m.delivered ?? [];
+  const reached = (a: Member) => got.filter((d) => d === a.handle || d.startsWith(a.handle + "/"));
   const blocked = (a: Member) => {
     const ap = Object.values(m.safety?.approvals ?? {}).find((x) => x.agents.includes(a.handle));
     return ap && ap.decision !== "released";
   };
-  const done = targets.filter((a) => got.has(a.handle));
-  const waiting = targets.filter((a) => !got.has(a.handle) && !blocked(a) && !a.paused);
+  // Sessions each copy was meant for: exact slots, and the live sessions a bare @agent fanned out to.
+  const expected = (a: Member) => [
+    ...new Set(
+      (m.metadata?.to ?? [])
+        .filter((to) => to.agent === a.handle)
+        .flatMap((to) => (to.sessionName ? [to.sessionName] : (to.sessions ?? [])))
+        .filter((slot) => !(a.handle === m.from && slot === m.metadata?.from.sessionName)),
+    ),
+  ];
+  const done = targets.flatMap((a) => reached(a));
+  type Waiting = { key: string; who: string; online: boolean; inbox: boolean };
+  const waiting: Waiting[] = targets
+    .filter((a) => !blocked(a) && !a.paused)
+    .flatMap((a) => {
+      const slots = expected(a);
+      if (!slots.length) return reached(a).length ? [] : [{ key: a.handle, who: a.handle, online: !!a.online, inbox: a.adapter === "inbox" }];
+      return slots
+        .filter((slot) => !got.includes(`${a.handle}/${slot}`))
+        .map((slot) => ({
+          key: `${a.handle}/${slot}`,
+          who: `${a.handle}/${slot}`,
+          online: !!a.sessions?.some((x) => x.name === slot && x.online),
+          inbox: false,
+        }));
+    });
   if (!done.length && !waiting.length) return null;
   return (
     <span className="mt-1 flex flex-wrap gap-x-3 text-xs text-muted-foreground">
       {done.length > 0 && (
         <span className="flex items-center gap-1">
           <CheckIcon aria-hidden />
-          {t("Delivered to {who}", { who: done.map((a) => "@" + a.handle).join(", ") })}
+          {t("Delivered to {who}", { who: done.map((a) => "@" + a).join(", ") })}
         </span>
       )}
       {waiting.map((a) => (
-        <span key={a.handle} className="flex items-center gap-1">
+        <span key={a.key} className="flex items-center gap-1">
           <ClockIcon aria-hidden />
           {a.online
-            ? t("Sending to @{who}", { who: a.handle })
-            : a.adapter === "inbox"
-              ? t("@{who} reads it at its next check-in", { who: a.handle })
-              : t("@{who} is offline: gets it when it reconnects", { who: a.handle })}
+            ? t("Sending to @{who}", { who: a.who })
+            : a.inbox
+              ? t("@{who} reads it at its next check-in", { who: a.who })
+              : t("@{who} is offline: gets it when it reconnects", { who: a.who })}
         </span>
       ))}
     </span>
   );
+}
+
+/** Under the composer: who the draft will wake, so nobody posts into the void by accident. */
+function ReachHint({ text, inRoom, me }: { text: string; inRoom: Member[]; me: Member | null }) {
+  if (!text.trim()) return <span className="flex-1" />;
+  const { reach, unknown, everyone } = draftRecipients(text, inRoom, me);
+  const parts: string[] = [];
+  if (everyone) parts.push(t("Notifies everyone in this room"));
+  else if (reach.length) parts.push(t("Notifies {who}", { who: reach.join(", ") }));
+  else parts.push(t("Nobody will be notified: type @ to mention someone"));
+  if (unknown.length) parts.push(t("{who} is not in this room", { who: unknown.join(", ") }));
+  const quiet = !everyone && !reach.length;
+  return (
+    <span aria-live="polite" className={cn("min-w-0 flex-1 truncate text-xs", quiet || unknown.length ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} title={parts.join(" · ")}>
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
+/** Before sending: who a draft will notify, from its @mentions (the hub decides; this mirrors its rules). */
+export function draftRecipients(text: string, inRoom: Member[], me: Member | null): { reach: string[]; unknown: string[]; everyone: boolean } {
+  const clean = text.replace(/```[\s\S]*?```|`[^`\n]*`/g, " ");
+  const reach: string[] = [];
+  const unknown: string[] = [];
+  let everyone = false;
+  for (const [, , raw, rawSlot] of clean.matchAll(/(^|[^\w@.\/-])@([a-z0-9][a-z0-9_-]*)(?:\/([a-z0-9][a-z0-9_-]*))?(?![\w-]|\.\w)/gi)) {
+    const handle = raw.toLowerCase();
+    if (["room", "here", "all"].includes(handle) && !rawSlot) {
+      everyone = true;
+      continue;
+    }
+    const x = inRoom.find((y) => y.handle === handle);
+    const slot = rawSlot?.toLowerCase();
+    const address = "@" + handle + (slot ? "/" + slot : "");
+    if (!x) {
+      if (!unknown.includes(address)) unknown.push(address);
+      continue;
+    }
+    if (me && x.handle === me.handle) continue;
+    // After a person's handle a slash is just prose (`@anna/notes`): the hub ignores it.
+    if (slot && x.kind !== "agent") continue;
+    let label = "@" + x.handle;
+    if (x.kind === "agent" && slot && x.sessions?.some((s) => s.name === slot)) label += "/" + slot;
+    else if (x.kind === "agent" && slot) label += ` (${t("no session {slot}: all of it", { slot })})`;
+    else if (x.kind === "agent") {
+      const live = (x.sessions ?? []).filter((s) => s.online).map((s) => s.name);
+      if (live.length > 1) label += ` (${live.join(", ")})`;
+      else if (!x.online) label += ` (${t("offline")})`;
+    }
+    if (!reach.includes(label)) reach.push(label);
+  }
+  return { reach, unknown, everyone };
 }
 
 /** Per-room rule: agents' contract changes wait for a person of their own company. */
@@ -968,7 +1055,7 @@ function Composer({
             member: m,
           }))
         : []),
-      { value: m.handle, name: m.name, detail: m.kind === "agent" ? "agent inbox" : `@${m.handle}`, member: m },
+      { value: m.handle, name: m.name, detail: m.kind === "agent" ? t("all its sessions") : `@${m.handle}`, member: m },
     ]);
   const suggestions =
     query === undefined
@@ -1080,6 +1167,7 @@ function Composer({
               {kinds().map((k) => <SelectItem key={k.kind} value={k.kind}>{k.label}</SelectItem>)}
             </SelectContent>
           </Select>
+          <ReachHint text={text} inRoom={inRoom} me={me} />
           <Button type="submit" size="icon-sm" disabled={!text.trim() || sending} aria-label={sending ? t("Sending") : t("Send")} title={sending ? t("Sending") : t("Send")}>
             <PaperPlaneRightIcon weight="fill" />
           </Button>

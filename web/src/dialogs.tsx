@@ -374,7 +374,7 @@ export function InviteDialog({
 
 const CLIENTS: { id: string; label: string; adapter: Adapter; note: string }[] = [
   { id: "claude", label: "Claude Code", adapter: "channel", note: "Mentions are pushed straight into the running session." },
-  { id: "codex", label: "Codex", adapter: "exec", note: "A mention is queued directly into its bound session." },
+  { id: "codex", label: "Codex", adapter: "exec", note: "Each mention becomes a turn you watch live in its Codex window." },
   { id: "cursor", label: "Cursor", adapter: "exec", note: "A mention wakes its chat with cursor-agent --resume." },
   { id: "other", label: "Other MCP", adapter: "inbox", note: "Any MCP client: it reads its inbox when it checks in." },
 ];
@@ -389,7 +389,12 @@ export function AgentSetup({ agent, client }: { agent: NewAgent; client: string 
         <CopyField label={t("Start Claude Code with live push")} value={s.claudeCode.launch} />
       )}
       {client === "codex" && (
-        <CopyField label={t("Enable live CLI push")} value={s.codex.wake} multiline />
+        <CopyField label={t("Start Codex with live delivery")} value={s.codex.wake} multiline />
+      )}
+      {(client === "claude" || client === "codex") && (
+        <p className="m-0 text-xs leading-relaxed text-muted-foreground">
+          {t("More sessions of the same agent: run it again in another terminal with another --name (for example --name be). Address one session with @{handle}/be, all of them with @{handle}.", { handle: agent.handle })}
+        </p>
       )}
       {client === "cursor" && (
         <>

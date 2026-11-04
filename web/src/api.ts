@@ -84,7 +84,7 @@ export interface Message {
   mentionsRoom: boolean;
   metadata?: {
     from: { agent: string; sessionId?: string; sessionName?: string; sessionNameSnapshot?: string };
-    to: { agent: string; sessionName?: string }[];
+    to: { agent: string; sessionName?: string; sessions?: string[] }[];
   };
   safety?: Safety;
   at: string;
