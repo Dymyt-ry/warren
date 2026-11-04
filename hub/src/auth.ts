@@ -46,7 +46,7 @@ export const sha256 = (value: string) => createHash("sha256").update(value).dige
  * A new secret with a recognisable prefix: wr_ agent tokens, ws_ sessions, wi_ invite and
  * reset codes, wa_ approver keys. Hex, so the secret masking in safety.ts recognises the whole value.
  */
-export const newSecret = (prefix: "wr" | "ws" | "wi" | "wa") => `${prefix}_${randomBytes(24).toString("hex")}`;
+export const newSecret = (prefix: "wr" | "ws" | "wi" | "wa" | "wj") => `${prefix}_${randomBytes(24).toString("hex")}`;
 
 // --- two-factor sign-in: TOTP (RFC 6238, SHA-1, 30 s, 6 digits), as every authenticator app expects ---
 

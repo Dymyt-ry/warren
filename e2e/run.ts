@@ -514,6 +514,76 @@ try {
   }
   check(last?.safety.status === "held" && last.safety.flags.includes("agent-loop"), "agents talking to each other are paused after 8 messages without a person");
 
+  // Agent-only rooms: no person in the loop, agents join themselves with a code.
+  const swarm = await api("/api/rooms", ANNA, { name: "agent swarm", parentId: "api-contract" }).then((r) => r.json());
+  const policyByAgent = await api(`/api/rooms/${swarm.id}/policy`, CODEX, { agentsOnly: true }, "PUT");
+  await api(`/api/rooms/${swarm.id}/policy`, ANNA, { agentsOnly: true }, "PUT");
+  const swarmSub = await api("/api/rooms", CODEX, { name: "sub task", parentId: swarm.id }).then((r) => r.json());
+  let swarmLast: { safety: { status: string } } | undefined;
+  for (let i = 0; i < 12; i++) {
+    const agent = i % 2 ? claude : codex;
+    swarmLast = toolJson(await agent.callTool({ name: "post", arguments: { room: swarmSub.id, text: `swarm ping ${i}` } }));
+  }
+  check(
+    policyByAgent.status === 403 && swarmLast?.safety.status === "delivered",
+    "in an agent-only room (and the rooms an agent makes below it) agents talk without a loop brake; only a person turns it on",
+  );
+  const codeByAgent = await api("/api/join-codes", CODEX, { room: swarm.id });
+  const codeByAnna = await api("/api/join-codes", ANNA, { room: swarm.id }).then((r) => r.json());
+  const badJoin = await api("/api/join", undefined, { code: "wj_" + "0".repeat(48), tool: "claude" });
+  const swarmJoined = await api("/api/join", undefined, { code: codeByAnna.code, tool: "claude", name: "claude-guest" }).then((r) => r.json());
+  const joinedMe = await api("/api/me", swarmJoined.token).then((r) => r.json());
+  check(
+    codeByAgent.status === 403 &&
+      badJoin.status === 401 &&
+      joinedMe.handle === swarmJoined.handle &&
+      joinedMe.kind === "agent" &&
+      joinedMe.adapter === "channel" &&
+      joinedMe.org === "acme" &&
+      joinedMe.owner === "anna" &&
+      joinedMe.scopeRoomId === swarm.id &&
+      String(codeByAnna.join).includes(`/j/${codeByAnna.code}`),
+    "a person's join code lets an agent add itself to that room as the person's agent; agents can't make codes",
+  );
+  const joinDir = mkdtempSync(join(tmpdir(), "warren-join-"));
+  cleanup.push(() => rmSync(joinDir, { recursive: true, force: true }));
+  const cliJoin = spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, "join", `${HUB}/j/${codeByAnna.code}`, "codex"], {
+    cwd: joinDir,
+    encoding: "utf8",
+    timeout: 15_000,
+    env: { ...process.env, USER: "jane tester" },
+  });
+  const cliJoinedWho = spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, "whoami"], { cwd: joinDir, encoding: "utf8", timeout: 10_000 });
+  check(
+    cliJoin.status === 0 &&
+      cliJoinedWho.status === 0 &&
+      JSON.parse(cliJoinedWho.stdout).handle.startsWith("codex-jane-tester") &&
+      JSON.parse(cliJoinedWho.stdout).scopeRoomId === swarm.id &&
+      !readFileSync(join(joinDir, ".gitignore"), "utf8").includes("wj_"),
+    `\`warren join <link> codex\` wires a folder's agent without the dashboard (${cliJoin.stderr.trim() || "ok"})`,
+  );
+  const marekFlip = await api(`/api/rooms/${swarm.id}/policy`, MAREK, { agentsOnly: false }, "PUT");
+  const oneUse = await api("/api/join-codes", ANNA, { room: swarm.id, maxUses: 1 }).then((r) => r.json());
+  const firstUse = await api("/api/join", undefined, { code: oneUse.code, tool: "codex", name: "anna" });
+  const secondUse = await api("/api/join", undefined, { code: oneUse.code, tool: "codex" });
+  const firstUseBody = await firstUse.json();
+  const guestCodeByMember = await api("/api/join-codes", MAREK, { room: swarm.id, org: "guestco" });
+  const guestCode = await api("/api/join-codes", ANNA, { room: swarm.id, org: "guestco" }).then((r) => r.json());
+  const guest = await api("/api/join", undefined, { code: guestCode.code, tool: "claude", name: "visitor" }).then((r) => r.json());
+  check(guest.org === "guestco" && guest.owner === null, "an admin's link for another company keeps that company's agents foreign");
+  check(
+    marekFlip.status === 403 &&
+      firstUse.status === 201 &&
+      firstUseBody.handle !== "anna" &&
+      String(firstUseBody.handle).startsWith("codex-") &&
+      secondUse.status === 401 &&
+      guestCodeByMember.status === 400,
+    "only the room's creator turns agent-only off; a code has a use limit; joined handles are namespaced; only admins make links for another company",
+  );
+  const revoked = await api(`/api/join-codes/${codeByAnna.id}`, ANNA, undefined, "DELETE");
+  const afterRevoke = await api("/api/join", undefined, { code: codeByAnna.code, tool: "codex" });
+  check(revoked.status === 200 && afterRevoke.status === 401, "a revoked join code stops working");
+
   // 10. human in the loop: pause an agent, approve contract changes, audit trail
   const agentPause = await api("/api/members/claude-anna/pause", CODEX, { paused: true });
   const otherOrg = await api("/api/members/claude-anna/pause", BEN, { paused: true });
@@ -1212,6 +1282,9 @@ try {
   const relogin: Session = {};
   const right = await as(relogin, "/api/auth/login", { body: { email: "OLGA@example.com", password: PASS } });
   check(wrong.status === 401 && right.status === 200 && !!relogin.cookie, "sign in with email and password");
+  const cliLogin = await as({}, "/api/auth/login", { body: { email: "olga@example.com", password: PASS, client: "cli" } }).then((r) => r.json());
+  const cliMe = await fetch(`${OWN}/api/me`, { headers: { Authorization: `Bearer ${cliLogin.session}` } }).then((r) => r.json());
+  check(String(cliLogin.session).startsWith("ws_") && cliMe.handle === cliLogin.handle, "`warren login` gets a bearer session for the terminal");
   const queryOnly = await as({}, `/api/me?token=${encodeURIComponent(relogin.cookie!.split("=")[1])}`);
   const querySse = await fetch(`${OWN}/api/events?token=${encodeURIComponent(relogin.cookie!.split("=")[1])}`);
   check(queryOnly.status === 401 && querySse.status === 401, "URL credentials are ignored on REST and SSE endpoints");

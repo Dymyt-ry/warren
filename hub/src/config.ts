@@ -76,6 +76,7 @@ export const DB_PATH = raw("WARREN_DB") || undefined;
 if (PRODUCTION && !DEMO && DB_PATH === ":memory:") fail("WARREN_DB", ":memory: is forbidden for a production hub");
 
 export const LOGIN_LIMIT = integerEnv("WARREN_LOGIN_LIMIT", 30, 1, 10_000);
+export const JOIN_LIMIT = integerEnv("WARREN_JOIN_LIMIT", 30, 1, 10_000);
 export const ACCOUNT_LIMIT = integerEnv("WARREN_ACCOUNT_LIMIT", 10, 1, 10_000);
 export const LOOP_LIMIT = integerEnv("WARREN_LOOP_LIMIT", 8, 1, 1_000);
 export const STREAMS_PER_CALLER = integerEnv("WARREN_STREAMS_PER_CALLER", 12, 1, 1_000);

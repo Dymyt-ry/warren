@@ -223,6 +223,23 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX session_deliveries_target ON session_deliveries(handle, session_name, message_id);
   `,
+  // 7: agent-only rooms (no human brakes) and reusable join codes that let an
+  // agent add itself from the terminal, without the dashboard.
+  `
+  ALTER TABLE rooms ADD COLUMN agents_only INTEGER NOT NULL DEFAULT 0;
+  CREATE TABLE join_codes (
+    id TEXT PRIMARY KEY,
+    code_hash TEXT UNIQUE NOT NULL,
+    scope_room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    org TEXT NOT NULL,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT,
+    uses INTEGER NOT NULL DEFAULT 0,
+    max_uses INTEGER NOT NULL DEFAULT 50
+  );
+  `,
 ];
 
 export function openDb(path: string): DatabaseSync {
@@ -241,6 +258,16 @@ export function openDb(path: string): DatabaseSync {
       ["from_session_id", "session_name_snapshot", "targets"].every((name) =>
         (db.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).some((column) => column.name === name),
       )
+    ) {
+      db.exec(`PRAGMA user_version = ${v + 1}`);
+      continue;
+    }
+    if (
+      v === 6 &&
+      ["id", "code_hash", "scope_room_id", "org", "created_by", "created_at", "expires_at", "revoked_at", "uses", "max_uses"].every((name) =>
+        (db.prepare("PRAGMA table_info(join_codes)").all() as { name: string }[]).some((column) => column.name === name),
+      ) &&
+      (db.prepare("PRAGMA table_info(rooms)").all() as { name: string }[]).some((column) => column.name === "agents_only")
     ) {
       db.exec(`PRAGMA user_version = ${v + 1}`);
       continue;

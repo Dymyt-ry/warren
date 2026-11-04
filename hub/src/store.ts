@@ -84,6 +84,8 @@ export interface Claim {
 /** Per-room human-in-the-loop rules, set by a person in the room. */
 export interface RoomPolicy {
   approveContractChanges: boolean; // an agent's contract_change waits for a person of its own org
+  /** Agents work on their own here (and in every room below): no loop brake waiting for a person. */
+  agentsOnly?: boolean;
 }
 
 export interface Room {
@@ -197,7 +199,7 @@ function load() {
       parentId: (r.parent_id as string | null) ?? null,
       name: r.name as string,
       context: r.context as string,
-      policy: { approveContractChanges: !!r.approve_contract_changes },
+      policy: { approveContractChanges: !!r.approve_contract_changes, agentsOnly: !!r.agents_only },
       claims: [],
       createdBy: (r.created_by as string | null) ?? null,
       createdAt: r.created_at as string,
@@ -243,7 +245,7 @@ export function createRoom(name: string, parentId: string | null, context = "", 
     name: name.trim(),
     context: String(context ?? ""),
     claims: [],
-    policy: { approveContractChanges: false },
+    policy: { approveContractChanges: false, agentsOnly: false },
     createdBy,
     createdAt: new Date().toISOString(),
   };
@@ -454,6 +456,12 @@ export function isWithin(roomId: string, ancestorId: string): boolean {
 /** True when `roomId` is the member's scope room or one of its descendants (any room for an unscoped member). */
 export function canSee(m: Member | PublicMember, roomId: string): boolean {
   if (m.disabled || !rooms.has(roomId)) return false;
+  // An agent acts for its person: when the person loses its room (a room
+  // moved out of their access), the agent loses it at once too.
+  if (m.kind === "agent" && m.owner) {
+    const owner = members.get(m.owner);
+    if (!owner || owner.disabled || (owner.scopeRoomId !== null && (!m.scopeRoomId || !isWithin(m.scopeRoomId, owner.scopeRoomId)))) return false;
+  }
   return m.scopeRoomId === null || isWithin(roomId, m.scopeRoomId);
 }
 
@@ -641,6 +649,7 @@ export function disableMember(handle: string, actor: string): Member {
     for (const x of [m, ...agents]) {
       db.prepare("UPDATE members SET disabled = 1, password_hash = NULL, token_hash = NULL WHERE handle = ?").run(x.handle);
       db.prepare("DELETE FROM sessions WHERE handle = ?").run(x.handle);
+      db.prepare("UPDATE join_codes SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL").run(new Date().toISOString(), x.handle);
       db.prepare("DELETE FROM agent_sessions WHERE handle = ?").run(x.handle);
     }
     db.prepare("DELETE FROM claims WHERE by_handle IN (SELECT value FROM json_each(?))").run(JSON.stringify([m, ...agents].map((x) => x.handle)));
@@ -1211,6 +1220,7 @@ export function eraseMember(handle: string, deleteMessages: boolean, actor: stri
     db.prepare("DELETE FROM deliveries WHERE handle IN (SELECT value FROM json_each(?))").run(list);
     db.prepare("DELETE FROM session_deliveries WHERE handle IN (SELECT value FROM json_each(?))").run(list);
     db.prepare("DELETE FROM agent_sessions WHERE handle IN (SELECT value FROM json_each(?))").run(list);
+    db.prepare("DELETE FROM join_codes WHERE created_by IN (SELECT value FROM json_each(?))").run(list);
     db.prepare(
       `DELETE FROM links
         WHERE handle IN (SELECT value FROM json_each(?))
@@ -1375,6 +1385,9 @@ export function endSession(id: string) {
 /** Signs a person out everywhere, except the session `keep` (theirs, after a password change). */
 export function endSessions(handle: string, keep?: string) {
   db.prepare("DELETE FROM sessions WHERE handle = ? AND id_hash != ?").run(handle, keep ? sha256(keep) : "");
+  // Security recovery (password change or reset): join links made from a
+  // possibly stolen session stop working too.
+  db.prepare("UPDATE join_codes SET revoked_at = ? WHERE created_by = ? AND revoked_at IS NULL").run(new Date().toISOString(), handle);
 }
 
 /** Recent password/second-factor authentication for sensitive enrollment. */
@@ -1626,7 +1639,7 @@ export function post(
   }
   if (strict) flags.push("strict");
 
-  const loop = m.kind === "agent" && agentStreak(roomId) >= LOOP_LIMIT;
+  const loop = m.kind === "agent" && !agentsOnly(roomId) && agentStreak(roomId) >= LOOP_LIMIT;
   if (loop) flags.push("agent-loop");
   const needsApproval = room.policy.approveContractChanges && kind === "contract_change" && m.kind === "agent";
   if (needsApproval) flags.push("needs-approval");
@@ -2171,15 +2184,162 @@ export function setPolicy(actor: Member, roomId: string, policy: Partial<RoomPol
   if (actor.kind !== "human") throw new Error("only a person can change a room's policy");
   const room = rooms.get(roomId)!;
   if (typeof policy.approveContractChanges === "boolean") room.policy.approveContractChanges = policy.approveContractChanges;
-  db.prepare("UPDATE rooms SET approve_contract_changes = ? WHERE id = ?").run(room.policy.approveContractChanges ? 1 : 0, roomId);
+  if (typeof policy.agentsOnly === "boolean" && policy.agentsOnly !== !!room.policy.agentsOnly) {
+    // Taking the person out of the loop is a safety downgrade for everyone below:
+    // only whoever made the room, or an admin, decides it.
+    if (!isAdmin(actor) && room.createdBy !== actor.handle) throw new Error("only the room's creator or an admin can make it agent-only");
+    room.policy.agentsOnly = policy.agentsOnly;
+  }
+  db.prepare("UPDATE rooms SET approve_contract_changes = ?, agents_only = ? WHERE id = ?").run(
+    room.policy.approveContractChanges ? 1 : 0,
+    room.policy.agentsOnly ? 1 : 0,
+    roomId,
+  );
   events.emit("room", room);
   audit({
     type: "policy",
     roomId,
     actor: actor.handle,
-    detail: `contract changes from agents ${room.policy.approveContractChanges ? "need approval" : "go out directly"}`,
+    detail:
+      `contract changes from agents ${room.policy.approveContractChanges ? "need approval" : "go out directly"}; ` +
+      `${room.policy.agentsOnly ? "agents work on their own (no loop brake)" : "a person is asked after long agent-only threads"}`,
   });
   return room;
+}
+
+/** True in an agent-only room or anywhere below one. */
+export function agentsOnly(roomId: string): boolean {
+  for (let r = rooms.get(roomId); r; r = r.parentId ? rooms.get(r.parentId) : undefined) if (r.policy.agentsOnly) return true;
+  return false;
+}
+
+// --- join codes: agents add themselves from the terminal ------------------------------
+
+export interface JoinCode {
+  id: string;
+  roomId: string;
+  org: string;
+  createdBy: string | null;
+  createdAt: string;
+  expiresAt: string;
+  uses: number;
+  maxUses: number;
+}
+
+const toJoinCode = (r: Row): JoinCode => ({
+  id: r.id as string,
+  roomId: r.scope_room_id as string,
+  org: r.org as string,
+  createdBy: (r.created_by as string | null) ?? null,
+  createdAt: r.created_at as string,
+  expiresAt: r.expires_at as string,
+  uses: Number(r.uses),
+  maxUses: Number(r.max_uses),
+});
+
+/**
+ * A reusable code that lets any agent join `roomId` (and the rooms below it)
+ * as an agent of the creator's company, owned by the creator. Only people (or
+ * the instance admin token) make codes: an agent can't widen its own room.
+ */
+export function createJoinCode(actor: Member | null, roomId: string, days = 30, org?: string, maxUses = 50): { code: string; joinCode: JoinCode } {
+  if (!rooms.has(roomId)) throw new Error(`no such room ${roomId}`);
+  if (actor && (actor.kind !== "human" || !canSee(actor, roomId))) throw new Error(`no such room ${roomId}`);
+  // Agents that join become agents of this company. A link for another
+  // company's agents carries that company (admins only), so their messages
+  // stay "foreign" and keep the cross-company holds.
+  const requestedOrg = typeof org === "string" && org.trim() ? org.trim() : undefined;
+  if (requestedOrg && actor && !isAdmin(actor) && requestedOrg !== actor.org) throw new Error("only an admin can make a join link for another company");
+  const owner = requestedOrg && actor && requestedOrg !== actor.org ? null : (actor?.handle ?? null);
+  const company = (requestedOrg ?? actor?.org ?? "").trim();
+  const uses = Math.max(1, Math.min(500, Math.floor(Number(maxUses)) || 50));
+  if (!company) throw new Error("org is required for a join code made with the admin token");
+  const lifetime = Math.max(1, Math.min(365, Math.floor(Number(days)) || 30));
+  const now = new Date();
+  const code = newSecret("wj");
+  const joinCode: JoinCode = {
+    id: randomUUID(),
+    roomId,
+    org: company,
+    createdBy: owner,
+    createdAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + lifetime * 86_400_000).toISOString(),
+    uses: 0,
+    maxUses: uses,
+  };
+  db.prepare(
+    "INSERT INTO join_codes (id, code_hash, scope_room_id, org, created_by, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(joinCode.id, sha256(code), roomId, company, owner, joinCode.createdAt, joinCode.expiresAt, uses);
+  audit({
+    type: "member",
+    roomId,
+    actor: actor?.handle ?? "admin-token",
+    detail: `made an agent join link for ${roomId} (${company}, up to ${uses} agents, valid ${lifetime} days)`,
+  });
+  return { code, joinCode };
+}
+
+export function joinCodes(actor: Member | null): JoinCode[] {
+  const rows = db
+    .prepare("SELECT * FROM join_codes WHERE revoked_at IS NULL AND expires_at > ? ORDER BY created_at DESC")
+    .all(new Date().toISOString()) as Row[];
+  return rows.map(toJoinCode).filter((c) => !actor || isAdmin(actor) || c.createdBy === actor.handle);
+}
+
+export function revokeJoinCode(actor: Member | null, id: string): void {
+  const row = db.prepare("SELECT * FROM join_codes WHERE id = ?").get(String(id)) as Row | undefined;
+  if (!row || (actor && !isAdmin(actor) && row.created_by !== actor.handle)) throw new Error("no such join code");
+  db.prepare("UPDATE join_codes SET revoked_at = ? WHERE id = ?").run(new Date().toISOString(), String(id));
+}
+
+/** The live join code for `code`, if any (expired, revoked, or its creator removed → none). */
+export function findJoinCode(code: unknown): JoinCode | undefined {
+  if (typeof code !== "string" || !code.startsWith("wj_")) return undefined;
+  const row = db
+    .prepare("SELECT * FROM join_codes WHERE code_hash = ? AND revoked_at IS NULL AND expires_at > ?")
+    .get(sha256(code), new Date().toISOString()) as Row | undefined;
+  if (!row) return undefined;
+  const joinCode = toJoinCode(row);
+  const revoke = () => {
+    // Losing access ends the link for good: it never comes back to life.
+    db.prepare("UPDATE join_codes SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").run(new Date().toISOString(), joinCode.id);
+    return undefined;
+  };
+  if (!rooms.has(joinCode.roomId)) return revoke();
+  if (joinCode.createdBy) {
+    const creator = members.get(joinCode.createdBy);
+    if (!creator || creator.disabled || !canSee(creator, joinCode.roomId)) return revoke();
+  }
+  return joinCode.uses < joinCode.maxUses ? joinCode : undefined;
+}
+
+/** An agent adds itself with a join code: returns the member (the caller gets the token once). */
+export function joinWithCode(code: unknown, input: { tool: unknown; name?: unknown }, token: string): Member {
+  const joinCode = findJoinCode(code);
+  if (!joinCode) throw new Error("that join code is not valid (expired, revoked, used up or mistyped)");
+  const tool = String(input.tool ?? "");
+  const adapters: Record<string, Adapter> = { claude: "channel", codex: "exec", cursor: "exec", other: "inbox" };
+  if (!(tool in adapters)) throw new Error("tool must be claude, codex, cursor or other");
+  // Handles are always <tool>-<name>, numbered when taken: a link holder can't
+  // claim a person's handle or an exact handle someone expects.
+  const prefix = tool === "other" ? "agent" : tool;
+  const raw = slug(typeof input.name === "string" ? input.name : "").replace(new RegExp(`^${prefix}-?`), "").slice(0, 40);
+  const name = raw ? `${prefix}-${raw}` : prefix;
+  return tx(() => {
+    if (db.prepare("UPDATE join_codes SET uses = uses + 1 WHERE id = ? AND uses < max_uses").run(joinCode.id).changes !== 1)
+      throw new Error("that join code is not valid (expired, revoked, used up or mistyped)");
+    const member = addMember({
+      name,
+      kind: "agent",
+      org: joinCode.org,
+      scopeRoomId: joinCode.roomId,
+      adapter: adapters[tool],
+      token,
+      owner: joinCode.createdBy,
+    });
+    audit({ type: "member", roomId: joinCode.roomId, actor: member.handle, target: member.handle, detail: `@${member.handle} joined with a join code` });
+    return member;
+  });
 }
 
 // --- claims and file locks ---------------------------------------------------------

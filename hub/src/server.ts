@@ -26,6 +26,7 @@ import {
   DEMO,
   LANDING,
   LOGIN_LIMIT,
+  JOIN_LIMIT,
   PORT,
   PRODUCTION,
   PUBLIC_URL,
@@ -352,8 +353,10 @@ app.post("/api/auth/login", signInLimit, (req, res) => {
     if (!useTotp(m.handle, code) && !store.useRecoveryCode(m.handle, code))
       return void res.status(401).json({ error: "that code didn't work; try the next one, or a recovery code", twoFactor: true });
   }
-  setSessionCookie(req, res, m.handle);
-  res.json(self(m));
+  const sessionToken = setSessionCookie(req, res, m.handle);
+  // The terminal (`warren login`) has no cookie jar: it gets the same session
+  // as a bearer credential, once, in the response.
+  res.json(req.body?.client === "cli" ? { ...self(m), session: sessionToken } : self(m));
 });
 
 app.post("/api/auth/logout", (req, res) => {
@@ -863,6 +866,64 @@ function createAgent(req: Request, res: Response) {
 }
 
 app.post("/api/agents", createAgent);
+
+// --- agent-only onboarding: join codes ---------------------------------------
+// A person (`warren init`, or the admin token) makes a reusable code for one
+// room; any agent then adds itself with `warren join <code> <tool>`.
+app.post("/api/join-codes", (req, res) => {
+  const admin = isAdminToken(req);
+  const m = admin ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  try {
+    const { code, joinCode } = store.createJoinCode(m, String(req.body?.room ?? ""), req.body?.days, req.body?.org, req.body?.maxUses);
+    res.status(201).json({ ...joinCode, code, join: `warren join ${PUBLIC_URL}/j/${code} <claude|codex|cursor>` });
+  } catch (e) {
+    httpError(res, 400, e);
+  }
+});
+
+app.get("/api/join-codes", (req, res) => {
+  const admin = isAdminToken(req);
+  const m = admin ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  res.json(store.joinCodes(m));
+});
+
+app.delete("/api/join-codes/:id", (req, res) => {
+  const admin = isAdminToken(req);
+  const m = admin ? null : requirePerson(req, res);
+  if (m === undefined) return;
+  try {
+    store.revokeJoinCode(m, req.params.id);
+    res.json({ ok: true });
+  } catch (e) {
+    httpError(res, 404, e);
+  }
+});
+
+// Every redemption counts, not only failures: one address can't mint agents in bulk.
+const joins = new Map<string, number[]>();
+app.post("/api/join", signInLimit, (req, res) => {
+  const b = req.body ?? {};
+  const ip = clientIp(req);
+  const now = Date.now();
+  const recent = (joins.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
+  if (recent.length >= JOIN_LIMIT) return void res.status(429).json({ error: "too many agents joined from here; try again later" });
+  joins.set(ip, [...recent, now]);
+  if (joins.size > 10_000) for (const [key, times] of joins) if (times.every((t) => now - t >= 15 * 60_000)) joins.delete(key);
+  try {
+    const token = newSecret("wr");
+    const agent = store.joinWithCode(b.code, { tool: b.tool, name: b.name }, token);
+    res.status(201).json({ ...store.publicMember(agent), token, room: agent.scopeRoomId, hub: PUBLIC_URL });
+  } catch (e) {
+    httpError(res, /not valid/.test((e as Error).message) ? 401 : 400, e);
+  }
+});
+
+// A join link opened in a browser explains itself instead of 404ing.
+app.get("/j/:code", (_req, res) =>
+  void res.type("text/plain").send("This is a Warren join link for coding agents. In your project folder run:\n\n  warren join <this link> claude   (or codex, cursor)\n"),
+);
 
 app.get("/api/agents", (req, res) => {
   const all = isAdminToken(req);

@@ -7,8 +7,19 @@ import { parseArgs } from "node:util";
 import { bridge, add, bindCodexHook, bindSession, launch, launchCodexLive, leave, status, wake } from "./cli/commands.js";
 import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
+import { abandonJoin, init, invite, login, logout, parseJoin, redeemJoin } from "./cli/account.js";
+import { readFolderAgents } from "./cli/config.js";
 
 const help = `warren-cli: use Warren from coding agents and shell scripts
+
+Agents only, all from the terminal:
+  warren login [--hub <url>]          sign in once (your hub account)
+  warren init <room> [--parent <id>]  agent-only room + a join link for it
+  warren invite --room <id>           another join link for a room
+  warren join <join-link> <claude|codex|cursor> [--handle <name>] [--profile <p>]
+                                      this folder's agent joins with the link
+  warren claude --name <slot>         then start sessions: every session can
+  warren codex --name <slot>          talk to every other one
 
   warren add <claude|codex|cursor> --hub <url> [--token <agent-token>]
       [--session <id>] [--cli-only] [--profile <local-name>]
@@ -68,6 +79,11 @@ const parsed = (() => {
         "cli-only": { type: "boolean" },
         profile: { type: "string" },
         name: { type: "string" },
+        email: { type: "string" },
+        parent: { type: "string" },
+        room: { type: "string" },
+        days: { type: "string" },
+        handle: { type: "string" },
         headless: { type: "boolean" },
         new: { type: "boolean" },
         exec: { type: "boolean" },
@@ -101,9 +117,8 @@ async function stdinText(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function promptToken(): Promise<string> {
-  if (!process.stdin.isTTY || !process.stdout.isTTY)
-    throw new Error("no agent token provided; pass --token, set WARREN_TOKEN, or run interactively");
+async function ask(label: string, secret = false): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(`${label.replace(/:\s*$/, "")} is needed; run this in a terminal`);
   let muted = false;
   const output = new Writable({
     write(chunk, _encoding, callback) {
@@ -112,15 +127,21 @@ async function promptToken(): Promise<string> {
     },
   });
   const readline = createInterface({ input: process.stdin, output, terminal: true });
-  process.stdout.write("Agent token: ");
-  muted = true;
+  process.stdout.write(label);
+  muted = secret;
   try {
     return (await readline.question("")).trim();
   } finally {
     muted = false;
     readline.close();
-    process.stdout.write("\n");
+    if (secret) process.stdout.write("\n");
   }
+}
+
+async function promptToken(): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY)
+    throw new Error("no agent token provided; pass --token, set WARREN_TOKEN, or run interactively");
+  return ask("Agent token: ", true);
 }
 
 const codexOnly = (["headless", "new", "exec"] as const).filter((flag) => values[flag]);
@@ -144,7 +165,42 @@ try {
       launchCommand: `warren ${argument} --name main --as ${values.profile ?? argument}`,
       promptToken,
     });
-  else if (command === "wake") {
+  else if (command === "login") {
+    noArguments("login");
+    await login(dir, { hub: values.hub, email: values.email, ask });
+  } else if (command === "logout") {
+    noArguments("logout");
+    await logout(dir, values.hub);
+  } else if (command === "init") {
+    await init(dir, arguments_.join(" ").trim(), { hub: values.hub, parent: values.parent, room: values.room, days: values.days });
+  } else if (command === "invite") {
+    noArguments("invite");
+    await invite(dir, { hub: values.hub, room: values.room, days: values.days });
+  } else if (command === "join") {
+    if (arguments_.length !== 2) throw new Error("usage: warren join <join-link> <claude|codex|cursor>");
+    const [link, tool] = arguments_;
+    if (!["claude", "codex", "cursor"].includes(tool)) throw new Error("tool must be claude, codex or cursor");
+    const { hub, code } = parseJoin(link, values.hub);
+    // Check the folder before creating anything on the hub.
+    const configured = readFolderAgents(dir) ?? [];
+    const profile = values.profile ?? tool;
+    if (configured.some((agent) => agent.profile === profile || (!values.profile && agent.tool === tool)))
+      throw new Error(`this folder already has a ${tool} agent; join another one with --profile <name>`);
+    const joined = await redeemJoin(hub, code, tool, values.handle);
+    await add(dir, tool, {
+      hub,
+      token: joined.token,
+      cliOnly: true,
+      profile: values.profile,
+      bridge: bridgeCommand(fileURLToPath(import.meta.url), process.execPath, version),
+      wakeCommand: `warren listen --as ${values.profile ?? tool}`,
+      bindCommand: `warren bind --as ${values.profile ?? tool}`,
+      launchCommand: `warren ${tool === "cursor" ? "listen" : tool} --name main${values.profile ? ` --as ${values.profile}` : ""}`,
+    }).catch(async (error) => {
+      await abandonJoin(hub, joined.token);
+      throw error;
+    });
+  } else if (command === "wake") {
     noArguments("wake");
     await wake(dir, values.session, values.as, values.name);
   } else if (command === "listen") {
