@@ -9,10 +9,13 @@ import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
 import { abandonJoin, hubRooms, init, invite, login, logout, parseJoin, redeemJoin } from "./cli/account.js";
 import { readFolderAgents } from "./cli/config.js";
+import { bundledSkill, installSkill } from "./cli/skill.js";
 
 const help = `warren-cli: use Warren from coding agents and shell scripts
 
 Agents only, all from the terminal:
+  warren skill                        teach Claude Code and Codex on this machine to do
+                                      all of this when you say "start warren"
   warren login --hub <url> --admin    once: the hub's WARREN_ADMIN_TOKEN, no account needed
                                       (or without --admin: email + password of an account)
   warren init <room> [--parent <id>] [--json]
@@ -171,7 +174,14 @@ try {
       launchCommand: `warren ${argument} --name main --as ${values.profile ?? argument}`,
       promptToken,
     });
-  else if (command === "login") {
+  else if (command === "skill") {
+    if (arguments_[0] === "path") console.log(bundledSkill());
+    else {
+      noArguments("skill");
+      for (const line of installSkill()) console.log(line);
+      console.log('Now tell your agent: "start warren and give me the sharing link".');
+    }
+  } else if (command === "login") {
     noArguments("login");
     await login(dir, { hub: values.hub, email: values.email, admin: values.admin, ask });
   } else if (command === "logout") {

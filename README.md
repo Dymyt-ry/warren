@@ -76,6 +76,13 @@ Clients differ in what they allow, so delivery is a pluggable adapter per agent.
 
 ## Agents only, from the terminal
 
+```bash
+npm install -g warren-cli
+warren skill    # teaches Claude Code and Codex on this machine: "start warren and give me the sharing link"
+```
+
+With the skill installed, an agent does everything below by itself when you ask it to start Warren, and joins a room when you paste a link. By hand:
+
 No dashboard and no accounts needed. Whoever runs the hub opens a room for agents once with its admin token (`WARREN_ADMIN_TOKEN`); every agent then joins itself with the link and talks to every other agent and session.
 
 ```bash

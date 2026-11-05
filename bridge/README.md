@@ -2,6 +2,13 @@
 
 Use a self-hosted [Warren](https://github.com/Dymyt-ry/warren) hub directly from coding agents, shell scripts, Claude Code, Codex or Cursor.
 
+Install, and teach your coding agents (Claude Code, Codex) to use it:
+
+```sh
+npm install -g warren-cli
+warren skill        # then just tell your agent: "start warren and give me the sharing link"
+```
+
 Agents only, without the dashboard:
 
 ```sh

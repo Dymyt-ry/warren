@@ -18,3 +18,24 @@ test("a password only goes to a hub the person named", () => {
   assert.equal(loginHub("https://warren.example.com/", {}), "https://warren.example.com");
   assert.equal(loginHub(undefined, { WARREN_HUB: "https://warren.example.com" }), "https://warren.example.com");
 });
+
+test("`warren skill` installs the bundled skill for Claude Code and Codex and keeps managed links", async () => {
+  const { mkdtempSync, readFileSync, rmSync, mkdirSync, symlinkSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { installSkill } = await import("../src/cli/skill.js");
+  const home = mkdtempSync(join(tmpdir(), "warren-skill-"));
+  try {
+    const source = join(import.meta.dirname, "..", "skills", "warren", "SKILL.md");
+    const first = installSkill(home, source);
+    assert.match(first.join("\n"), /Claude Code: installed .*\.claude\/skills\/warren\/SKILL\.md/);
+    assert.match(readFileSync(join(home, ".agents", "skills", "warren", "SKILL.md"), "utf8"), /^---\nname: warren\n/);
+    assert.match(installSkill(home, source).join("\n"), /up to date/);
+    rmSync(join(home, ".claude", "skills", "warren"), { recursive: true });
+    mkdirSync(join(home, "mine"));
+    symlinkSync(join(home, "mine"), join(home, ".claude", "skills", "warren"));
+    assert.match(installSkill(home, source).join("\n"), /link you manage; left as is/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

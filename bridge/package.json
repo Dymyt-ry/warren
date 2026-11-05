@@ -1,11 +1,11 @@
 {
   "name": "warren-cli",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "Use Warren from coding agents, MCP clients and shell scripts",
   "license": "Apache-2.0",
   "type": "module",
   "bin": { "warren": "dist/cli.js", "warren-cli": "dist/cli.js" },
-  "files": ["dist", "NOTICE"],
+  "files": ["dist", "skills", "NOTICE"],
   "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js dist/index.js",
