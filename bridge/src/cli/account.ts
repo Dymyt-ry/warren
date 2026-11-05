@@ -156,6 +156,7 @@ interface JoinCodeView {
   roomId: string;
   code: string;
   expiresAt: string;
+  maxUses?: number;
 }
 
 function printJoin(hub: string, code: JoinCodeView, roomName: string) {
@@ -167,7 +168,7 @@ function printJoin(hub: string, code: JoinCodeView, roomName: string) {
       `  warren claude --name main\n\n` +
       `  warren join ${link} codex\n` +
       `  warren codex --name main\n\n` +
-      `The link works until ${code.expiresAt.slice(0, 10)} and for any number of agents; treat it like a password.`,
+      `The link works until ${code.expiresAt.slice(0, 10)} for up to ${code.maxUses ?? 50} agents; treat it like a password.`,
   );
 }
 
