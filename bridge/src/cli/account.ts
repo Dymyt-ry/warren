@@ -159,8 +159,24 @@ interface JoinCodeView {
   maxUses?: number;
 }
 
-function printJoin(hub: string, code: JoinCodeView, roomName: string) {
+function printJoin(hub: string, code: JoinCodeView, roomName: string, json = false) {
   const link = `${hub}/j/${code.code}`;
+  if (json)
+    return void console.log(
+      JSON.stringify(
+        {
+          hub,
+          room: code.roomId,
+          roomName,
+          link,
+          expiresAt: code.expiresAt,
+          maxUses: code.maxUses ?? 50,
+          join: { claude: `warren join ${link} claude`, codex: `warren join ${link} codex`, cursor: `warren join ${link} cursor` },
+        },
+        null,
+        2,
+      ),
+    );
   console.log(
     `Room "${roomName}" (${code.roomId}) is ready for agents.\n\n` +
       `Each agent joins from its project folder, then starts as many sessions as you like:\n` +
@@ -173,7 +189,7 @@ function printJoin(hub: string, code: JoinCodeView, roomName: string) {
 }
 
 /** `warren init <name>`: an agent-only room (no person needed in the loop) and its join link. */
-export async function init(dir: string, name: string, options: { hub?: string; parent?: string; room?: string; days?: string; org?: string }) {
+export async function init(dir: string, name: string, options: { hub?: string; parent?: string; room?: string; days?: string; org?: string; json?: boolean }) {
   const hub = resolveHub(dir, options.hub);
   const { session, admin } = personSession(hub);
   const org = admin ? (options.org ?? "team") : options.org;
@@ -185,18 +201,26 @@ export async function init(dir: string, name: string, options: { hub?: string; p
   }
   await call(hub, `/api/rooms/${encodeURIComponent(room.id)}/policy`, { method: "PUT", session, body: { agentsOnly: true } });
   const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, org, days: options.days ? Number(options.days) : undefined } });
-  printJoin(hub, code, room.name);
+  printJoin(hub, code, room.name, options.json);
+}
+
+/** Rooms the signed-in person (or the admin token) can see, for picking one to invite into. */
+export async function hubRooms(dir: string, options: { hub?: string }) {
+  const hub = resolveHub(dir, options.hub);
+  const { session } = personSession(hub);
+  const rooms = await call<{ id: string; parentId: string | null; name: string; policy?: { agentsOnly?: boolean }; messages?: unknown[] }[]>(hub, "/api/rooms", { session });
+  console.log(JSON.stringify(rooms.map((r) => ({ id: r.id, parentId: r.parentId, name: r.name, agentsOnly: !!r.policy?.agentsOnly })), null, 2));
 }
 
 /** `warren invite --room <id>`: another join link for a room you can see. */
-export async function invite(dir: string, options: { hub?: string; room?: string; days?: string; org?: string }) {
+export async function invite(dir: string, options: { hub?: string; room?: string; days?: string; org?: string; json?: boolean }) {
   if (!options.room) throw new Error("which room? pass --room <room-id> (see `warren rooms`)");
   const hub = resolveHub(dir, options.hub);
   const { session, admin } = personSession(hub);
   const org = admin ? (options.org ?? "team") : options.org;
   const room = await call<{ id: string; name: string }>(hub, `/api/rooms/${encodeURIComponent(options.room)}`, { session });
   const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, org, days: options.days ? Number(options.days) : undefined } });
-  printJoin(hub, code, room.name);
+  printJoin(hub, code, room.name, options.json);
 }
 
 /** A join link (`https://hub/j/wj_…`) or a bare code with --hub. */

@@ -7,7 +7,7 @@ import { parseArgs } from "node:util";
 import { bridge, add, bindCodexHook, bindSession, launch, launchCodexLive, leave, status, wake } from "./cli/commands.js";
 import { bridgeCommand } from "./cli/config.js";
 import { callHubTool, listHubTools, objectInput, positiveLimit } from "./cli/tools.js";
-import { abandonJoin, init, invite, login, logout, parseJoin, redeemJoin } from "./cli/account.js";
+import { abandonJoin, hubRooms, init, invite, login, logout, parseJoin, redeemJoin } from "./cli/account.js";
 import { readFolderAgents } from "./cli/config.js";
 
 const help = `warren-cli: use Warren from coding agents and shell scripts
@@ -15,8 +15,10 @@ const help = `warren-cli: use Warren from coding agents and shell scripts
 Agents only, all from the terminal:
   warren login --hub <url> --admin    once: the hub's WARREN_ADMIN_TOKEN, no account needed
                                       (or without --admin: email + password of an account)
-  warren init <room> [--parent <id>]  agent-only room + a join link for it
-  warren invite --room <id>           another join link for a room
+  warren init <room> [--parent <id>] [--json]
+                                      agent-only room + a join link for it
+  warren invite --room <id> [--json]  another join link for a room
+  warren hub-rooms                    every room you (or the admin token) can see
   warren join <join-link> <claude|codex|cursor> [--handle <name>] [--profile <p>]
                                       this folder's agent joins with the link
   warren claude --name <slot>         then start sessions: every session can
@@ -82,6 +84,7 @@ const parsed = (() => {
         name: { type: "string" },
         email: { type: "string" },
         admin: { type: "boolean" },
+        json: { type: "boolean" },
         org: { type: "string" },
         parent: { type: "string" },
         room: { type: "string" },
@@ -175,10 +178,13 @@ try {
     noArguments("logout");
     await logout(dir, values.hub);
   } else if (command === "init") {
-    await init(dir, arguments_.join(" ").trim(), { hub: values.hub, parent: values.parent, room: values.room, days: values.days, org: values.org });
+    await init(dir, arguments_.join(" ").trim(), { hub: values.hub, parent: values.parent, room: values.room, days: values.days, org: values.org, json: values.json });
+  } else if (command === "hub-rooms") {
+    noArguments("hub-rooms");
+    await hubRooms(dir, { hub: values.hub });
   } else if (command === "invite") {
     noArguments("invite");
-    await invite(dir, { hub: values.hub, room: values.room, days: values.days, org: values.org });
+    await invite(dir, { hub: values.hub, room: values.room, days: values.days, org: values.org, json: values.json });
   } else if (command === "join") {
     if (arguments_.length !== 2) throw new Error("usage: warren join <join-link> <claude|codex|cursor>");
     const [link, tool] = arguments_;
