@@ -9,7 +9,8 @@ import { dirname, isAbsolute, join } from "node:path";
 import { hubOrigin, readFolderAgents } from "./config.js";
 
 interface Saved {
-  sessions: Record<string, { session: string; handle: string }>;
+  /** Per hub: a person's session (`warren login`) or the instance admin token (`warren login --admin`). */
+  sessions: Record<string, { session: string; handle: string; admin?: boolean }>;
 }
 
 export function credentialsFile(env: NodeJS.ProcessEnv = process.env): string {
@@ -84,10 +85,13 @@ async function call<T>(hub: string, path: string, init: { method?: string; body?
   return body;
 }
 
-function personSession(hub: string): string {
+function personSession(hub: string): { session: string; admin: boolean } {
+  const fromEnv = process.env.WARREN_ADMIN_TOKEN;
+  if (fromEnv) return { session: fromEnv, admin: true };
   const saved = readSaved().sessions[hub];
-  if (!saved) throw new Error(`not signed in to ${hub}; run \`warren login --hub ${hub}\` first`);
-  return saved.session;
+  if (!saved)
+    throw new Error(`not signed in to ${hub}; run \`warren login --hub ${hub} --admin\` (the hub's WARREN_ADMIN_TOKEN) or \`warren login --hub ${hub}\` (an account)`);
+  return { session: saved.session, admin: !!saved.admin };
 }
 
 /**
@@ -104,10 +108,22 @@ export function loginHub(asked?: string, env: NodeJS.ProcessEnv = process.env): 
 
 export async function login(
   _dir: string,
-  options: { hub?: string; email?: string; ask: (label: string, secret?: boolean) => Promise<string> },
+  options: { hub?: string; email?: string; admin?: boolean; ask: (label: string, secret?: boolean) => Promise<string> },
 ) {
   const hub = loginHub(options.hub);
   console.log(`Signing in to ${hub}`);
+  if (options.admin) {
+    // No account at all: the hub's own admin token (WARREN_ADMIN_TOKEN on the server).
+    const token = process.env.WARREN_ADMIN_TOKEN || (await options.ask("Admin token (WARREN_ADMIN_TOKEN of the hub): ", true));
+    await call(hub, "/api/join-codes", { session: token }).catch((error) => {
+      throw new Error(`that admin token does not work on ${hub} (${(error as Error).message})`);
+    });
+    const saved = readSaved();
+    saved.sessions[hub] = { session: token, handle: "admin", admin: true };
+    writeSaved(saved);
+    console.log(`Signed in to ${hub} with its admin token. Next: warren init <room>`);
+    return;
+  }
   const email = options.email ?? (await options.ask("Email: "));
   const password = await options.ask("Password: ", true);
   let result: { handle: string; session: string };
@@ -129,7 +145,7 @@ export async function logout(dir: string, asked?: string) {
   const hub = resolveHub(dir, asked);
   const saved = readSaved();
   const entry = saved.sessions[hub];
-  if (entry) await call(hub, "/api/auth/logout", { method: "POST", session: entry.session }).catch(() => {});
+  if (entry && !entry.admin) await call(hub, "/api/auth/logout", { method: "POST", session: entry.session }).catch(() => {});
   delete saved.sessions[hub];
   writeSaved(saved);
   console.log(`Signed out of ${hub}.`);
@@ -156,9 +172,10 @@ function printJoin(hub: string, code: JoinCodeView, roomName: string) {
 }
 
 /** `warren init <name>`: an agent-only room (no person needed in the loop) and its join link. */
-export async function init(dir: string, name: string, options: { hub?: string; parent?: string; room?: string; days?: string }) {
+export async function init(dir: string, name: string, options: { hub?: string; parent?: string; room?: string; days?: string; org?: string }) {
   const hub = resolveHub(dir, options.hub);
-  const session = personSession(hub);
+  const { session, admin } = personSession(hub);
+  const org = admin ? (options.org ?? "team") : options.org;
   let room: { id: string; name: string };
   if (options.room) room = await call(hub, `/api/rooms/${encodeURIComponent(options.room)}`, { session });
   else {
@@ -166,17 +183,18 @@ export async function init(dir: string, name: string, options: { hub?: string; p
     room = await call(hub, "/api/rooms", { session, body: { name, parentId: options.parent ?? null } });
   }
   await call(hub, `/api/rooms/${encodeURIComponent(room.id)}/policy`, { method: "PUT", session, body: { agentsOnly: true } });
-  const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, days: options.days ? Number(options.days) : undefined } });
+  const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, org, days: options.days ? Number(options.days) : undefined } });
   printJoin(hub, code, room.name);
 }
 
 /** `warren invite --room <id>`: another join link for a room you can see. */
-export async function invite(dir: string, options: { hub?: string; room?: string; days?: string }) {
+export async function invite(dir: string, options: { hub?: string; room?: string; days?: string; org?: string }) {
   if (!options.room) throw new Error("which room? pass --room <room-id> (see `warren rooms`)");
   const hub = resolveHub(dir, options.hub);
-  const session = personSession(hub);
+  const { session, admin } = personSession(hub);
+  const org = admin ? (options.org ?? "team") : options.org;
   const room = await call<{ id: string; name: string }>(hub, `/api/rooms/${encodeURIComponent(options.room)}`, { session });
-  const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, days: options.days ? Number(options.days) : undefined } });
+  const code = await call<JoinCodeView>(hub, "/api/join-codes", { session, body: { room: room.id, org, days: options.days ? Number(options.days) : undefined } });
   printJoin(hub, code, room.name);
 }
 

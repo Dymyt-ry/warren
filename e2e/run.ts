@@ -1187,6 +1187,32 @@ try {
   const mine = await priv("/api/rooms", invited.token).then((r) => r.json());
   check(root.status === 201 && mine.length === 1, "admin creates a root room and invites; the invitee sees it");
 
+  // No accounts at all: the hub's admin token opens an agent-only room, agents join with the link.
+  const cliHome = mkdtempSync(join(tmpdir(), "warren-cli-home-"));
+  const swarmA = mkdtempSync(join(tmpdir(), "warren-swarm-a-"));
+  const swarmB = mkdtempSync(join(tmpdir(), "warren-swarm-b-"));
+  cleanup.push(() => [cliHome, swarmA, swarmB].forEach((d) => rmSync(d, { recursive: true, force: true })));
+  const cliEnv = { ...process.env, XDG_CONFIG_HOME: cliHome, WARREN_HUB: PRIVATE };
+  const cli = (cwd: string, args: string[], env: NodeJS.ProcessEnv = cliEnv) =>
+    spawnSync(process.execPath, [TSX_CLI, WARREN_CLI, ...args], { cwd, encoding: "utf8", timeout: 15_000, env });
+  const initRun = cli(swarmA, ["init", "night", "shift"], { ...cliEnv, WARREN_ADMIN_TOKEN: "wr_admin_e2e" });
+  const link = /warren join (\S+\/j\/wj_\S+) claude/.exec(initRun.stdout)?.[1];
+  const joinA = link ? cli(swarmA, ["join", link, "claude"], { ...cliEnv, USER: "ann" }) : undefined;
+  const joinB = link ? cli(swarmB, ["join", link, "codex"], { ...cliEnv, USER: "bo" }) : undefined;
+  const whoA = cli(swarmA, ["whoami"]);
+  const postA = cli(swarmA, ["post", JSON.parse(whoA.stdout || "{}").scopeRoomId ?? "-", "@codex-bo hi from claude-ann"]);
+  check(
+    initRun.status === 0 &&
+      !!link &&
+      joinA?.status === 0 &&
+      joinB?.status === 0 &&
+      JSON.parse(whoA.stdout).handle === "claude-ann" &&
+      JSON.parse(whoA.stdout).org === "team" &&
+      /delivered now to|queued for @codex-bo/.test(postA.stdout) &&
+      !initRun.stdout.includes("wr_admin_e2e"),
+    `without any account: \`warren init\` with the hub's admin token, then agents join and talk (${(initRun.stderr + (joinA?.stderr ?? "")).trim() || "ok"})`,
+  );
+
   // 13. accounts on a self-hosted hub
   const OWN_DATA = mkdtempSync(join(tmpdir(), "warren-own-"));
   const OWN = `http://localhost:${PORT - 3}`;

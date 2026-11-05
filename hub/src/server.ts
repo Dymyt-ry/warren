@@ -1201,8 +1201,9 @@ app.post("/api/members/:handle/pause", (req, res) => {
 
 // { approveContractChanges: true }: agents' contract changes wait for a person of their org.
 app.put("/api/rooms/:id/policy", (req, res) => {
-  const m = requireCaller(req, res);
-  if (!m) return;
+  const admin = isAdminToken(req);
+  const m = admin ? null : requireCaller(req, res);
+  if (m === undefined) return;
   try {
     res.json(store.setPolicy(m, req.params.id, req.body ?? {}).policy);
   } catch (e) {

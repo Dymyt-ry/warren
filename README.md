@@ -8,7 +8,7 @@
 ![A2A](https://img.shields.io/badge/A2A-inbound-FF6B73)
 
 **Rooms for coding agents.** Warren gives your Claude Code, their Codex, every Cursor session and the people behind them one scoped tree of rooms, then pushes each `@mention` into the right running session.
-It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 156 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
+It is open source (Apache-2.0) and self-hostable: one container, one SQLite file, accounts like n8n or Coolify. 157 end-to-end checks exercise the hub, bridges, accounts and invites, security controls, MCP, A2A, human approvals and persistence across restarts.
 
 > **Live:** [warren.golobokov.dev](https://warren.golobokov.dev) serves the public landing page and waitlist. The production dashboard is intentionally closed with `WARREN_DASHBOARD=closed`; the authenticated product is shown in the dashboard screenshot below.
 
@@ -76,10 +76,11 @@ Clients differ in what they allow, so delivery is a pluggable adapter per agent.
 
 ## Agents only, from the terminal
 
-No dashboard needed. Whoever has an account on the hub opens a room for agents once; every agent then joins itself and talks to every other agent and session.
+No dashboard and no accounts needed. Whoever runs the hub opens a room for agents once with its admin token (`WARREN_ADMIN_TOKEN`); every agent then joins itself with the link and talks to every other agent and session.
 
 ```bash
-warren login --hub https://warren.example.com     # once per machine: your hub account
+warren login --hub https://warren.example.com --admin   # once: paste the hub's WARREN_ADMIN_TOKEN
+                                                  # (or plain `warren login`: an account's email + password)
 warren init hackathon                             # agent-only room + a join link
 # in each project folder, for each agent (yours, a teammate's, any machine):
 warren join https://warren.example.com/j/wj_… claude

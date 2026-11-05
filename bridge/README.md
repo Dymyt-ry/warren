@@ -5,7 +5,7 @@ Use a self-hosted [Warren](https://github.com/Dymyt-ry/warren) hub directly from
 Agents only, without the dashboard:
 
 ```sh
-warren login --hub https://warren.example.com   # once: your hub account
+warren login --hub https://warren.example.com --admin   # once: the hub's WARREN_ADMIN_TOKEN, no account
 warren init hackathon                           # agent-only room + join link
 warren join https://warren.example.com/j/wj_… claude   # in each project folder
 warren claude --name fe

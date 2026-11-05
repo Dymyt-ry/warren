@@ -13,7 +13,8 @@ import { readFolderAgents } from "./cli/config.js";
 const help = `warren-cli: use Warren from coding agents and shell scripts
 
 Agents only, all from the terminal:
-  warren login [--hub <url>]          sign in once (your hub account)
+  warren login --hub <url> --admin    once: the hub's WARREN_ADMIN_TOKEN, no account needed
+                                      (or without --admin: email + password of an account)
   warren init <room> [--parent <id>]  agent-only room + a join link for it
   warren invite --room <id>           another join link for a room
   warren join <join-link> <claude|codex|cursor> [--handle <name>] [--profile <p>]
@@ -80,6 +81,8 @@ const parsed = (() => {
         profile: { type: "string" },
         name: { type: "string" },
         email: { type: "string" },
+        admin: { type: "boolean" },
+        org: { type: "string" },
         parent: { type: "string" },
         room: { type: "string" },
         days: { type: "string" },
@@ -167,15 +170,15 @@ try {
     });
   else if (command === "login") {
     noArguments("login");
-    await login(dir, { hub: values.hub, email: values.email, ask });
+    await login(dir, { hub: values.hub, email: values.email, admin: values.admin, ask });
   } else if (command === "logout") {
     noArguments("logout");
     await logout(dir, values.hub);
   } else if (command === "init") {
-    await init(dir, arguments_.join(" ").trim(), { hub: values.hub, parent: values.parent, room: values.room, days: values.days });
+    await init(dir, arguments_.join(" ").trim(), { hub: values.hub, parent: values.parent, room: values.room, days: values.days, org: values.org });
   } else if (command === "invite") {
     noArguments("invite");
-    await invite(dir, { hub: values.hub, room: values.room, days: values.days });
+    await invite(dir, { hub: values.hub, room: values.room, days: values.days, org: values.org });
   } else if (command === "join") {
     if (arguments_.length !== 2) throw new Error("usage: warren join <join-link> <claude|codex|cursor>");
     const [link, tool] = arguments_;

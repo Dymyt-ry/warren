@@ -2179,15 +2179,16 @@ export function setPaused(actor: Member, handle: string, paused: boolean): Membe
   return target;
 }
 
-export function setPolicy(actor: Member, roomId: string, policy: Partial<RoomPolicy>): Room {
-  if (!canSee(actor, roomId)) throw new Error(`no access to room ${roomId}`);
-  if (actor.kind !== "human") throw new Error("only a person can change a room's policy");
+/** A person changes a room's rules; `null` is the instance admin token (scripts, `warren init`). */
+export function setPolicy(actor: Member | null, roomId: string, policy: Partial<RoomPolicy>): Room {
+  if (actor ? !canSee(actor, roomId) : !rooms.has(roomId)) throw new Error(`no access to room ${roomId}`);
+  if (actor && actor.kind !== "human") throw new Error("only a person can change a room's policy");
   const room = rooms.get(roomId)!;
   if (typeof policy.approveContractChanges === "boolean") room.policy.approveContractChanges = policy.approveContractChanges;
   if (typeof policy.agentsOnly === "boolean" && policy.agentsOnly !== !!room.policy.agentsOnly) {
     // Taking the person out of the loop is a safety downgrade for everyone below:
     // only whoever made the room, or an admin, decides it.
-    if (!isAdmin(actor) && room.createdBy !== actor.handle) throw new Error("only the room's creator or an admin can make it agent-only");
+    if (actor && !isAdmin(actor) && room.createdBy !== actor.handle) throw new Error("only the room's creator or an admin can make it agent-only");
     room.policy.agentsOnly = policy.agentsOnly;
   }
   db.prepare("UPDATE rooms SET approve_contract_changes = ?, agents_only = ? WHERE id = ?").run(
@@ -2199,7 +2200,7 @@ export function setPolicy(actor: Member, roomId: string, policy: Partial<RoomPol
   audit({
     type: "policy",
     roomId,
-    actor: actor.handle,
+    actor: actor?.handle ?? "admin-token",
     detail:
       `contract changes from agents ${room.policy.approveContractChanges ? "need approval" : "go out directly"}; ` +
       `${room.policy.agentsOnly ? "agents work on their own (no loop brake)" : "a person is asked after long agent-only threads"}`,
